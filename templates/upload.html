@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Tải mô hình lên{% endblock %}
+{% block page_title %}Tải mô hình lên{% endblock %}
+{% block page_sub %}Tải các file mô hình lớn vào /data/models{% endblock %}
+{% block content %}
+
+<div class="card" style="max-width:680px"><div class="card-body">
+  <form id="uploadForm">
+    <div class="mb-3">
+      <label class="form-label">Tên mô hình</label>
+      <input class="form-control" name="model_name" id="model_name"
+             placeholder="ví dụ: llama3-8b" required>
+      <div class="form-text">Chỉ gồm chữ, số, '.', '-', '_'.</div>
+    </div>
+    <div class="mb-3">
+      <label class="form-label">File mô hình</label>
+      <input class="form-control" type="file" name="file" id="file" required>
+      <div class="form-text">Hỗ trợ file lớn (.safetensors, .bin, .pt, .gguf, .zip…).</div>
+    </div>
+    <button class="btn btn-primary" type="submit" id="submitBtn">
+      <i class="bi bi-cloud-arrow-up"></i> Tải lên</button>
+  </form>
+
+  <div id="progressArea" class="mt-4 d-none">
+    <label class="form-label" id="phaseLabel">Đang tải lên…</label>
+    <div class="progress mb-2" style="height:22px">
+      <div id="bar" class="progress-bar progress-bar-striped progress-bar-animated"
+           style="width:0%">0%</div>
+    </div>
+    <div class="small text-muted" id="stepText"></div>
+    <pre class="logbox mt-2 d-none" id="logBox"></pre>
+  </div>
+</div></div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+const form = document.getElementById('uploadForm');
+const bar = document.getElementById('bar');
+const area = document.getElementById('progressArea');
+const phase = document.getElementById('phaseLabel');
+const stepText = document.getElementById('stepText');
+const logBox = document.getElementById('logBox');
+const submitBtn = document.getElementById('submitBtn');
+
+function setBar(pct, cls) {
+  bar.style.width = pct + '%';
+  bar.textContent = pct + '%';
+  if (cls) { bar.className = 'progress-bar ' + cls; }
+}
+
+form.addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const fd = new FormData(form);
+  if (!fd.get('file') || !fd.get('file').name) { return; }
+
+  area.classList.remove('d-none');
+  submitBtn.disabled = true;
+  phase.textContent = 'Đang truyền lên máy chủ…';
+  setBar(0, 'progress-bar progress-bar-striped progress-bar-animated bg-info');
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '{{ url_for("upload_submit") }}');
+
+  // Phase 1: browser -> server transfer progress.
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      const pct = Math.round(e.loaded * 100 / e.total);
+      setBar(pct, 'progress-bar progress-bar-striped progress-bar-animated bg-info');
+    }
+  };
+
+  xhr.onload = () => {
+    let res = {};
+    try { res = JSON.parse(xhr.responseText); } catch (_) {}
+    if (xhr.status === 200 && res.ok) {
+      phase.textContent = 'Đang hoàn tất trên máy chủ…';
+      pollServer(res.upload_id);
+    } else {
+      phase.textContent = 'Tải lên thất bại';
+      stepText.textContent = res.error || ('HTTP ' + xhr.status);
+      setBar(100, 'progress-bar bg-danger');
+      submitBtn.disabled = false;
+    }
+  };
+  xhr.onerror = () => {
+    phase.textContent = 'Lỗi kết nối mạng';
+    setBar(100, 'progress-bar bg-danger');
+    submitBtn.disabled = false;
+  };
+  xhr.send(fd);
+});
+
+// Phase 2: poll the server-side finalize progress.
+function pollServer(id) {
+  fetch('{{ url_for("status_upload", upload_id="__ID__") }}'.replace('__ID__', id))
+    .then(r => r.json())
+    .then(s => {
+      setBar(s.progress, 'progress-bar bg-primary');
+      stepText.textContent = s.step || '';
+      if (s.log) { logBox.classList.remove('d-none'); logBox.textContent = s.log; }
+      if (s.status === 'done') {
+        phase.textContent = 'Hoàn tất ✓';
+        setBar(100, 'progress-bar bg-success');
+        submitBtn.disabled = false;
+      } else if (s.status === 'error') {
+        phase.textContent = 'Thất bại';
+        setBar(100, 'progress-bar bg-danger');
+        submitBtn.disabled = false;
+      } else {
+        setTimeout(() => pollServer(id), 700);
+      }
+    })
+    .catch(() => setTimeout(() => pollServer(id), 1200));
+}
+</script>
+{% endblock %}

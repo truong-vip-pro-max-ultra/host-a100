@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}Dự án{% endblock %}
+{% block page_title %}Dự án{% endblock %}
+{% block page_sub %}Dán hoặc tải code lên, rồi chạy trên A100{% endblock %}
+{% block content %}
+
+<div class="row g-3">
+  <div class="col-lg-4">
+    <div class="card mb-3"><div class="card-body">
+      <h5 class="card-title">Dự án mới</h5>
+      <form method="post" action="{{ url_for('project_create') }}" class="d-flex gap-2">
+        <input class="form-control" name="project_name" placeholder="tên dự án" required>
+        <button class="btn btn-primary">Tạo</button>
+      </form>
+    </div></div>
+
+    <div class="card"><div class="card-body">
+      <h5 class="card-title">Danh sách dự án</h5>
+      <ul class="list-group list-group-flush">
+      {% for p in projects %}
+        <li class="list-group-item d-flex justify-content-between align-items-center
+                   {% if selected and selected.id==p.id %}active{% endif %}">
+          <a class="{% if selected and selected.id==p.id %}text-white{% endif %}"
+             href="{{ url_for('projects_page', project=p.id) }}">
+            <strong>{{ p.name }}</strong>
+            <div class="small">{{ p.file_count }} file · {{ p.size|hsize }}</div>
+          </a>
+          <form method="post" action="{{ url_for('project_delete', project_id=p.id) }}"
+                onsubmit="return confirm('Xoá dự án \'{{ p.name }}\'?');">
+            <button class="btn btn-sm btn-outline-danger">×</button>
+          </form>
+        </li>
+      {% else %}
+        <li class="list-group-item text-muted">Chưa có dự án nào.</li>
+      {% endfor %}
+      </ul>
+    </div></div>
+  </div>
+
+  <div class="col-lg-8">
+    {% if selected %}
+    <div class="card mb-3"><div class="card-body">
+      <div class="d-flex justify-content-between align-items-center">
+        <h5 class="card-title mb-0">{{ selected.name }}</h5>
+        <span class="small text-muted">
+          file chính:
+          {% if selected.main_file %}<code>{{ selected.main_file }}</code>{% else %}<em>chưa đặt</em>{% endif %}
+        </span>
+      </div>
+    </div></div>
+
+    <div class="row g-3">
+      <div class="col-md-5">
+        <div class="card mb-3"><div class="card-body">
+          <h6 class="card-title">Tệp tin</h6>
+          <ul class="list-group list-group-flush small">
+          {% for f in files %}
+            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
+              <a href="{{ url_for('projects_page', project=selected.id, file=f.rel) }}">
+                {{ f.rel }}{% if selected.main_file==f.rel %} <span class="badge bg-success">chính</span>{% endif %}
+              </a>
+              <span>
+                <span class="text-muted">{{ f.size|hsize }}</span>
+                <form class="d-inline" method="post"
+                      action="{{ url_for('project_file_delete', project_id=selected.id) }}"
+                      onsubmit="return confirm('Xoá {{ f.rel }}?');">
+                  <input type="hidden" name="relpath" value="{{ f.rel }}">
+                  <button class="btn btn-sm btn-link text-danger p-0">xoá</button>
+                </form>
+              </span>
+            </li>
+          {% else %}
+            <li class="list-group-item text-muted px-0">Chưa có tệp nào.</li>
+          {% endfor %}
+          </ul>
+        </div></div>
+
+        <div class="card mb-3"><div class="card-body">
+          <h6 class="card-title">Tải file / zip lên</h6>
+          <form method="post" enctype="multipart/form-data"
+                action="{{ url_for('project_upload', project_id=selected.id) }}">
+            <input class="form-control mb-2" type="file" name="files" multiple required>
+            <button class="btn btn-outline-primary btn-sm">Tải lên</button>
+            <div class="form-text">.py/.txt/.json/.yaml… hoặc file .zip (tự giải nén, an toàn zip-slip).</div>
+          </form>
+        </div></div>
+
+        <div class="card"><div class="card-body">
+          <h6 class="card-title">Đặt file chính</h6>
+          <form method="post" action="{{ url_for('project_set_main', project_id=selected.id) }}"
+                class="d-flex gap-2">
+            <select class="form-select form-select-sm" name="main_file" required>
+              <option value="">— chọn file .py —</option>
+              {% for f in files if f.rel.endswith('.py') %}
+                <option value="{{ f.rel }}" {% if selected.main_file==f.rel %}selected{% endif %}>{{ f.rel }}</option>
+              {% endfor %}
+            </select>
+            <button class="btn btn-outline-success btn-sm">Đặt</button>
+          </form>
+        </div></div>
+      </div>
+
+      <div class="col-md-7">
+        <div class="card"><div class="card-body">
+          <h6 class="card-title">Dán / sửa một file</h6>
+          <form method="post" action="{{ url_for('project_save_file', project_id=selected.id) }}">
+            <input class="form-control mb-2" name="relpath"
+                   value="{{ open_file or '' }}"
+                   placeholder="tên file, vd: main.py hoặc src/model.py" required>
+            <textarea class="form-control font-monospace mb-2" name="content"
+                      rows="16" style="font-size:.82rem"
+                      placeholder="# dán code của bạn vào đây">{{ open_content or '' }}</textarea>
+            <div class="form-check mb-2">
+              <input class="form-check-input" type="checkbox" name="set_main" id="setmain">
+              <label class="form-check-label small" for="setmain">Đặt làm file chính</label>
+            </div>
+            <button class="btn btn-primary btn-sm">Lưu file</button>
+          </form>
+        </div></div>
+      </div>
+    </div>
+    {% else %}
+      <div class="alert alert-info">Chọn hoặc tạo một dự án để thêm file code.</div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

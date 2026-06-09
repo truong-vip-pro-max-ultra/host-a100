@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+{% block title %}Tác vụ{% endblock %}
+{% block page_title %}Chạy tác vụ{% endblock %}
+{% block page_sub %}Thực thi suy luận trên GPU A100{% endblock %}
+{% block content %}
+
+<div class="row g-3">
+  <div class="col-lg-5">
+    <div class="card"><div class="card-body">
+      <h5 class="card-title">Tạo tác vụ</h5>
+      <form method="post" action="{{ url_for('job_submit') }}">
+        <div class="mb-2">
+          <label class="form-label">Chế độ chạy</label>
+          <div>
+            <div class="form-check form-check-inline">
+              <input class="form-check-input" type="radio" name="run_mode"
+                     id="mode_project" value="project" checked>
+              <label class="form-check-label" for="mode_project">Chạy code dự án của tôi</label>
+            </div>
+            <div class="form-check form-check-inline">
+              <input class="form-check-input" type="radio" name="run_mode"
+                     id="mode_runner" value="runner">
+              <label class="form-check-label" for="mode_runner">Runner mặc định</label>
+            </div>
+          </div>
+        </div>
+
+        <div class="mb-2">
+          <label class="form-label">Tên tác vụ</label>
+          <input class="form-control" name="job_name" placeholder="ten-tac-vu">
+        </div>
+
+        <!-- Trường cho chế độ dự án -->
+        <div id="projectFields">
+          <div class="mb-2">
+            <label class="form-label">Dự án</label>
+            <select class="form-select" name="project_id" id="projectSelect">
+              <option value="">— chọn dự án —</option>
+              {% for p in projects %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+            </select>
+          </div>
+          <div class="mb-2">
+            <label class="form-label">File chính cần chạy</label>
+            <select class="form-select" name="main_file" id="mainFileSelect">
+              <option value="">— chọn dự án trước —</option>
+            </select>
+            <div class="form-text">Chạy <code>python &lt;file chính&gt;</code> trong môi trường đã chọn trên A100.</div>
+          </div>
+        </div>
+
+        <div class="mb-2">
+          <label class="form-label">Môi trường</label>
+          <select class="form-select" name="env_id" required>
+            <option value="">— chọn môi trường —</option>
+            {% for e in envs %}<option value="{{ e.id }}">{{ e.name }}</option>{% endfor %}
+          </select>
+        </div>
+
+        <div class="mb-2">
+          <label class="form-label">Mô hình <span class="text-muted" id="modelHint">(tuỳ chọn)</span></label>
+          <select class="form-select" name="model_id">
+            <option value="">— không —</option>
+            {% for m in models %}<option value="{{ m.id }}">{{ m.name }}</option>{% endfor %}
+          </select>
+          <div class="form-text">Cung cấp cho code của bạn qua biến <code>$MODEL_PATH</code>.</div>
+        </div>
+
+        <div class="mb-2">
+          <label class="form-label">Tham số (JSON, tuỳ chọn)</label>
+          <textarea class="form-control" name="params" rows="2"
+                    placeholder='{"steps": 5}'></textarea>
+          <div class="form-text">Lưu vào <code>$PARAMS_FILE</code>. Ghi kết quả vào <code>$OUTPUT_DIR</code>.</div>
+        </div>
+
+        <button class="btn btn-primary" {% if not envs %}disabled{% endif %}>
+          <i class="bi bi-play-fill"></i> Chạy trên A100</button>
+        {% if not envs %}<div class="form-text text-danger">Hãy tạo một môi trường trước.</div>{% endif %}
+      </form>
+    </div></div>
+  </div>
+
+  <div class="col-lg-7">
+    <div class="card"><div class="card-body">
+      <h5 class="card-title">Tác vụ</h5>
+      <table class="table table-sm align-middle mb-0">
+        <thead><tr><th>#</th><th>Tên</th><th>Chế độ</th><th>Môi trường</th><th>Trạng thái</th><th>%</th><th></th></tr></thead>
+        <tbody>
+        {% for j in jobs %}
+          <tr>
+            <td>{{ j.id }}</td>
+            <td><a href="#" onclick="watch({{ j.id }});return false;">{{ j.name }}</a></td>
+            <td><span class="small">{{ j.run_mode }}{% if j.project_name %}: {{ j.project_name }}{% endif %}</span></td>
+            <td>{{ j.env_name or '-' }}</td>
+            <td><span class="pill pill-{{ j.status }}" id="st-{{ j.id }}">{{ j.status|vstatus }}</span></td>
+            <td id="pc-{{ j.id }}">{{ j.progress }}</td>
+            <td class="text-end">
+              <form class="d-inline" method="post" action="{{ url_for('job_delete', job_id=j.id) }}"
+                    onsubmit="return confirm('Xoá tác vụ #{{ j.id }}?');">
+                <button class="btn btn-sm btn-outline-danger">×</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="7" class="text-muted">Chưa có tác vụ nào.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div></div>
+
+    <div class="card mt-3 d-none" id="watchCard"><div class="card-body">
+      <div class="d-flex justify-content-between align-items-center">
+        <h5 class="card-title mb-0">Tác vụ <span id="watchId"></span></h5>
+        <a class="btn btn-sm btn-outline-success d-none" id="zipBtn" href="#">Tải tất cả (zip)</a>
+      </div>
+      <div class="progress my-2" style="height:22px">
+        <div id="wbar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%">0%</div>
+      </div>
+      <pre class="logbox" id="wlog"></pre>
+      <h6 class="mt-2">File kết quả</h6>
+      <ul class="list-group list-group-flush small" id="outList">
+        <li class="list-group-item text-muted px-0">Chưa có file kết quả.</li>
+      </ul>
+    </div></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ---- run-mode toggle + main-file loading -------------------------------
+const projectFields = document.getElementById('projectFields');
+const projectSelect = document.getElementById('projectSelect');
+const mainFileSelect = document.getElementById('mainFileSelect');
+const modelHint = document.getElementById('modelHint');
+
+const STATUS_VI = {queued:'đang chờ', running:'đang chạy', done:'hoàn tất', error:'lỗi', unknown:'không rõ'};
+
+function applyMode() {
+  const mode = document.querySelector('input[name=run_mode]:checked').value;
+  if (mode === 'project') {
+    projectFields.classList.remove('d-none');
+    projectSelect.required = true;
+    modelHint.textContent = '(tuỳ chọn)';
+  } else {
+    projectFields.classList.add('d-none');
+    projectSelect.required = false;
+    modelHint.textContent = '(bắt buộc cho runner)';
+  }
+}
+document.querySelectorAll('input[name=run_mode]').forEach(r => r.addEventListener('change', applyMode));
+
+projectSelect.addEventListener('change', () => {
+  const id = projectSelect.value;
+  mainFileSelect.innerHTML = '<option value="">— đang tải… —</option>';
+  if (!id) { mainFileSelect.innerHTML = '<option value="">— chọn dự án trước —</option>'; return; }
+  fetch('{{ url_for("project_files_json", project_id=0) }}'.replace('/0/', '/' + id + '/'))
+    .then(r => r.json())
+    .then(d => {
+      if (!d.files.length) { mainFileSelect.innerHTML = '<option value="">(không có file .py)</option>'; return; }
+      mainFileSelect.innerHTML = d.files.map(f =>
+        `<option value="${f}" ${f===d.main_file?'selected':''}>${f}</option>`).join('');
+    });
+});
+applyMode();
+
+// ---- job watching + outputs --------------------------------------------
+let watching = null;
+function watch(id) {
+  watching = id;
+  document.getElementById('watchCard').classList.remove('d-none');
+  document.getElementById('watchId').textContent = '#' + id;
+  const zip = document.getElementById('zipBtn');
+  zip.href = '{{ url_for("job_outputs_zip", job_id=0) }}'.replace('/0/', '/' + id + '/');
+  pollJob();
+}
+function loadOutputs(id) {
+  fetch('{{ url_for("job_outputs", job_id=0) }}'.replace('/0/', '/' + id + '/'))
+    .then(r => r.json())
+    .then(d => {
+      const ul = document.getElementById('outList');
+      const zip = document.getElementById('zipBtn');
+      if (!d.files.length) { ul.innerHTML = '<li class="list-group-item text-muted px-0">Chưa có file kết quả.</li>'; zip.classList.add('d-none'); return; }
+      zip.classList.remove('d-none');
+      ul.innerHTML = d.files.map(f => {
+        const url = '{{ url_for("job_output_download", job_id=0) }}'.replace('/0/', '/' + id + '/') + '?path=' + encodeURIComponent(f.rel);
+        return `<li class="list-group-item d-flex justify-content-between px-0">
+                  <a href="${url}">${f.rel}</a><span class="text-muted">${f.size_h}</span></li>`;
+      }).join('');
+    });
+}
+function pollJob() {
+  if (watching === null) return;
+  const id = watching;
+  fetch('{{ url_for("status_job", job_id=0) }}'.replace('/0', '/' + id))
+    .then(r => r.json())
+    .then(s => {
+      const bar = document.getElementById('wbar');
+      bar.style.width = s.progress + '%'; bar.textContent = s.progress + '%';
+      const log = document.getElementById('wlog');
+      log.textContent = s.log || ''; log.scrollTop = log.scrollHeight;
+      const st = document.getElementById('st-' + id), pc = document.getElementById('pc-' + id);
+      if (st) st.textContent = STATUS_VI[s.status] || s.status;
+      if (pc) pc.textContent = s.progress;
+      if (s.status === 'done') { bar.className = 'progress-bar bg-success'; loadOutputs(id); }
+      else if (s.status === 'error') { bar.className = 'progress-bar bg-danger'; loadOutputs(id); }
+      else if (watching === id) { loadOutputs(id); setTimeout(pollJob, 1000); }
+    })
+    .catch(() => { if (watching === id) setTimeout(pollJob, 1500); });
+}
+{% for j in jobs %}{% if j.status in ['running','queued'] %}watch({{ j.id }});{% endif %}{% endfor %}
+</script>
+{% endblock %}

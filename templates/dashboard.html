@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}Bảng điều khiển{% endblock %}
+{% block page_title %}Bảng điều khiển{% endblock %}
+{% block page_sub %}Tổng quan trực tiếp về máy chủ A100 của bạn{% endblock %}
+{% block topbar_actions %}
+  <a class="btn btn-primary" href="{{ url_for('upload_page') }}">
+    <i class="bi bi-cloud-arrow-up"></i> Tải mô hình lên</a>
+{% endblock %}
+{% block content %}
+
+<div class="row g-3 mb-3">
+  <div class="col-6 col-xl-3">
+    <div class="card stat"><div class="card-body d-flex align-items-center gap-3">
+      <div class="ic g-indigo"><i class="bi bi-box-seam-fill"></i></div>
+      <div><div class="val">{{ models|length }}</div><div class="lbl">Mô hình</div></div>
+    </div></div>
+  </div>
+  <div class="col-6 col-xl-3">
+    <div class="card stat"><div class="card-body d-flex align-items-center gap-3">
+      <div class="ic g-emerald"><i class="bi bi-stack"></i></div>
+      <div><div class="val">{{ envs|length }}</div><div class="lbl">Môi trường</div></div>
+    </div></div>
+  </div>
+  <div class="col-6 col-xl-3">
+    <div class="card stat"><div class="card-body d-flex align-items-center gap-3">
+      <div class="ic g-sky"><i class="bi bi-cpu-fill"></i></div>
+      <div><div class="val">{{ active|length }}</div><div class="lbl">Tác vụ đang chạy</div></div>
+    </div></div>
+  </div>
+  <div class="col-6 col-xl-3">
+    <div class="card stat"><div class="card-body d-flex align-items-center gap-3">
+      <div class="ic g-amber"><i class="bi bi-hdd-fill"></i></div>
+      <div><div class="val">{{ disk.pct }}%</div>
+        <div class="lbl">{{ disk.used|hsize }} / {{ disk.total|hsize }}</div></div>
+    </div></div>
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-lg-7">
+    <div class="card h-100"><div class="card-body">
+      <h5 class="card-title mb-3"><i class="bi bi-gpu-card text-primary"></i> Trạng thái GPU</h5>
+      {% if gpus %}
+        {% for g in gpus %}
+        <div class="mb-3">
+          <div class="d-flex justify-content-between mb-1">
+            <strong>{{ g.name }}</strong>
+            <span class="text-muted small">{{ g.util_pct|int }}% sử dụng · {{ g.temp_c|int }}°C</span>
+          </div>
+          {% set mp = (g.mem_used_mb*100/g.mem_total_mb)|int if g.mem_total_mb else 0 %}
+          <div class="progress" style="height:20px;border-radius:10px;background:#eef2f7">
+            <div class="progress-bar" style="width: {{ mp }}%;background:linear-gradient(90deg,#6366f1,#8b5cf6)">
+              {{ g.mem_used_mb|int }} / {{ g.mem_total_mb|int }} MB
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="text-center text-muted py-4">
+          <i class="bi bi-gpu-card" style="font-size:2rem;opacity:.4"></i>
+          <p class="mb-0 mt-2">Không phát hiện GPU NVIDIA trên máy chủ này.</p>
+        </div>
+      {% endif %}
+      <details class="mt-2">
+        <summary class="text-muted small" style="cursor:pointer">Kết quả nvidia-smi gốc</summary>
+        <pre class="logbox mt-2">{{ nvidia_smi }}</pre>
+      </details>
+    </div></div>
+  </div>
+
+  <div class="col-lg-5">
+    <div class="card h-100"><div class="card-body">
+      <h5 class="card-title mb-3"><i class="bi bi-activity text-primary"></i> Tác vụ đang chạy</h5>
+      {% if active %}
+        <div class="vstack gap-2">
+        {% for kind, tid, e in active %}
+          <div class="d-flex justify-content-between align-items-center p-2"
+               style="background:#f8fafc;border-radius:12px">
+            <span><span class="badge bg-secondary">{{ kind }}</span>
+              <span class="small">{{ tid[:8] }}</span>
+              <div class="small text-muted">{{ e.step }}</div></span>
+            <span class="badge" style="background:linear-gradient(135deg,#6366f1,#8b5cf6)">{{ e.progress }}%</span>
+          </div>
+        {% endfor %}
+        </div>
+      {% else %}
+        <div class="text-center text-muted py-4">
+          <i class="bi bi-moon-stars" style="font-size:1.8rem;opacity:.4"></i>
+          <p class="mb-0 mt-2">Không có tác vụ nào đang chạy.</p>
+        </div>
+      {% endif %}
+    </div></div>
+  </div>
+</div>
+
+<div class="card mt-3"><div class="card-body">
+  <h5 class="card-title mb-3"><i class="bi bi-clock-history text-primary"></i> Tác vụ gần đây</h5>
+  <table class="table table-sm mb-0">
+    <thead><tr><th>#</th><th>Tên</th><th>Mô hình</th><th>Môi trường</th><th>Trạng thái</th><th>Tiến độ</th></tr></thead>
+    <tbody>
+    {% for j in jobs[:8] %}
+      <tr>
+        <td class="text-muted">{{ j.id }}</td><td><strong>{{ j.name }}</strong></td>
+        <td>{{ j.model_name or '—' }}</td><td>{{ j.env_name or '—' }}</td>
+        <td><span class="pill pill-{{ j.status }}">{{ j.status|vstatus }}</span></td>
+        <td style="min-width:120px">
+          <div class="progress" style="height:8px;border-radius:6px">
+            <div class="progress-bar bg-primary" style="width:{{ j.progress }}%"></div>
+          </div>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6" class="text-muted text-center py-3">Chưa có tác vụ nào.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div></div>
+{% endblock %}
+
+{% block scripts %}
+<script>setTimeout(() => window.location.reload(), 10000);</script>
+{% endblock %}

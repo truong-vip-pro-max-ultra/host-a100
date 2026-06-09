@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Môi trường{% endblock %}
+{% block page_title %}Môi trường{% endblock %}
+{% block page_sub %}Tạo venv và cài đặt thư viện{% endblock %}
+{% block content %}
+
+<div class="row g-3">
+  <div class="col-lg-5">
+    <div class="card mb-3"><div class="card-body">
+      <h5 class="card-title">Tạo môi trường</h5>
+      <form method="post" action="{{ url_for('env_create') }}" class="d-flex gap-2">
+        <input class="form-control" name="env_name" placeholder="tên môi trường (vd: torch-cu121)" required>
+        <button class="btn btn-primary">Tạo</button>
+      </form>
+      <div class="form-text">Một venv mới sẽ được tạo tại /data/envs/&lt;tên&gt;/.</div>
+    </div></div>
+
+    <div class="card"><div class="card-body">
+      <h5 class="card-title">Hiện có</h5>
+      <ul class="list-group list-group-flush">
+      {% for e in envs %}
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+          <div>
+            <a href="{{ url_for('envs_page', env=e.id) }}"><strong>{{ e.name }}</strong></a>
+            {% if not e.exists %}<span class="badge bg-warning text-dark">thiếu</span>{% endif %}
+            <div class="small text-muted">{{ e.created_at|dt }}</div>
+          </div>
+          <form method="post" action="{{ url_for('env_delete', env_id=e.id) }}"
+                onsubmit="return confirm('Xoá môi trường \'{{ e.name }}\'?');">
+            <button class="btn btn-sm btn-outline-danger">Xoá</button>
+          </form>
+        </li>
+      {% else %}
+        <li class="list-group-item text-muted">Chưa có môi trường nào.</li>
+      {% endfor %}
+      </ul>
+    </div></div>
+  </div>
+
+  <div class="col-lg-7">
+    {% if selected_id %}
+    <div class="card mb-3"><div class="card-body">
+      <h5 class="card-title">Cài đặt thư viện</h5>
+      <form method="post" action="{{ url_for('env_install', env_id=selected_id) }}">
+        <div class="input-group">
+          <input class="form-control" name="packages"
+                 placeholder="vd: torch==2.3.0 numpy transformers" required>
+          <button class="btn btn-primary">Cài đặt</button>
+        </div>
+        <div class="form-text">Cách nhau bằng dấu cách/phẩy. Chỉ chấp nhận tên gói pip hợp lệ.</div>
+      </form>
+      <hr>
+      <form method="post" enctype="multipart/form-data"
+            action="{{ url_for('env_install_requirements', env_id=selected_id) }}">
+        <label class="form-label">…hoặc cài từ file requirements.txt</label>
+        <div class="input-group">
+          <input class="form-control" type="file" name="requirements" accept=".txt" required>
+          <button class="btn btn-outline-primary">Tải lên &amp; cài</button>
+        </div>
+        <div class="form-text">Chạy <code>pip install -r requirements.txt</code> trong môi trường này.</div>
+      </form>
+    </div></div>
+
+    <div class="card"><div class="card-body">
+      <h5 class="card-title">Thư viện đã cài (pip freeze)</h5>
+      <pre class="logbox">{% for p in packages %}{{ p }}
+{% endfor %}</pre>
+    </div></div>
+    {% else %}
+      <div class="alert alert-info">Chọn một môi trường ở bên trái để xem thư viện và cài đặt phụ thuộc.</div>
+    {% endif %}
+  </div>
+</div>
+
+{% if request.args.get('task') %}
+<div class="card mt-3"><div class="card-body">
+  <h5 class="card-title">Tiến độ tác vụ</h5>
+  <div class="progress mb-2" style="height:22px">
+    <div id="bar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%">0%</div>
+  </div>
+  <div class="small text-muted" id="stepText"></div>
+  <pre class="logbox mt-2" id="logBox"></pre>
+</div></div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if request.args.get('task') %}
+<script>
+const taskId = "{{ request.args.get('task') }}";
+const bar = document.getElementById('bar');
+const stepText = document.getElementById('stepText');
+const logBox = document.getElementById('logBox');
+
+function poll() {
+  fetch('{{ url_for("status_env", task_id="__ID__") }}'.replace('__ID__', taskId))
+    .then(r => r.json())
+    .then(s => {
+      bar.style.width = s.progress + '%';
+      bar.textContent = s.progress + '%';
+      stepText.textContent = s.step || '';
+      logBox.textContent = s.log || '';
+      logBox.scrollTop = logBox.scrollHeight;
+      if (s.status === 'done') {
+        bar.className = 'progress-bar bg-success'; setTimeout(()=>location.reload(), 800);
+      } else if (s.status === 'error') {
+        bar.className = 'progress-bar bg-danger';
+      } else {
+        setTimeout(poll, 800);
+      }
+    })
+    .catch(() => setTimeout(poll, 1500));
+}
+poll();
+</script>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}host-a100{% endblock %} · ML Platform</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root{
+      --bg:#f1f5f9; --card:#ffffff; --ink:#0f172a; --muted:#64748b;
+      --line:#e2e8f0; --accent:#6366f1; --accent2:#8b5cf6;
+      --sidebar:#0b1220; --sidebar2:#111a2e; --sidebar-ink:#cbd5e1;
+      --radius:18px; --shadow:0 6px 24px rgba(15,23,42,.06);
+    }
+    *{ -webkit-font-smoothing:antialiased; }
+    body{ font-family:'Inter',system-ui,sans-serif; background:var(--bg);
+          color:var(--ink); margin:0; }
+    a{ text-decoration:none; }
+
+    /* layout */
+    .app{ display:flex; min-height:100vh; }
+    .sidebar{ width:248px; flex-shrink:0; background:
+      linear-gradient(180deg,var(--sidebar),var(--sidebar2));
+      color:var(--sidebar-ink); position:fixed; top:0; bottom:0; left:0;
+      padding:22px 16px; transition:transform .25s ease; z-index:1040; }
+    .brand{ display:flex; align-items:center; gap:10px; font-weight:800;
+      color:#fff; font-size:1.18rem; padding:6px 8px 20px; letter-spacing:-.02em;}
+    .brand .logo{ width:36px; height:36px; border-radius:11px; display:grid;
+      place-items:center; background:linear-gradient(135deg,var(--accent),var(--accent2));
+      box-shadow:0 6px 16px rgba(99,102,241,.45); color:#fff; font-size:1.1rem;}
+    .nav-section{ font-size:.68rem; text-transform:uppercase; letter-spacing:.12em;
+      color:#5b6b86; padding:14px 12px 6px; font-weight:700; }
+    .side-link{ display:flex; align-items:center; gap:12px; color:var(--sidebar-ink);
+      padding:11px 12px; border-radius:12px; font-weight:500; font-size:.92rem;
+      margin-bottom:2px; transition:all .15s; }
+    .side-link i{ font-size:1.05rem; width:20px; text-align:center; }
+    .side-link:hover{ background:rgba(148,163,184,.10); color:#fff; }
+    .side-link.active{ background:linear-gradient(135deg,var(--accent),var(--accent2));
+      color:#fff; box-shadow:0 6px 16px rgba(99,102,241,.35); }
+    .content{ margin-left:248px; flex:1; padding:26px 30px 60px; min-width:0; }
+    .topbar{ display:flex; align-items:center; justify-content:space-between;
+      margin-bottom:22px; gap:12px; }
+    .page-title{ font-weight:800; font-size:1.5rem; letter-spacing:-.02em; margin:0;}
+    .page-sub{ color:var(--muted); font-size:.9rem; margin-top:2px; }
+    .hamburger{ display:none; }
+
+    /* cards */
+    .card{ background:var(--card); border:1px solid var(--line);
+      border-radius:var(--radius); box-shadow:var(--shadow); }
+    .card-body{ padding:20px; }
+    .card-title{ font-weight:700; font-size:1.02rem; letter-spacing:-.01em; }
+
+    .stat{ position:relative; overflow:hidden; }
+    .stat .ic{ width:46px; height:46px; border-radius:13px; display:grid;
+      place-items:center; font-size:1.3rem; color:#fff; }
+    .stat .val{ font-size:1.9rem; font-weight:800; line-height:1; letter-spacing:-.03em;}
+    .stat .lbl{ color:var(--muted); font-size:.82rem; font-weight:500; }
+    .g-indigo{ background:linear-gradient(135deg,#6366f1,#8b5cf6); }
+    .g-emerald{ background:linear-gradient(135deg,#10b981,#059669); }
+    .g-amber{ background:linear-gradient(135deg,#f59e0b,#f97316); }
+    .g-sky{ background:linear-gradient(135deg,#0ea5e9,#3b82f6); }
+
+    /* controls */
+    .btn{ border-radius:11px; font-weight:600; font-size:.9rem; }
+    .btn-primary{ background:linear-gradient(135deg,var(--accent),var(--accent2));
+      border:none; box-shadow:0 4px 12px rgba(99,102,241,.30); }
+    .btn-primary:hover{ filter:brightness(1.05); }
+    .btn-sm{ border-radius:9px; }
+    .form-control,.form-select{ border-radius:11px; border-color:var(--line);
+      font-size:.92rem; }
+    .form-control:focus,.form-select:focus{ border-color:var(--accent);
+      box-shadow:0 0 0 .2rem rgba(99,102,241,.15); }
+    .form-label{ font-weight:600; font-size:.85rem; color:#334155; margin-bottom:.3rem;}
+    .form-text{ font-size:.78rem; }
+
+    .badge{ font-weight:600; border-radius:8px; padding:.4em .65em; }
+    .table{ --bs-table-bg:transparent; }
+    .table thead th{ font-size:.74rem; text-transform:uppercase; letter-spacing:.05em;
+      color:var(--muted); font-weight:700; border-bottom:1px solid var(--line); }
+    .table td{ vertical-align:middle; }
+    code{ color:#7c3aed; background:#f5f3ff; padding:.08em .4em; border-radius:6px;
+      font-size:.82em; }
+
+    pre.logbox{ background:#0b1220; color:#9fb3c8; padding:16px; border-radius:14px;
+      max-height:360px; overflow:auto; font-size:.78rem; line-height:1.5;
+      border:1px solid #1e293b; }
+
+    .alert{ border:none; border-radius:14px; font-size:.9rem; box-shadow:var(--shadow);}
+    .list-group-item{ border-color:var(--line); }
+
+    /* status pills */
+    .pill{ font-size:.72rem; font-weight:700; padding:.32em .7em; border-radius:999px;}
+    .pill-done{ background:#dcfce7; color:#15803d; }
+    .pill-running,.pill-queued{ background:#dbeafe; color:#1d4ed8; }
+    .pill-error{ background:#fee2e2; color:#b91c1c; }
+    .pill-unknown{ background:#f1f5f9; color:#64748b; }
+
+    @media (max-width: 991px){
+      .sidebar{ transform:translateX(-100%); }
+      body.nav-open .sidebar{ transform:translateX(0); }
+      .content{ margin-left:0; padding:18px; }
+      .hamburger{ display:inline-flex; }
+      .scrim{ display:none; position:fixed; inset:0; background:rgba(2,6,23,.5);
+        z-index:1035; }
+      body.nav-open .scrim{ display:block; }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="logo"><i class="bi bi-lightning-charge-fill"></i></span>
+      host-a100
+    </div>
+    {% set nav = [
+      ('dashboard','/', 'bi-grid-1x2-fill','Bảng điều khiển'),
+      ('upload_page','/upload','bi-cloud-arrow-up-fill','Tải mô hình lên'),
+      ('models_page','/models','bi-box-seam-fill','Mô hình'),
+      ('envs_page','/envs','bi-stack','Môi trường'),
+      ('projects_page','/projects','bi-code-square','Dự án'),
+      ('jobs_page','/jobs','bi-cpu-fill','Tác vụ'),
+    ] %}
+    <div class="nav-section">Nền tảng</div>
+    {% for endpoint, path, icon, label in nav %}
+      <a class="side-link {% if request.path==path %}active{% endif %}"
+         href="{{ url_for(endpoint) }}"><i class="bi {{ icon }}"></i>{{ label }}</a>
+    {% endfor %}
+    <div class="nav-section">A100 · HPC</div>
+    <div class="side-link" style="opacity:.7;cursor:default">
+      <i class="bi bi-hdd-network"></i>Đơn tiến trình</div>
+  </aside>
+  <div class="scrim" onclick="document.body.classList.remove('nav-open')"></div>
+
+  <main class="content">
+    <div class="topbar">
+      <div class="d-flex align-items-center gap-3">
+        <button class="btn btn-light hamburger" onclick="document.body.classList.toggle('nav-open')">
+          <i class="bi bi-list"></i></button>
+        <div>
+          <h1 class="page-title">{% block page_title %}Bảng điều khiển{% endblock %}</h1>
+          <div class="page-sub">{% block page_sub %}{% endblock %}</div>
+        </div>
+      </div>
+      <div>{% block topbar_actions %}{% endblock %}</div>
+    </div>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, msg in messages %}
+        <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+          {{ msg }}
+          <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+      {% endfor %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

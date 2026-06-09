@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Runtime data (created at runtime under /data or HOSTA100_DATA_DIR)
+_data/
+data/
+
+# Local test / scratch artifacts
+_tmpmodel.bin
+_clean_main.py
+_evil.zip
+_req.txt
+_shot_*.png
+_vi.png
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

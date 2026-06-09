@@ -1,0 +1,125 @@
+"""
+SQLite access layer and disk-usage reporting.
+
+A single shared SQLite database stores models, envs and jobs metadata. Each
+call opens its own short-lived connection (check_same_thread is irrelevant then)
+which is the simplest correct approach for a multi-threaded single process.
+"""
+import shutil
+import sqlite3
+import threading
+import time
+
+import config
+
+# Serialize writes across background threads. SQLite handles concurrency, but a
+# process-wide lock keeps things simple and avoids 'database is locked' under
+# the light write load this platform produces.
+_write_lock = threading.Lock()
+
+
+def connect():
+    conn = sqlite3.connect(config.DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA foreign_keys=ON;")
+    return conn
+
+
+def init_db():
+    """Create tables if they do not yet exist."""
+    config.ensure_dirs()
+    with _write_lock, connect() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS models (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                name       TEXT UNIQUE NOT NULL,
+                path       TEXT NOT NULL,
+                size       INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS envs (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                name       TEXT UNIQUE NOT NULL,
+                path       TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS projects (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                name       TEXT UNIQUE NOT NULL,
+                path       TEXT NOT NULL,
+                main_file  TEXT,
+                created_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS jobs (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                model_id   INTEGER,
+                env_id     INTEGER,
+                project_id INTEGER,
+                main_file  TEXT,
+                run_mode   TEXT NOT NULL DEFAULT 'runner',
+                name       TEXT,
+                status     TEXT NOT NULL DEFAULT 'queued',
+                progress   INTEGER NOT NULL DEFAULT 0,
+                logs_path  TEXT,
+                result_path TEXT,
+                output_path TEXT,
+                created_at REAL NOT NULL,
+                FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE SET NULL,
+                FOREIGN KEY (env_id) REFERENCES envs(id) ON DELETE SET NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
+            );
+            """
+        )
+        _migrate(conn)
+
+
+def _migrate(conn):
+    """Add columns introduced after the first release to pre-existing DBs."""
+    have = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+    additions = {
+        "project_id": "INTEGER",
+        "main_file": "TEXT",
+        "run_mode": "TEXT NOT NULL DEFAULT 'runner'",
+        "output_path": "TEXT",
+    }
+    for col, decl in additions.items():
+        if col not in have:
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {decl}")
+
+
+def execute(sql, params=(), *, commit=False, fetch=None):
+    """
+    Run a query. fetch in {None, 'one', 'all'}. Writes take the global lock.
+    Returns lastrowid for commit writes, or rows for reads.
+    """
+    if commit:
+        with _write_lock, connect() as conn:
+            cur = conn.execute(sql, params)
+            conn.commit()
+            return cur.lastrowid
+    with connect() as conn:
+        cur = conn.execute(sql, params)
+        if fetch == "one":
+            return cur.fetchone()
+        if fetch == "all":
+            return cur.fetchall()
+        return None
+
+
+def now():
+    return time.time()
+
+
+def disk_usage():
+    """Return (used, total, free) bytes for the data filesystem."""
+    config.ensure_dirs()
+    try:
+        usage = shutil.disk_usage(config.DATA_DIR)
+        return usage.used, usage.total, usage.free
+    except OSError:
+        return 0, 0, 0
