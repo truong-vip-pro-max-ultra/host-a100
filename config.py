@@ -2,13 +2,44 @@
 Central configuration for the ML platform.
 
 All paths live under DATA_DIR. On the target Linux HPC server this defaults to
-/data. For local development (e.g. Windows) you can override every path by
-setting the HOSTA100_DATA_DIR environment variable.
+/data. For local development (e.g. Windows) or shared nodes where /data is not
+writable, you can override every path by setting the HOSTA100_DATA_DIR
+environment variable. If neither is usable, we fall back to ~/host-a100-data.
 """
 import os
 
+
+def _resolve_data_dir():
+    """Pick the data directory.
+
+    Priority:
+      1. HOSTA100_DATA_DIR if set (explicit override).
+      2. /data if it exists and is writable (the target HPC server).
+      3. ~/host-a100-data as a safe per-user fallback (e.g. shared nodes
+         where /data is owned by root and not writable).
+    """
+    explicit = os.environ.get("HOSTA100_DATA_DIR")
+    if explicit:
+        return explicit
+
+    default = "/data"
+    # Writable if it already exists and we can write, or its parent lets us
+    # create it. os.access on a missing path returns False, so check the
+    # existing directory or the closest existing ancestor.
+    probe = default
+    while probe and not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    if os.path.isdir(probe) and os.access(probe, os.W_OK):
+        return default
+
+    return os.path.join(os.path.expanduser("~"), "host-a100-data")
+
+
 # Root data directory. Override with HOSTA100_DATA_DIR for local testing.
-DATA_DIR = os.environ.get("HOSTA100_DATA_DIR", "/data")
+DATA_DIR = _resolve_data_dir()
 
 MODELS_DIR = os.path.join(DATA_DIR, "models")
 ENVS_DIR = os.path.join(DATA_DIR, "envs")
@@ -52,6 +83,7 @@ SECRET_KEY = os.environ.get("HOSTA100_SECRET", "change-me-on-the-hpc-server")
 
 def ensure_dirs():
     """Create all required data directories. Safe to call repeatedly."""
+    print(f"[host-a100] Using data directory: {DATA_DIR}")
     for path in (DATA_DIR, MODELS_DIR, ENVS_DIR, JOBS_DIR, RESULTS_DIR,
                  PROJECTS_DIR):
         os.makedirs(path, exist_ok=True)
