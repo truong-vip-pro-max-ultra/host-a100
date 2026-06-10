@@ -78,8 +78,9 @@
 {% if request.args.get('task') %}
 <div class="card mt-3"><div class="card-body">
   <h5 class="card-title">Tiến độ tác vụ</h5>
-  <div class="progress mb-2" style="height:22px">
-    <div id="bar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%">0%</div>
+  <div class="progress progress-wrap mb-2" style="height:22px">
+    <div id="bar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%"></div>
+    <span class="progress-val" id="barVal">0%</span>
   </div>
   <div class="small text-muted" id="stepText"></div>
   <pre class="logbox mt-2" id="logBox"></pre>
@@ -108,6 +109,7 @@ loadPackages();
 <script>
 const taskId = "{{ request.args.get('task') }}";
 const bar = document.getElementById('bar');
+const barVal = document.getElementById('barVal');
 const stepText = document.getElementById('stepText');
 const logBox = document.getElementById('logBox');
 const isInstall = {{ 'true' if selected_id else 'false' }};
@@ -117,7 +119,7 @@ function poll() {
     .then(r => r.json())
     .then(s => {
       bar.style.width = s.progress + '%';
-      bar.textContent = s.progress + '%';
+      barVal.textContent = s.progress + '%';
       stepText.textContent = s.step || '';
       logBox.textContent = s.log || '';
       logBox.scrollTop = logBox.scrollHeight;

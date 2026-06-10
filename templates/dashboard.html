@@ -48,10 +48,9 @@
             <span class="text-muted small">{{ g.util_pct|int }}% sử dụng · {{ g.temp_c|int }}°C</span>
           </div>
           {% set mp = (g.mem_used_mb*100/g.mem_total_mb)|int if g.mem_total_mb else 0 %}
-          <div class="progress" style="height:20px;border-radius:10px;background:#eef2f7">
-            <div class="progress-bar" style="width: {{ mp }}%;background:linear-gradient(90deg,#6366f1,#8b5cf6)">
-              {{ g.mem_used_mb|int }} / {{ g.mem_total_mb|int }} MB
-            </div>
+          <div class="progress progress-wrap" style="height:20px;border-radius:10px;background:#eef2f7">
+            <div class="progress-bar" style="width: {{ mp }}%;background:linear-gradient(90deg,#6366f1,#8b5cf6)"></div>
+            <span class="progress-val">{{ g.mem_used_mb|int }} / {{ g.mem_total_mb|int }} MB</span>
           </div>
         </div>
         {% endfor %}
@@ -101,10 +100,9 @@
         <strong class="text-truncate" style="max-width:75%">{{ cpu.name or 'Không xác định' }}</strong>
         <span class="text-muted small">{{ cpu.pct }}%{% if cpu.cores %} · {{ cpu.cores }} nhân{% endif %}</span>
       </div>
-      <div class="progress" style="height:20px;border-radius:10px;background:#eef2f7">
-        <div class="progress-bar" style="width: {{ cpu.pct }}%;background:linear-gradient(90deg,#0ea5e9,#6366f1)">
-          {{ cpu.pct }}%
-        </div>
+      <div class="progress progress-wrap" style="height:20px;border-radius:10px;background:#eef2f7">
+        <div class="progress-bar" style="width: {{ cpu.pct }}%;background:linear-gradient(90deg,#0ea5e9,#6366f1)"></div>
+        <span class="progress-val">{{ cpu.pct }}%</span>
       </div>
     </div></div>
   </div>
@@ -115,10 +113,9 @@
         <strong>Bộ nhớ hệ thống</strong>
         <span class="text-muted small">{{ ram.pct }}% · {{ ram.used|hsize }} / {{ ram.total|hsize }}</span>
       </div>
-      <div class="progress" style="height:20px;border-radius:10px;background:#eef2f7">
-        <div class="progress-bar" style="width: {{ ram.pct }}%;background:linear-gradient(90deg,#10b981,#0ea5e9)">
-          {{ ram.pct }}%
-        </div>
+      <div class="progress progress-wrap" style="height:20px;border-radius:10px;background:#eef2f7">
+        <div class="progress-bar" style="width: {{ ram.pct }}%;background:linear-gradient(90deg,#10b981,#0ea5e9)"></div>
+        <span class="progress-val">{{ ram.pct }}%</span>
       </div>
     </div></div>
   </div>

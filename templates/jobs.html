@@ -112,8 +112,9 @@
         <h5 class="card-title mb-0">Tác vụ <span id="watchId"></span></h5>
         <a class="btn btn-sm btn-outline-success d-none" id="zipBtn" href="#">Tải tất cả (zip)</a>
       </div>
-      <div class="progress my-2" style="height:22px">
-        <div id="wbar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%">0%</div>
+      <div class="progress progress-wrap my-2" style="height:22px">
+        <div id="wbar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%"></div>
+        <span class="progress-val" id="wbarVal">0%</span>
       </div>
       <pre class="logbox" id="wlog"></pre>
       <h6 class="mt-2">File kết quả</h6>
@@ -195,7 +196,8 @@ function pollJob() {
     .then(r => r.json())
     .then(s => {
       const bar = document.getElementById('wbar');
-      bar.style.width = s.progress + '%'; bar.textContent = s.progress + '%';
+      bar.style.width = s.progress + '%';
+      document.getElementById('wbarVal').textContent = s.progress + '%';
       const log = document.getElementById('wlog');
       log.textContent = s.log || ''; log.scrollTop = log.scrollHeight;
       const st = document.getElementById('st-' + id), pc = document.getElementById('pc-' + id);
