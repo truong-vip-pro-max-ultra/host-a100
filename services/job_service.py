@@ -24,6 +24,9 @@ import subprocess
 import threading
 import zipfile
 
+# Resolve srun once so we can decide whether SLURM dispatch is even possible.
+_SRUN = shutil.which("srun")
+
 import config
 from services import env_service, model_service, project_service
 from services import storage_service as db
@@ -173,9 +176,47 @@ def submit_job(model_id, env_id, job_name, params_json,
                "--output", result_path]
         cwd = job_dir
 
+    # Cách B: prepend srun so the job runs on a GPU (A100/ampere) compute node.
+    cmd = _srun_prefix(job_id, cwd) + cmd
+
     _launch(job_id, cmd, cwd, job_dir, output_dir, params_file,
             model_path=model["path"] if model else "")
     return job_id
+
+
+def slurm_active():
+    """True when jobs will actually be dispatched to a GPU node via srun."""
+    return bool(config.USE_SLURM and _SRUN)
+
+
+def _srun_prefix(job_id, cwd):
+    """Build the `srun ...` prefix that sends a job to a GPU compute node.
+
+    Returns [] when SLURM dispatch is off or srun is unavailable, in which case
+    the job runs locally (the previous behaviour). srun streams the remote
+    stdout/stderr back to us, so log capture works exactly as before; --chdir
+    runs the command in the job's working dir on the (shared-filesystem) node,
+    and --export=ALL forwards JOB_DIR/OUTPUT_DIR/MODEL_PATH/etc. to the job.
+    """
+    if not slurm_active():
+        return []
+    pre = [_SRUN,
+           f"--gres={config.SLURM_GRES}",
+           "--job-name", f"hosta100-{job_id}",
+           "--chdir", cwd,
+           "--export=ALL",
+           "--unbuffered"]
+    if config.SLURM_PARTITION:
+        pre += ["--partition", config.SLURM_PARTITION]
+    if config.SLURM_ACCOUNT:
+        pre += ["--account", config.SLURM_ACCOUNT]
+    if config.SLURM_TIME:
+        pre += ["--time", config.SLURM_TIME]
+    if config.SLURM_CPUS:
+        pre += ["--cpus-per-task", config.SLURM_CPUS]
+    if config.SLURM_MEM:
+        pre += ["--mem", config.SLURM_MEM]
+    return pre
 
 
 def _set_status(job_id, status=None, prog=None):
@@ -196,8 +237,10 @@ def _launch(job_id, cmd, cwd, job_dir, output_dir, params_file, model_path=""):
     log_file = os.path.join(job_dir, "job.log")
 
     def worker():
+        launch_step = ("đang gửi tới SLURM, chờ cấp GPU…" if slurm_active()
+                       else "launching")
         progress.update("job", job_id, status="running", progress=5,
-                        step="launching")
+                        step=launch_step)
         _set_status(job_id, status="running", prog=5)
 
         # Environment for the child process. User code reads these to find the
@@ -225,6 +268,15 @@ def _launch(job_id, cmd, cwd, job_dir, output_dir, params_file, model_path=""):
                     logf.write(line)
                     progress.update("job", job_id, append_log=line)
                     stripped = line.strip()
+                    low = stripped.lower()
+                    # srun status lines (sent to stderr, merged here).
+                    if low.startswith("srun:"):
+                        if "queued and waiting" in low:
+                            progress.update("job", job_id,
+                                            step="đang chờ SLURM cấp GPU…")
+                        elif "has been allocated" in low:
+                            progress.update("job", job_id, progress=8,
+                                            step="đã được cấp GPU, đang chạy…")
                     if stripped.startswith("PROGRESS"):
                         try:
                             val = int(stripped.split()[1])

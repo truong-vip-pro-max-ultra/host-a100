@@ -421,6 +421,8 @@ def jobs_page():
         models=model_service.list_models(),
         envs=env_service.list_envs(),
         projects=project_service.list_projects(),
+        slurm_active=job_service.slurm_active(),
+        slurm_gres=config.SLURM_GRES,
     )
 
 

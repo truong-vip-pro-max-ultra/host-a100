@@ -86,6 +86,29 @@ MAX_CODE_FILE_BYTES = 10 * 1024 * 1024
 HOST = os.environ.get("HOSTA100_HOST", "0.0.0.0")
 PORT = int(os.environ.get("HOSTA100_PORT", "8198"))
 
+# --------------------------------------------------------------------------- #
+# SLURM dispatch (Cách B): when enabled, each run job is launched through
+# `srun` so it lands on a GPU compute node, while the Flask app stays on the
+# login node. Only effective if `srun` is actually on PATH — otherwise jobs run
+# locally (e.g. Windows dev, or when the app already runs inside an allocation).
+# --------------------------------------------------------------------------- #
+def _env_bool(name, default):
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+USE_SLURM = _env_bool("HOSTA100_USE_SLURM", True)
+# Generic resource spec. "ampere" is the A100-class GPU on this cluster.
+SLURM_GRES = os.environ.get("HOSTA100_SLURM_GRES", "gpu:ampere:1")
+# Optional extras — left empty so the cluster defaults apply unless set.
+SLURM_PARTITION = os.environ.get("HOSTA100_SLURM_PARTITION", "")
+SLURM_ACCOUNT = os.environ.get("HOSTA100_SLURM_ACCOUNT", "")
+SLURM_TIME = os.environ.get("HOSTA100_SLURM_TIME", "")        # e.g. "04:00:00"
+SLURM_CPUS = os.environ.get("HOSTA100_SLURM_CPUS", "")        # e.g. "4"
+SLURM_MEM = os.environ.get("HOSTA100_SLURM_MEM", "")          # e.g. "16G"
+
 # Flask secret key (sessions / flash messages).
 SECRET_KEY = os.environ.get("HOSTA100_SECRET", "change-me-on-the-hpc-server")
 

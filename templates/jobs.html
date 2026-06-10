@@ -74,6 +74,14 @@
 
         <button class="btn btn-primary" {% if not envs %}disabled{% endif %}>
           <i class="bi bi-play-fill"></i> Chạy trên A100</button>
+        {% if slurm_active %}
+          <div class="form-text text-success"><i class="bi bi-gpu-card"></i>
+            Job sẽ được gửi tới node GPU qua SLURM (<code>{{ slurm_gres }}</code>).
+            Có thể chờ một lúc nếu GPU đang bận.</div>
+        {% else %}
+          <div class="form-text text-warning"><i class="bi bi-exclamation-triangle"></i>
+            Chưa bật SLURM — job chạy ngay trên node của app (chỉ có GPU nếu node này có).</div>
+        {% endif %}
         {% if not envs %}<div class="form-text text-danger">Hãy tạo một môi trường trước.</div>{% endif %}
       </form>
     </div></div>
