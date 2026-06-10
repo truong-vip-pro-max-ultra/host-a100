@@ -5,6 +5,7 @@ All calls use a fixed argument list (never shell=True) so there is no way for
 user input to influence the command. If nvidia-smi is missing (e.g. local dev
 on a non-GPU box) the helpers degrade gracefully.
 """
+import glob
 import os
 import shutil
 import subprocess
@@ -38,11 +39,58 @@ def nvidia_smi_available():
     return _find_nvidia_smi() is not None
 
 
+def _read_text(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+def gpu_diagnostics():
+    """Explain WHY no GPU is visible — most often a login node with no GPU.
+
+    Checks the device nodes, kernel driver, PCI bus, and whether SLURM is
+    present (which usually means the GPUs live on separate compute nodes you
+    must request an allocation on). All checks are read-only and degrade
+    quietly on machines where the files/tools are absent (e.g. Windows dev).
+    """
+    lines = []
+
+    devs = glob.glob("/dev/nvidia*")
+    lines.append(f"Thiết bị /dev/nvidia*: {', '.join(devs) if devs else 'không có'}")
+
+    drv = _read_text("/proc/driver/nvidia/version")
+    lines.append(f"Driver NVIDIA: {drv.splitlines()[0] if drv else 'chưa nạp'}")
+
+    lspci = shutil.which("lspci")
+    if lspci:
+        try:
+            out = subprocess.run([lspci], capture_output=True, text=True,
+                                 timeout=10).stdout
+            nv = [l for l in out.splitlines() if "nvidia" in l.lower()]
+            lines.append("Thiết bị PCI NVIDIA: "
+                         + (nv[0].strip() if nv else "không thấy trên node này"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    if shutil.which("srun") or shutil.which("sinfo"):
+        lines.append(
+            "Phát hiện SLURM → đây nhiều khả năng là NODE ĐĂNG NHẬP (không gắn "
+            "GPU). GPU A100 nằm ở compute node. Xin một GPU rồi chạy ở đó, ví dụ:\n"
+            "    srun --gres=gpu:1 --pty bash   # vào node có GPU\n"
+            "    # sau đó chạy: python3 app.py\n"
+            "Hoặc xem các node có GPU: sinfo -o '%n %G'")
+
+    return "\n".join(lines)
+
+
 def raw_nvidia_smi():
     """Return the plain textual nvidia-smi output, or an explanatory message."""
     smi = _find_nvidia_smi()
     if not smi:
-        return "nvidia-smi not found on this host (no NVIDIA driver detected)."
+        return ("Không tìm thấy nvidia-smi trên node này.\n\n"
+                "Chẩn đoán:\n" + gpu_diagnostics())
     try:
         out = subprocess.run(
             [smi],
