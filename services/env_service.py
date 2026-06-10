@@ -59,11 +59,16 @@ def _pip_env():
     - PIP_DISABLE_PIP_VERSION_CHECK: skips a network round trip to PyPI that pip
       otherwise makes on every run just to see if a newer pip exists.
     - PIP_NO_INPUT: never block waiting on a prompt (we also pass --no-input).
+    - PYTHONUNBUFFERED: pip's stdout is block-buffered when piped (not a TTY),
+      so without this its "Collecting/Downloading" lines stay stuck in pip's
+      buffer and only appear when it exits — making the log look frozen during a
+      slow download. Unbuffered output streams those lines in real time.
     """
     env = dict(os.environ)
     env["PIP_CACHE_DIR"] = config.PIP_CACHE_DIR
     env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     env["PIP_NO_INPUT"] = "1"
+    env["PYTHONUNBUFFERED"] = "1"
     return env
 
 
