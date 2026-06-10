@@ -125,6 +125,19 @@ SLURM_MEM = os.environ.get("HOSTA100_SLURM_MEM", DEFAULT_SLURM_MEM)
 # Flask secret key (sessions / flash messages).
 SECRET_KEY = os.environ.get("HOSTA100_SECRET", "change-me-on-the-hpc-server")
 
+# --------------------------------------------------------------------------- #
+# Access control. A single shared password gates the whole app. REQUIRED before
+# exposing the app publicly (e.g. via a cloudflare tunnel), because "run my
+# project code" executes arbitrary Python under your account.
+#
+# >>> SỬA THẲNG Ở ĐÂY <<< đặt mật khẩu vào DEFAULT_PASSWORD (hoặc biến môi
+# trường HOSTA100_PASSWORD). Để rỗng = TẮT đăng nhập (chỉ dùng khi test nội bộ,
+# KHÔNG public). Khi tắt, app sẽ in cảnh báo lúc khởi động.
+# --------------------------------------------------------------------------- #
+DEFAULT_PASSWORD = ""
+APP_PASSWORD = os.environ.get("HOSTA100_PASSWORD", DEFAULT_PASSWORD)
+AUTH_ENABLED = bool(APP_PASSWORD)
+
 
 def ensure_dirs():
     """Create all required data directories. Safe to call repeatedly."""

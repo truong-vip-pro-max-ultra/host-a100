@@ -11,12 +11,13 @@ venv creation, pip installs, inference jobs) is dispatched to daemon threads, so
 the Flask request threads stay responsive. Progress is exposed through JSON
 polling endpoints that the Bootstrap UI queries on a timer.
 """
+import hmac
 import os
 import tempfile
 import uuid
 
 from flask import (Flask, abort, flash, jsonify, redirect, render_template,
-                   request, send_file, send_from_directory, url_for)
+                   request, send_file, send_from_directory, session, url_for)
 
 import config
 from services import (env_service, job_service, model_service,
@@ -32,6 +33,59 @@ app.secret_key = config.SECRET_KEY
 UPLOAD_TMP = os.path.join(config.DATA_DIR, ".uploads")
 
 _CHUNK = 8 * 1024 * 1024
+
+
+# --------------------------------------------------------------------------- #
+# Authentication: a single shared password gates everything. Endpoints that must
+# stay open: the login page and static assets.
+# --------------------------------------------------------------------------- #
+_PUBLIC_ENDPOINTS = {"login", "static"}
+
+
+@app.context_processor
+def _inject_auth():
+    return {"auth_enabled": config.AUTH_ENABLED}
+
+
+@app.before_request
+def _require_login():
+    if not config.AUTH_ENABLED:
+        return  # auth disabled (internal/dev) — a startup warning is printed.
+    if request.endpoint in _PUBLIC_ENDPOINTS:
+        return
+    if session.get("auth_ok"):
+        return
+    # Don't redirect API/JSON polls into an HTML login page; 401 is clearer.
+    if request.path.startswith(("/status/", "/upload/")) \
+            or request.path.endswith(".json"):
+        return jsonify({"error": "unauthenticated"}), 401
+    return redirect(url_for("login", next=request.path))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not config.AUTH_ENABLED or session.get("auth_ok"):
+        return redirect(url_for("dashboard"))
+    if request.method == "POST":
+        supplied = request.form.get("password", "")
+        # Constant-time compare to avoid leaking the password via timing.
+        if hmac.compare_digest(supplied, config.APP_PASSWORD):
+            session["auth_ok"] = True
+            session.permanent = True
+            dest = request.args.get("next") or url_for("dashboard")
+            # Only allow local redirects (no open-redirect to other hosts).
+            if not dest.startswith("/"):
+                dest = url_for("dashboard")
+            return redirect(dest)
+        flash("Mật khẩu không đúng.", "danger")
+    return render_template("login.html")
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    flash("Đã đăng xuất.", "success")
+    return redirect(url_for("login"))
 
 
 # --------------------------------------------------------------------------- #
@@ -546,6 +600,13 @@ def main():
     config.ensure_dirs()
     db.init_db()
     os.makedirs(UPLOAD_TMP, exist_ok=True)
+    if config.AUTH_ENABLED:
+        print("[host-a100] Đăng nhập bằng mật khẩu: BẬT.")
+    else:
+        print("[host-a100] ⚠️  CẢNH BÁO: chưa đặt mật khẩu (HOSTA100_PASSWORD / "
+              "config.DEFAULT_PASSWORD). App KHÔNG có đăng nhập — KHÔNG public "
+              "(cloudflare/ngrok) khi chưa bật, vì 'chạy code dự án' thực thi "
+              "Python tùy ý dưới tài khoản của bạn.")
     # threaded=True so the upload POST and the polling GETs run concurrently in
     # this single process. debug/reloader OFF to keep one stable process with
     # its background threads intact.
