@@ -493,6 +493,8 @@ def job_submit():
     main_file = request.form.get("main_file", "")
     job_name = request.form.get("job_name", "")
     params_json = request.form.get("params", "")
+    # Checkbox: present only when ticked. Default to GPU on (A100 platform).
+    use_gpu = request.form.get("use_gpu") is not None
 
     if not env_id:
         flash("Hãy chọn một môi trường.", "danger")
@@ -508,6 +510,7 @@ def job_submit():
         job_id = job_service.submit_job(
             model_id, env_id, job_name, params_json,
             run_mode=run_mode, project_id=project_id, main_file=main_file,
+            use_gpu=use_gpu,
         )
     except ValueError as exc:
         flash(str(exc), "danger")

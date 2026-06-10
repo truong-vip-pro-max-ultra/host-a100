@@ -85,7 +85,8 @@ def read_log(job_id):
 
 
 def submit_job(model_id, env_id, job_name, params_json,
-               run_mode="runner", project_id=None, main_file=None):
+               run_mode="runner", project_id=None, main_file=None,
+               use_gpu=True):
     """
     Validate inputs, create the DB row + job dirs, and launch the run thread.
 
@@ -176,8 +177,10 @@ def submit_job(model_id, env_id, job_name, params_json,
                "--output", result_path]
         cwd = job_dir
 
-    # Cách B: prepend srun so the job runs on a GPU (A100/ampere) compute node.
-    cmd = _srun_prefix(job_id, cwd) + cmd
+    # Cách B: prepend srun so the job runs on a compute node. GPU jobs request
+    # an A100 (ampere); CPU-only jobs skip --gres so they don't waste a GPU and
+    # get scheduled faster.
+    cmd = _srun_prefix(job_id, cwd, use_gpu=use_gpu) + cmd
 
     _launch(job_id, cmd, cwd, job_dir, output_dir, params_file,
             model_path=model["path"] if model else "")
@@ -189,23 +192,27 @@ def slurm_active():
     return bool(config.USE_SLURM and _SRUN)
 
 
-def _srun_prefix(job_id, cwd):
-    """Build the `srun ...` prefix that sends a job to a GPU compute node.
+def _srun_prefix(job_id, cwd, use_gpu=True):
+    """Build the `srun ...` prefix that sends a job to a compute node.
 
     Returns [] when SLURM dispatch is off or srun is unavailable, in which case
     the job runs locally (the previous behaviour). srun streams the remote
     stdout/stderr back to us, so log capture works exactly as before; --chdir
     runs the command in the job's working dir on the (shared-filesystem) node,
     and --export=ALL forwards JOB_DIR/OUTPUT_DIR/MODEL_PATH/etc. to the job.
+
+    use_gpu=False omits --gres so a CPU-only task doesn't tie up an A100 and is
+    scheduled on any free node (usually much sooner than a GPU one).
     """
     if not slurm_active():
         return []
     pre = [_SRUN,
-           f"--gres={config.SLURM_GRES}",
            "--job-name", f"hosta100-{job_id}",
            "--chdir", cwd,
            "--export=ALL",
            "--unbuffered"]
+    if use_gpu and config.SLURM_GRES:
+        pre.insert(1, f"--gres={config.SLURM_GRES}")
     if config.SLURM_PARTITION:
         pre += ["--partition", config.SLURM_PARTITION]
     if config.SLURM_ACCOUNT:

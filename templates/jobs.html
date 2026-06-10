@@ -72,12 +72,22 @@
           <div class="form-text">Lưu vào <code>$PARAMS_FILE</code>. Ghi kết quả vào <code>$OUTPUT_DIR</code>.</div>
         </div>
 
+        <div class="form-check form-switch mb-2">
+          <input class="form-check-input" type="checkbox" role="switch"
+                 name="use_gpu" id="useGpu" checked>
+          <label class="form-check-label" for="useGpu">
+            Tác vụ này cần GPU (A100)</label>
+          <div class="form-text mb-0">Bỏ chọn nếu chỉ xử lý CPU (không train/inference
+            AI) — job sẽ không chiếm A100 và được cấp nhanh hơn.</div>
+        </div>
+
         <button class="btn btn-primary" {% if not envs %}disabled{% endif %}>
-          <i class="bi bi-play-fill"></i> Chạy trên A100</button>
+          <i class="bi bi-play-fill"></i> Chạy</button>
         {% if slurm_active %}
           <div class="form-text text-success"><i class="bi bi-gpu-card"></i>
-            Job sẽ được gửi tới node GPU qua SLURM (<code>{{ slurm_gres }}</code>).
-            Có thể chờ một lúc nếu GPU đang bận.</div>
+            Khi chọn GPU, job được gửi tới node A100 qua SLURM
+            (<code>{{ slurm_gres }}</code>); bỏ chọn thì chạy trên node CPU.
+            Có thể chờ một lúc nếu tài nguyên đang bận.</div>
         {% else %}
           <div class="form-text text-warning"><i class="bi bi-exclamation-triangle"></i>
             Chưa bật SLURM — job chạy ngay trên node của app (chỉ có GPU nếu node này có).</div>
