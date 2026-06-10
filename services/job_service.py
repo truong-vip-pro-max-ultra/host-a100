@@ -160,6 +160,10 @@ def submit_job(model_id, env_id, job_name, params_json,
         # Copy the project into the job dir for a reproducible, isolated run.
         code_dir = file_utils.safe_join(job_dir, "code")
         shutil.copytree(project["path"], code_dir, dirs_exist_ok=True)
+        # Snapshot the files we just copied in. Anything the user code writes
+        # into its working directory (relative-path outputs like love.pdf) is
+        # then detectable as "new" and surfaced as a downloadable result.
+        _snapshot_code_dir(job_dir, code_dir)
         cmd = [py, main_file]
         cwd = code_dir
     else:
@@ -250,21 +254,74 @@ def _launch(job_id, cmd, cwd, job_dir, output_dir, params_file, model_path=""):
 # --------------------------------------------------------------------------- #
 # Output browsing / download
 # --------------------------------------------------------------------------- #
-def list_outputs(job_id):
-    """Return [{rel, size}] of every file the job produced in its output dir."""
-    job = get_job(job_id)
-    if not job or not job.get("output_path"):
-        return []
-    out_dir = job["output_path"]
-    if not os.path.isdir(out_dir):
-        return []
-    files = []
-    for root, _dirs, names in os.walk(out_dir):
+_SNAPSHOT_FILE = ".code_snapshot.json"
+
+
+def _snapshot_code_dir(job_dir, code_dir):
+    """Record the relpaths present in code_dir right after the project copy."""
+    rels = []
+    for root, _dirs, names in os.walk(code_dir):
         for n in names:
-            fp = os.path.join(root, n)
-            rel = os.path.relpath(fp, out_dir).replace("\\", "/")
+            rel = os.path.relpath(os.path.join(root, n), code_dir)
+            rels.append(rel.replace("\\", "/"))
+    try:
+        with open(os.path.join(job_dir, _SNAPSHOT_FILE), "w") as fh:
+            json.dump(rels, fh)
+    except OSError:
+        pass
+
+
+def _output_bases(job):
+    """Yield (base_dir, [relpaths]) holding this job's downloadable files.
+
+    Always includes the dedicated output dir ($OUTPUT_DIR). For project runs it
+    also includes files NEWLY created in the code/working dir during the run —
+    i.e. relative-path outputs the user code wrote next to itself — by diffing
+    against the snapshot taken before launch.
+    """
+    out_dir = job.get("output_path")
+    if out_dir and os.path.isdir(out_dir):
+        rels = []
+        for root, _dirs, names in os.walk(out_dir):
+            for n in names:
+                rels.append(os.path.relpath(os.path.join(root, n), out_dir)
+                            .replace("\\", "/"))
+        yield out_dir, rels
+
+    if job.get("run_mode") == "project" and job.get("logs_path"):
+        code_dir = file_utils.safe_join(job["logs_path"], "code")
+        if os.path.isdir(code_dir):
+            baseline = set()
+            snap = os.path.join(job["logs_path"], _SNAPSHOT_FILE)
+            if os.path.exists(snap):
+                try:
+                    with open(snap) as fh:
+                        baseline = set(json.load(fh))
+                except (OSError, ValueError):
+                    baseline = set()
+            new = []
+            for root, _dirs, names in os.walk(code_dir):
+                for n in names:
+                    rel = os.path.relpath(os.path.join(root, n), code_dir) \
+                        .replace("\\", "/")
+                    if rel not in baseline:
+                        new.append(rel)
+            yield code_dir, new
+
+
+def list_outputs(job_id):
+    """Return [{rel, size}] of every downloadable file the job produced."""
+    job = get_job(job_id)
+    if not job:
+        return []
+    files, seen = [], set()
+    for base, rels in _output_bases(job):
+        for rel in rels:
+            if rel in seen:
+                continue
+            seen.add(rel)
             try:
-                size = os.path.getsize(fp)
+                size = os.path.getsize(os.path.join(base, rel))
             except OSError:
                 size = 0
             files.append({"rel": rel, "size": size})
@@ -273,31 +330,32 @@ def list_outputs(job_id):
 
 
 def resolve_output(job_id, relpath):
-    """Return (out_dir, normalized_relpath) for one confined output file, or None."""
+    """Return (base_dir, normalized_relpath) for one confined output file, or None."""
     job = get_job(job_id)
-    if not job or not job.get("output_path"):
+    if not job:
         return None
-    out_dir = job["output_path"]
-    try:
-        abspath, rel = file_utils.safe_relpath(out_dir, relpath)
-    except file_utils.UnsafeName:
-        return None
-    if not os.path.isfile(abspath):
-        return None
-    return out_dir, rel
+    for base, _rels in _output_bases(job):
+        try:
+            abspath, rel = file_utils.safe_relpath(base, relpath)
+        except file_utils.UnsafeName:
+            continue
+        if os.path.isfile(abspath):
+            return base, rel
+    return None
 
 
 def zip_outputs(job_id):
     """Build an in-memory zip of all output files. Returns (BytesIO, name)."""
-    job = get_job(job_id)
-    if not job or not job.get("output_path") \
-            or not os.path.isdir(job["output_path"]):
+    files = list_outputs(job_id)
+    if not files:
         return None
-    out_dir = job["output_path"]
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in list_outputs(job_id):
-            zf.write(os.path.join(out_dir, f["rel"]), f["rel"])
+        for f in files:
+            resolved = resolve_output(job_id, f["rel"])
+            if resolved:
+                base, rel = resolved
+                zf.write(os.path.join(base, rel), f["rel"])
     buf.seek(0)
     return buf, f"job_{job_id}_outputs.zip"
 

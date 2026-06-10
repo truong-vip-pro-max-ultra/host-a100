@@ -8,6 +8,7 @@ venv/
 # Runtime data (created at runtime under /data or HOSTA100_DATA_DIR)
 _data/
 data/
+host-a100-data/
 
 # Local test / scratch artifacts
 _tmpmodel.bin

@@ -15,8 +15,10 @@ def _resolve_data_dir():
     Priority:
       1. HOSTA100_DATA_DIR if set (explicit override).
       2. /data if it exists and is writable (the target HPC server).
-      3. ~/host-a100-data as a safe per-user fallback (e.g. shared nodes
-         where /data is owned by root and not writable).
+      3. <app dir>/host-a100-data as a safe fallback that lives INSIDE the
+         project directory (e.g. shared nodes where /data is owned by root and
+         not writable). Keeping it next to the code makes the deployment
+         self-contained instead of scattering data into the user's home dir.
     """
     explicit = os.environ.get("HOSTA100_DATA_DIR")
     if explicit:
@@ -35,7 +37,9 @@ def _resolve_data_dir():
     if os.path.isdir(probe) and os.access(probe, os.W_OK):
         return default
 
-    return os.path.join(os.path.expanduser("~"), "host-a100-data")
+    # Fallback next to this file (the project root), not the home directory.
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(app_dir, "host-a100-data")
 
 
 # Root data directory. Override with HOSTA100_DATA_DIR for local testing.
