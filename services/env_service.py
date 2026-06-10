@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import venv
 
 import config
@@ -113,7 +114,20 @@ def _run_pip(task_id, cmd, start_step, success_msg):
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1, env=_pip_env(),
     )
+
+    # While pip is silently unpacking wheels to disk, no lines arrive, so we
+    # creep the bar in the background and halt it as soon as the next line does.
+    ticker = {"stop": None, "thread": None}
+
+    def stop_ticker():
+        if ticker["stop"] is not None:
+            ticker["stop"].set()
+            if ticker["thread"]:
+                ticker["thread"].join(timeout=1)
+            ticker["stop"], ticker["thread"] = None, None
+
     for line in proc.stdout:
+        stop_ticker()
         snap = progress.get("env", task_id)
         new_prog, new_step = _pip_progress(line, snap["progress"], snap["step"])
         kwargs = {"append_log": line}
@@ -122,6 +136,13 @@ def _run_pip(task_id, cmd, start_step, success_msg):
         if new_step != snap["step"]:
             kwargs["step"] = new_step
         progress.update("env", task_id, **kwargs)
+        if "installing collected packages" in line.lower():
+            ticker["stop"] = threading.Event()
+            ticker["thread"] = threading.Thread(
+                target=_creep, args=(task_id, ticker["stop"], new_prog, 96),
+                daemon=True)
+            ticker["thread"].start()
+    stop_ticker()
     code = proc.wait()
     if code == 0:
         progress.update("env", task_id, progress=100, status="done",
@@ -158,13 +179,27 @@ def _python_path(env_dir):
     return posix  # expected location on the Linux HPC target
 
 
+def _creep(task_id, stop, start, cap, interval=1.2):
+    """Slowly advance the progress bar while a blocking, silent step runs.
+
+    ensurepip writes hundreds of small files to disk and emits no output, so
+    without this the bar would freeze. We tick it up ~1%/interval toward a cap
+    (never reaching 100) so the user sees the task is alive; the real step bumps
+    it to its final value when it finishes.
+    """
+    val = start
+    while val < cap and not stop.wait(interval):
+        val += 1
+        progress.update("env", task_id, progress=val)
+
+
 class _ProgressEnvBuilder(venv.EnvBuilder):
     """venv builder that reports each phase into the progress registry.
 
     venv.create() runs several blocking phases with no output of its own. By
     hooking each phase we can show a meaningful, moving status — most usefully
-    a "đang cài pip…" label during _setup_pip, the slow silent step where
-    ensurepip writes many small files onto the network filesystem.
+    a creeping bar during _setup_pip, the slow silent step where ensurepip
+    writes many small files onto the network filesystem.
     """
 
     def __init__(self, task_id, **kw):
@@ -185,14 +220,24 @@ class _ProgressEnvBuilder(venv.EnvBuilder):
         super().setup_python(context)
 
     def _setup_pip(self, context):
-        progress.update("env", self._tid, progress=60,
-                        step="cài pip vào môi trường (có thể mất một lúc)…",
+        progress.update("env", self._tid, progress=55,
+                        step="cài pip + setuptools (đang ghi nhiều file, hãy đợi)…",
                         append_log="Cài pip + setuptools…\n")
-        super()._setup_pip(context)
+        # ensurepip is one blocking, silent call: creep the bar while it runs.
+        stop = threading.Event()
+        ticker = threading.Thread(
+            target=_creep, args=(self._tid, stop, 55, 88), daemon=True)
+        ticker.start()
+        try:
+            super()._setup_pip(context)
+        finally:
+            stop.set()
+            ticker.join(timeout=2)
+        progress.update("env", self._tid, progress=90,
+                        step="pip đã cài xong", append_log="Đã cài pip.\n")
 
     def post_setup(self, context):
-        progress.update("env", self._tid, progress=90, step="hoàn thiện",
-                        append_log="pip đã sẵn sàng.\n")
+        progress.update("env", self._tid, progress=92, step="hoàn thiện")
         super().post_setup(context)
 
 
