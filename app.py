@@ -21,7 +21,7 @@ from flask import (Flask, abort, flash, jsonify, redirect, render_template,
 import config
 from services import (env_service, job_service, model_service,
                       project_service, storage_service as db)
-from utils import file_utils, gpu, progress
+from utils import file_utils, gpu, progress, sysinfo
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = config.MAX_CONTENT_LENGTH
@@ -81,6 +81,8 @@ def dashboard():
         active=progress.active(),
         disk={"used": used, "total": total, "free": free,
               "pct": int(used * 100 / total) if total else 0},
+        cpu=sysinfo.cpu_info(),
+        ram=sysinfo.ram_info(),
     )
 
 

@@ -1,1 +1,4 @@
 Flask>=3.0,<4.0
+# Optional: nicer CPU/RAM stats on the dashboard. Without it, Linux falls back
+# to reading /proc directly, so it is not strictly required.
+psutil>=5.9

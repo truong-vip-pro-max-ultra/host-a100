@@ -50,6 +50,22 @@ def name_taken(name):
                       fetch="one") is not None
 
 
+def _pip_env():
+    """Environment for pip subprocesses tuned for speed on a shared FS.
+
+    - PIP_CACHE_DIR: a shared cache so a wheel is downloaded once, then reused
+      by every later install/env (the biggest win on a slow network filesystem).
+    - PIP_DISABLE_PIP_VERSION_CHECK: skips a network round trip to PyPI that pip
+      otherwise makes on every run just to see if a newer pip exists.
+    - PIP_NO_INPUT: never block waiting on a prompt (we also pass --no-input).
+    """
+    env = dict(os.environ)
+    env["PIP_CACHE_DIR"] = config.PIP_CACHE_DIR
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    env["PIP_NO_INPUT"] = "1"
+    return env
+
+
 def _python_path(env_dir):
     """Path to the interpreter inside a venv (Linux layout, Windows fallback)."""
     posix = os.path.join(env_dir, "bin", "python")
@@ -116,13 +132,14 @@ def install_packages(task_id, env_id, packages):
 
     def worker():
         try:
-            cmd = [py, "-m", "pip", "install", "--no-input"] + packages
+            cmd = [py, "-m", "pip", "install", "--no-input",
+                   "--prefer-binary"] + packages
             progress.update("env", task_id, status="running", progress=5,
                             step="pip install",
                             append_log="$ " + " ".join(cmd) + "\n")
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
+                text=True, bufsize=1, env=_pip_env(),
             )
             for line in proc.stdout:
                 progress.update("env", task_id, append_log=line)
@@ -160,13 +177,14 @@ def install_requirements_file(task_id, env_id, req_path):
 
     def worker():
         try:
-            cmd = [py, "-m", "pip", "install", "--no-input", "-r", req_path]
+            cmd = [py, "-m", "pip", "install", "--no-input",
+                   "--prefer-binary", "-r", req_path]
             progress.update("env", task_id, status="running", progress=5,
                             step="pip install -r",
                             append_log="$ " + " ".join(cmd) + "\n")
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
+                text=True, bufsize=1, env=_pip_env(),
             )
             for line in proc.stdout:
                 progress.update("env", task_id, append_log=line)

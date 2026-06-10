@@ -51,6 +51,11 @@ JOBS_DIR = os.path.join(DATA_DIR, "jobs")
 RESULTS_DIR = os.path.join(DATA_DIR, "results")
 PROJECTS_DIR = os.path.join(DATA_DIR, "projects")
 
+# Shared pip download/wheel cache. Living under DATA_DIR (same filesystem as the
+# envs) means a package is downloaded once and reused across every venv, which
+# is the single biggest speedup for repeated installs on a slow shared FS.
+PIP_CACHE_DIR = os.path.join(DATA_DIR, "pip-cache")
+
 # SQLite database file.
 DB_PATH = os.path.join(DATA_DIR, "platform.db")
 
@@ -89,5 +94,5 @@ def ensure_dirs():
     """Create all required data directories. Safe to call repeatedly."""
     print(f"[host-a100] Using data directory: {DATA_DIR}")
     for path in (DATA_DIR, MODELS_DIR, ENVS_DIR, JOBS_DIR, RESULTS_DIR,
-                 PROJECTS_DIR):
+                 PROJECTS_DIR, PIP_CACHE_DIR):
         os.makedirs(path, exist_ok=True)

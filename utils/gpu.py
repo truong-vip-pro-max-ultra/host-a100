@@ -5,21 +5,47 @@ All calls use a fixed argument list (never shell=True) so there is no way for
 user input to influence the command. If nvidia-smi is missing (e.g. local dev
 on a non-GPU box) the helpers degrade gracefully.
 """
+import os
 import shutil
 import subprocess
 
+# Common absolute locations for nvidia-smi. On many HPC nodes the binary is
+# installed but NOT on the app process's PATH (it only appears after loading a
+# module), so PATH lookup alone reports "not found" even though a GPU is
+# present. We probe these as a fallback.
+_NVIDIA_SMI_PATHS = (
+    "/usr/bin/nvidia-smi",
+    "/bin/nvidia-smi",
+    "/usr/local/bin/nvidia-smi",
+    "/usr/local/nvidia/bin/nvidia-smi",
+    "/usr/local/cuda/bin/nvidia-smi",
+    "/opt/nvidia/bin/nvidia-smi",
+)
+
+
+def _find_nvidia_smi():
+    """Return a usable nvidia-smi path (PATH first, then known locations)."""
+    found = shutil.which("nvidia-smi")
+    if found:
+        return found
+    for path in _NVIDIA_SMI_PATHS:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
 
 def nvidia_smi_available():
-    return shutil.which("nvidia-smi") is not None
+    return _find_nvidia_smi() is not None
 
 
 def raw_nvidia_smi():
     """Return the plain textual nvidia-smi output, or an explanatory message."""
-    if not nvidia_smi_available():
+    smi = _find_nvidia_smi()
+    if not smi:
         return "nvidia-smi not found on this host (no NVIDIA driver detected)."
     try:
         out = subprocess.run(
-            ["nvidia-smi"],
+            [smi],
             capture_output=True, text=True, timeout=15,
         )
         return out.stdout or out.stderr or "(no output)"
@@ -34,12 +60,13 @@ def gpu_summary():
     Each item: name, mem_used_mb, mem_total_mb, util_pct, temp_c.
     Returns an empty list when no GPU / driver is available.
     """
-    if not nvidia_smi_available():
+    smi = _find_nvidia_smi()
+    if not smi:
         return []
     query = "name,memory.used,memory.total,utilization.gpu,temperature.gpu"
     try:
         out = subprocess.run(
-            ["nvidia-smi", f"--query-gpu={query}",
+            [smi, f"--query-gpu={query}",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=15,
         )
