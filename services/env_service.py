@@ -66,6 +66,87 @@ def _pip_env():
     return env
 
 
+# Per-env install locks. Two installs into the SAME venv at once can corrupt its
+# site-packages (pip does not lock it), so we serialize them. Installs into
+# DIFFERENT envs still run in parallel. The process is single-threaded-Flask with
+# daemon worker threads, so in-memory locks are sufficient and correct.
+_install_locks = {}
+_install_locks_guard = threading.Lock()
+
+
+def _env_lock(env_id):
+    with _install_locks_guard:
+        lock = _install_locks.get(env_id)
+        if lock is None:
+            lock = threading.Lock()
+            _install_locks[env_id] = lock
+        return lock
+
+
+def _pip_progress(line, cur, step):
+    """Map one pip output line to (progress, step) for a meaningful bar.
+
+    pip is silent while it unpacks wheels to disk — the slowest phase on a
+    network FS — so a naive per-line bar stalls then jumps to 100. We instead
+    jump to ~85% the moment pip starts writing files, and creep during the
+    download/resolve phase, so the bar tracks what is actually happening.
+    """
+    low = line.lower().lstrip()
+    if "installing collected packages" in low:
+        return 85, "đang ghi thư viện vào môi trường…"
+    if low.startswith("collecting"):
+        return min(78, cur + 3), "đang tải & phân giải phụ thuộc…"
+    if low.startswith(("downloading", "using cached")):
+        return min(78, cur + 2), step
+    if low.startswith("successfully installed"):
+        return 97, "gần xong…"
+    if cur < 78:
+        return cur + 1, step
+    return cur, step
+
+
+def _run_pip(task_id, cmd, start_step, success_msg):
+    """Stream a pip subprocess into the progress registry. Returns success bool."""
+    progress.update("env", task_id, status="running", progress=5,
+                    step=start_step, append_log="$ " + " ".join(cmd) + "\n")
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, env=_pip_env(),
+    )
+    for line in proc.stdout:
+        snap = progress.get("env", task_id)
+        new_prog, new_step = _pip_progress(line, snap["progress"], snap["step"])
+        kwargs = {"append_log": line}
+        if new_prog != snap["progress"]:
+            kwargs["progress"] = new_prog
+        if new_step != snap["step"]:
+            kwargs["step"] = new_step
+        progress.update("env", task_id, **kwargs)
+    code = proc.wait()
+    if code == 0:
+        progress.update("env", task_id, progress=100, status="done",
+                        step="hoàn tất", append_log=f"\n{success_msg}\n")
+        return True
+    progress.update("env", task_id, status="error", step="pip thất bại",
+                    append_log=f"\npip kết thúc với mã {code}.\n")
+    return False
+
+
+def _install_worker(task_id, env_id, cmd, start_step, success_msg):
+    """Acquire the env's install lock (waiting if busy), then run pip."""
+    lock = _env_lock(env_id)
+    if not lock.acquire(blocking=False):
+        progress.update("env", task_id, status="running", progress=2,
+                        step="đang chờ một tác vụ cài đặt khác trên môi trường này…",
+                        append_log="Môi trường này đang có tác vụ cài đặt khác. "
+                                   "Đang chờ tới lượt…\n")
+        lock.acquire()
+    try:
+        _run_pip(task_id, cmd, start_step, success_msg)
+    finally:
+        lock.release()
+
+
 def _python_path(env_dir):
     """Path to the interpreter inside a venv (Linux layout, Windows fallback)."""
     posix = os.path.join(env_dir, "bin", "python")
@@ -77,27 +158,66 @@ def _python_path(env_dir):
     return posix  # expected location on the Linux HPC target
 
 
+class _ProgressEnvBuilder(venv.EnvBuilder):
+    """venv builder that reports each phase into the progress registry.
+
+    venv.create() runs several blocking phases with no output of its own. By
+    hooking each phase we can show a meaningful, moving status — most usefully
+    a "đang cài pip…" label during _setup_pip, the slow silent step where
+    ensurepip writes many small files onto the network filesystem.
+    """
+
+    def __init__(self, task_id, **kw):
+        super().__init__(**kw)
+        self._tid = task_id
+
+    def ensure_directories(self, env_dir):
+        ctx = super().ensure_directories(env_dir)
+        progress.update("env", self._tid, progress=20,
+                        step="tạo cấu trúc thư mục",
+                        append_log="Tạo thư mục môi trường…\n")
+        return ctx
+
+    def setup_python(self, context):
+        progress.update("env", self._tid, progress=40,
+                        step="sao chép trình thông dịch Python",
+                        append_log="Sao chép Python…\n")
+        super().setup_python(context)
+
+    def _setup_pip(self, context):
+        progress.update("env", self._tid, progress=60,
+                        step="cài pip vào môi trường (có thể mất một lúc)…",
+                        append_log="Cài pip + setuptools…\n")
+        super()._setup_pip(context)
+
+    def post_setup(self, context):
+        progress.update("env", self._tid, progress=90, step="hoàn thiện",
+                        append_log="pip đã sẵn sàng.\n")
+        super().post_setup(context)
+
+
 def create_env(task_id, env_name):
     """Create a venv in the background, registering it in the DB on success."""
     env_name = file_utils.validate_name(env_name)
-    progress.init("env", task_id, step="creating venv")
+    progress.init("env", task_id, step="đang khởi tạo")
 
     def worker():
         try:
             env_dir = file_utils.safe_join(config.ENVS_DIR, env_name)
             progress.update("env", task_id, status="running", progress=10,
-                            step="building virtual environment",
-                            append_log=f"Creating venv at {env_dir}\n")
-            builder = venv.EnvBuilder(with_pip=True, clear=False)
+                            step="đang dựng môi trường ảo",
+                            append_log=f"Tạo venv tại {env_dir}\n")
+            builder = _ProgressEnvBuilder(task_id, with_pip=True, clear=False)
             builder.create(env_dir)
-            progress.update("env", task_id, progress=80,
-                            step="registering", append_log="venv created.\n")
+            progress.update("env", task_id, progress=95,
+                            step="đăng ký môi trường",
+                            append_log="Đã tạo venv.\n")
             db.execute(
                 "INSERT INTO envs (name, path, created_at) VALUES (?, ?, ?)",
                 (env_name, env_dir, db.now()), commit=True,
             )
             progress.update("env", task_id, progress=100, status="done",
-                            step="complete", append_log="Environment ready.\n")
+                            step="hoàn tất", append_log="Môi trường sẵn sàng.\n")
         except Exception as exc:  # noqa: BLE001
             progress.update("env", task_id, status="error", step="failed",
                             append_log=f"ERROR: {exc}\n")
@@ -128,34 +248,13 @@ def install_packages(task_id, env_id, packages):
     py = _python_path(env["path"])
     if not os.path.exists(py):
         raise ValueError("Thiếu trình thông dịch của môi trường trên đĩa.")
-    progress.init("env", task_id, step="installing packages")
+    progress.init("env", task_id, step="đang chuẩn bị cài đặt")
+    cmd = [py, "-m", "pip", "install", "--no-input", "--prefer-binary"] + packages
 
     def worker():
         try:
-            cmd = [py, "-m", "pip", "install", "--no-input",
-                   "--prefer-binary"] + packages
-            progress.update("env", task_id, status="running", progress=5,
-                            step="pip install",
-                            append_log="$ " + " ".join(cmd) + "\n")
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1, env=_pip_env(),
-            )
-            for line in proc.stdout:
-                progress.update("env", task_id, append_log=line)
-                # Nudge the bar forward as pip works (capped below 95).
-                cur = progress.get("env", task_id)["progress"]
-                if cur < 95:
-                    progress.update("env", task_id, progress=cur + 1)
-            code = proc.wait()
-            if code == 0:
-                progress.update("env", task_id, progress=100, status="done",
-                                step="installed",
-                                append_log="\npip install succeeded.\n")
-            else:
-                progress.update("env", task_id, status="error",
-                                step="pip failed",
-                                append_log=f"\npip exited with code {code}.\n")
+            _install_worker(task_id, env_id, cmd, "pip install",
+                            "Đã cài đặt thư viện thành công.")
         except Exception as exc:  # noqa: BLE001
             progress.update("env", task_id, status="error", step="failed",
                             append_log=f"ERROR: {exc}\n")
@@ -173,38 +272,30 @@ def install_requirements_file(task_id, env_id, req_path):
     py = _python_path(env["path"])
     if not os.path.exists(py):
         raise ValueError("Thiếu trình thông dịch của môi trường trên đĩa.")
-    progress.init("env", task_id, step="installing from requirements.txt")
+    progress.init("env", task_id, step="đang chuẩn bị cài từ requirements.txt")
+    cmd = [py, "-m", "pip", "install", "--no-input", "--prefer-binary",
+           "-r", req_path]
 
     def worker():
         try:
-            cmd = [py, "-m", "pip", "install", "--no-input",
-                   "--prefer-binary", "-r", req_path]
-            progress.update("env", task_id, status="running", progress=5,
-                            step="pip install -r",
-                            append_log="$ " + " ".join(cmd) + "\n")
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1, env=_pip_env(),
-            )
-            for line in proc.stdout:
-                progress.update("env", task_id, append_log=line)
-                cur = progress.get("env", task_id)["progress"]
-                if cur < 95:
-                    progress.update("env", task_id, progress=cur + 1)
-            code = proc.wait()
-            if code == 0:
-                progress.update("env", task_id, progress=100, status="done",
-                                step="installed",
-                                append_log="\nRequirements installed.\n")
-            else:
-                progress.update("env", task_id, status="error",
-                                step="pip failed",
-                                append_log=f"\npip exited with code {code}.\n")
+            _install_worker(task_id, env_id, cmd, "pip install -r",
+                            "Đã cài đặt từ requirements.txt thành công.")
         except Exception as exc:  # noqa: BLE001
             progress.update("env", task_id, status="error", step="failed",
                             append_log=f"ERROR: {exc}\n")
 
     threading.Thread(target=worker, daemon=True).start()
+
+
+# List installed distributions via stdlib importlib.metadata instead of
+# `pip freeze`. It avoids importing the whole pip package (hundreds of files to
+# stat on a network FS), so it returns noticeably faster when viewing an env.
+_FREEZE_SNIPPET = (
+    "import importlib.metadata as m\n"
+    "pkgs = sorted({(d.metadata['Name'], d.version) for d in m.distributions()"
+    " if d.metadata['Name']}, key=lambda x: x[0].lower())\n"
+    "print('\\n'.join('%s==%s' % p for p in pkgs))\n"
+)
 
 
 def pip_freeze(env_id):
@@ -216,12 +307,12 @@ def pip_freeze(env_id):
     if not os.path.exists(py):
         return ["(thiếu trình thông dịch)"]
     try:
-        out = subprocess.run([py, "-m", "pip", "freeze"],
-                             capture_output=True, text=True, timeout=60)
+        out = subprocess.run([py, "-c", _FREEZE_SNIPPET],
+                             capture_output=True, text=True, timeout=30)
         lines = [l for l in out.stdout.splitlines() if l.strip()]
         return lines or ["(chưa cài gói nào)"]
     except Exception as exc:  # noqa: BLE001
-        return [f"(pip freeze lỗi: {exc})"]
+        return [f"(không liệt kê được thư viện: {exc})"]
 
 
 def delete_env(env_id):

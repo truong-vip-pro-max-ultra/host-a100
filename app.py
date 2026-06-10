@@ -197,11 +197,14 @@ def model_download(model_id):
 def envs_page():
     envs = env_service.list_envs()
     selected_id = request.args.get("env", type=int)
-    packages = None
-    if selected_id:
-        packages = env_service.pip_freeze(selected_id)
-    return render_template("envs.html", envs=envs,
-                           selected_id=selected_id, packages=packages)
+    # The installed-package list is fetched asynchronously (see packages.json)
+    # so opening an env never blocks page render on a slow listing.
+    return render_template("envs.html", envs=envs, selected_id=selected_id)
+
+
+@app.route("/envs/<int:env_id>/packages.json")
+def env_packages(env_id):
+    return jsonify({"packages": env_service.pip_freeze(env_id)})
 
 
 @app.route("/envs/create", methods=["POST"])
