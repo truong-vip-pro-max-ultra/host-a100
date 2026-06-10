@@ -85,6 +85,33 @@ def gpu_diagnostics():
     return "\n".join(lines)
 
 
+def slurm_gpu_raw(arch="ampere"):
+    """A read-only snapshot of GPU availability on the SLURM cluster.
+
+    The dashboard runs on the login node, which has no GPU, so nvidia-smi there
+    is misleading. When jobs are dispatched via SLURM the relevant question is
+    "how many <arch> GPUs are free on the cluster" — sinfo answers that without
+    consuming an allocation. Returns text (filtered to the arch) or None.
+    """
+    sinfo = shutil.which("sinfo")
+    if not sinfo:
+        return None
+    try:
+        out = subprocess.run(
+            [sinfo, "-h", "-N",
+             "-O", "NodeHost:14,Gres:22,GresUsed:24,StateLong:12"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    rows = [l.rstrip() for l in out.stdout.splitlines()
+            if arch in l.lower() and "gpu" in l.lower()]
+    if not rows:
+        return None
+    header = f"{'NODE':<14}{'GRES (tổng)':<22}{'GRES đã dùng':<24}TRẠNG THÁI"
+    return header + "\n" + "\n".join(rows)
+
+
 def raw_nvidia_smi():
     """Return the plain textual nvidia-smi output, or an explanatory message."""
     smi = _find_nvidia_smi()

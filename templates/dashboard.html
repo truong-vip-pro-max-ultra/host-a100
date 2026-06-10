@@ -54,6 +54,19 @@
           </div>
         </div>
         {% endfor %}
+      {% elif slurm_active %}
+        <div class="alert alert-success py-2 mb-2 small">
+          <i class="bi bi-check-circle"></i> Job được gửi tới node GPU
+          <strong>A100</strong> qua SLURM (<code>{{ slurm_gres }}</code>). App chạy
+          ở node đăng nhập (không gắn GPU) nên panel này hiển thị tình trạng GPU
+          của cả cụm thay vì của node app.
+        </div>
+        {% if slurm_gpu %}
+          <pre class="logbox mb-0" style="font-size:.72rem">{{ slurm_gpu }}</pre>
+        {% else %}
+          <p class="text-muted small mb-0">Không đọc được <code>sinfo</code> để
+            xem tình trạng GPU của cụm.</p>
+        {% endif %}
       {% else %}
         <div class="text-center text-muted py-4">
           <i class="bi bi-gpu-card" style="font-size:2rem;opacity:.4"></i>

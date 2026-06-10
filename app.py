@@ -83,6 +83,9 @@ def dashboard():
               "pct": int(used * 100 / total) if total else 0},
         cpu=sysinfo.cpu_info(),
         ram=sysinfo.ram_info(),
+        slurm_active=job_service.slurm_active(),
+        slurm_gres=config.SLURM_GRES,
+        slurm_gpu=gpu.slurm_gpu_raw(),
     )
 
 
