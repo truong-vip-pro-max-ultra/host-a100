@@ -44,7 +44,7 @@ MAX_CODE_FILE_BYTES = 10 * 1024 * 1024
 
 # Network binding. HPC nodes are typically reached over an internal network.
 HOST = os.environ.get("HOSTA100_HOST", "0.0.0.0")
-PORT = int(os.environ.get("HOSTA100_PORT", "5000"))
+PORT = int(os.environ.get("HOSTA100_PORT", "8198"))
 
 # Flask secret key (sessions / flash messages).
 SECRET_KEY = os.environ.get("HOSTA100_SECRET", "change-me-on-the-hpc-server")
