@@ -78,7 +78,7 @@ def read_log(job_id):
     if not os.path.exists(log_file):
         return ""
     try:
-        with open(log_file, "r", errors="replace") as fh:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as fh:
             return fh.read()[-20000:]
     except OSError:
         return ""
@@ -257,12 +257,14 @@ def _launch(job_id, cmd, cwd, job_dir, output_dir, params_file, model_path=""):
             env_vars["MODEL_PATH"] = model_path
 
         try:
-            with open(log_file, "w", buffering=1) as logf:
+            with open(log_file, "w", buffering=1,
+                      encoding="utf-8", errors="replace") as logf:
                 logf.write("$ " + " ".join(cmd) + "\n")
                 logf.write(f"(cwd={cwd})\n\n")
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, env=env_vars, cwd=cwd,
+                    text=True, bufsize=1, encoding="utf-8", errors="replace",
+                    env=env_vars, cwd=cwd,
                 )
                 for line in proc.stdout:
                     logf.write(line)

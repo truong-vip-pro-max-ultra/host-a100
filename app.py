@@ -13,6 +13,7 @@ polling endpoints that the Bootstrap UI queries on a timer.
 """
 import hmac
 import os
+import sys
 import tempfile
 import uuid
 
@@ -597,16 +598,25 @@ def too_large(_e):
 
 
 def main():
+    # Some HPC nodes run a latin-1 locale; make console output UTF-8 safe so a
+    # stray non-ASCII print can't crash startup.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     config.ensure_dirs()
     db.init_db()
     os.makedirs(UPLOAD_TMP, exist_ok=True)
+    # ASCII-only console logs: some HPC nodes use a latin-1 locale and would
+    # crash on a non-ASCII print at startup.
     if config.AUTH_ENABLED:
-        print("[host-a100] Đăng nhập bằng mật khẩu: BẬT.")
+        print("[host-a100] Password login: ENABLED.")
     else:
-        print("[host-a100] ⚠️  CẢNH BÁO: chưa đặt mật khẩu (HOSTA100_PASSWORD / "
-              "config.DEFAULT_PASSWORD). App KHÔNG có đăng nhập — KHÔNG public "
-              "(cloudflare/ngrok) khi chưa bật, vì 'chạy code dự án' thực thi "
-              "Python tùy ý dưới tài khoản của bạn.")
+        print("[host-a100] WARNING: no password set (HOSTA100_PASSWORD / "
+              "config.DEFAULT_PASSWORD). Login is DISABLED -- do NOT expose "
+              "publicly (cloudflare/ngrok) until you set one, because 'run "
+              "project code' executes arbitrary Python under your account.")
     # threaded=True so the upload POST and the polling GETs run concurrently in
     # this single process. debug/reloader OFF to keep one stable process with
     # its background threads intact.

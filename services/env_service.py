@@ -117,7 +117,7 @@ def _run_pip(task_id, cmd, start_step, success_msg):
                     step=start_step, append_log="$ " + " ".join(cmd) + "\n")
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1, env=_pip_env(),
+        text=True, bufsize=1, encoding="utf-8", errors="replace", env=_pip_env(),
     )
 
     # While pip is silently unpacking wheels to disk, no lines arrive, so we
