@@ -20,13 +20,22 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import threading
+import time
 import zipfile
 
-# Resolve srun once so we can decide whether SLURM dispatch is even possible.
+# Resolve srun/sbatch once so we can decide whether SLURM dispatch is possible.
+# srun = interactive (used by the Terminal/PTY); sbatch = detached batch jobs.
 _SRUN = shutil.which("srun")
+_SBATCH = shutil.which("sbatch")
+
+# How often we poll squeue for a running job's state, and the file in which we
+# stash its SLURM job id (so delete_job can scancel a still-running job).
+_POLL_SECS = 4
+_SLURM_ID_FILE = "slurm_job_id"
 
 import config
 from services import env_service, model_service, project_service
@@ -178,13 +187,14 @@ def submit_job(model_id, env_id, job_name, params_json,
                "--output", result_path]
         cwd = job_dir
 
-    # Cách B: prepend srun so the job runs on a compute node. GPU jobs request a
-    # GPU (optionally pinned to a specific model via --constraint); CPU-only jobs
-    # skip --gres so they don't waste a GPU and get scheduled faster.
-    cmd = _srun_prefix(job_id, cwd, use_gpu=use_gpu, gpu_model=gpu_model) + cmd
-
+    # Cách B (sbatch detached): when SLURM is active the job is submitted to a
+    # compute node via `sbatch`, which writes its output to a file on the shared
+    # filesystem. There is NO live srun back-channel to time out ("Socket timed
+    # out on send/recv"), and the job survives an app restart. _launch picks the
+    # sbatch path when SLURM+sbatch are available, else runs the command locally.
     _launch(job_id, cmd, cwd, job_dir, output_dir, params_file,
-            model_path=model["path"] if model else "")
+            model_path=model["path"] if model else "",
+            use_gpu=use_gpu, gpu_model=gpu_model)
     return job_id
 
 
@@ -260,6 +270,32 @@ def _srun_prefix(job_id, cwd, use_gpu=True, gpu_model=""):
     return pre
 
 
+def _sbatch_flags(job_id, cwd, slurm_out, use_gpu=True, gpu_model=""):
+    """The `sbatch` flags for a detached job (mirrors _srun_prefix's options).
+
+    --output sends the job's combined stdout/stderr to a file on the shared FS,
+    so we tail that file instead of streaming over a live connection. --export=ALL
+    forwards JOB_DIR/OUTPUT_DIR/MODEL_PATH/PYTHONIOENCODING/etc. to the job.
+    """
+    flags = ["--job-name", f"hosta100-{job_id}",
+             "--chdir", cwd,
+             "--export=ALL",
+             "--output", slurm_out]
+    if use_gpu:
+        flags += _gpu_flags(gpu_model)
+    if config.SLURM_PARTITION:
+        flags += ["--partition", config.SLURM_PARTITION]
+    if config.SLURM_ACCOUNT:
+        flags += ["--account", config.SLURM_ACCOUNT]
+    if config.SLURM_TIME:
+        flags += ["--time", config.SLURM_TIME]
+    if config.SLURM_CPUS:
+        flags += ["--cpus-per-task", config.SLURM_CPUS]
+    if config.SLURM_MEM:
+        flags += ["--mem", config.SLURM_MEM]
+    return flags
+
+
 def _set_status(job_id, status=None, prog=None):
     sets, vals = [], []
     if status is not None:
@@ -274,81 +310,259 @@ def _set_status(job_id, status=None, prog=None):
                    tuple(vals), commit=True)
 
 
-def _launch(job_id, cmd, cwd, job_dir, output_dir, params_file, model_path=""):
+def _launch(job_id, cmd, cwd, job_dir, output_dir, params_file, model_path="",
+            use_gpu=True, gpu_model=""):
     log_file = os.path.join(job_dir, "job.log")
 
-    def worker():
-        launch_step = ("đang gửi tới SLURM, chờ cấp GPU…" if slurm_active()
-                       else "launching")
-        progress.update("job", job_id, status="running", progress=5,
-                        step=launch_step)
-        _set_status(job_id, status="running", prog=5)
+    # Environment for the child process. User code reads these to find the model,
+    # write outputs, and read params — without any shell exposure.
+    env_vars = dict(os.environ)
+    env_vars.update({
+        "PYTHONUNBUFFERED": "1",
+        # Compute nodes often have a latin-1 locale, so the job's stdout defaults
+        # to latin-1 and any non-ASCII print() (e.g. a Vietnamese transcript)
+        # raises UnicodeEncodeError. Force UTF-8 stdio; we read the stream/file
+        # as UTF-8 below, so this round-trips cleanly.
+        "PYTHONIOENCODING": "utf-8",
+        "JOB_ID": str(job_id),
+        "JOB_DIR": job_dir,
+        "OUTPUT_DIR": output_dir,
+        "PARAMS_FILE": params_file,
+    })
+    if model_path:
+        env_vars["MODEL_PATH"] = model_path
 
-        # Environment for the child process. User code reads these to find the
-        # model, write outputs, and read params — without any shell exposure.
-        env_vars = dict(os.environ)
-        env_vars.update({
-            "PYTHONUNBUFFERED": "1",
-            # Compute nodes often have a latin-1 locale, so the job's stdout
-            # defaults to latin-1 and any non-ASCII print() (e.g. a Vietnamese
-            # transcript) raises UnicodeEncodeError. Force UTF-8 stdio; we decode
-            # the stream as UTF-8 below, so this round-trips cleanly.
-            "PYTHONIOENCODING": "utf-8",
-            "JOB_ID": str(job_id),
-            "JOB_DIR": job_dir,
-            "OUTPUT_DIR": output_dir,
-            "PARAMS_FILE": params_file,
-        })
-        if model_path:
-            env_vars["MODEL_PATH"] = model_path
+    if slurm_active() and _SBATCH:
+        target = lambda: _run_via_sbatch(job_id, cmd, cwd, job_dir, log_file,
+                                         env_vars, use_gpu, gpu_model)
+    else:
+        target = lambda: _run_local(job_id, cmd, cwd, log_file, env_vars)
+    threading.Thread(target=target, daemon=True).start()
 
+
+def _finish(job_id, code):
+    """Mark a job done (code 0) or error, with a closing log line."""
+    if code == 0:
+        progress.update("job", job_id, progress=100, status="done",
+                        step="completed",
+                        append_log="\nJob finished successfully.\n")
+        _set_status(job_id, status="done", prog=100)
+    else:
+        progress.update("job", job_id, status="error", step="process failed",
+                        append_log=f"\nProcess exited with code {code}.\n")
+        _set_status(job_id, status="error")
+
+
+def _scan_progress(job_id, line):
+    """Honour a `PROGRESS <n>` line the job prints to drive the progress bar."""
+    s = line.strip()
+    if s.startswith("PROGRESS"):
         try:
-            with open(log_file, "w", buffering=1,
-                      encoding="utf-8", errors="replace") as logf:
-                logf.write("$ " + " ".join(cmd) + "\n")
-                logf.write(f"(cwd={cwd})\n\n")
-                proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, encoding="utf-8", errors="replace",
-                    env=env_vars, cwd=cwd,
-                )
-                for line in proc.stdout:
-                    logf.write(line)
-                    progress.update("job", job_id, append_log=line)
-                    stripped = line.strip()
-                    low = stripped.lower()
-                    # srun status lines (sent to stderr, merged here).
-                    if low.startswith("srun:"):
-                        if "queued and waiting" in low:
-                            progress.update("job", job_id,
-                                            step="đang chờ SLURM cấp GPU…")
-                        elif "has been allocated" in low:
-                            progress.update("job", job_id, progress=8,
-                                            step="đã được cấp GPU, đang chạy…")
-                    if stripped.startswith("PROGRESS"):
-                        try:
-                            val = int(stripped.split()[1])
-                            progress.update("job", job_id, progress=val)
-                            _set_status(job_id, prog=val)
-                        except (IndexError, ValueError):
-                            pass
-                code = proc.wait()
-            if code == 0:
-                progress.update("job", job_id, progress=100, status="done",
-                                step="completed",
-                                append_log="\nJob finished successfully.\n")
-                _set_status(job_id, status="done", prog=100)
-            else:
-                progress.update("job", job_id, status="error",
-                                step="process failed",
-                                append_log=f"\nProcess exited with code {code}.\n")
-                _set_status(job_id, status="error")
-        except Exception as exc:  # noqa: BLE001
-            progress.update("job", job_id, status="error", step="failed",
-                            append_log=f"ERROR: {exc}\n")
-            _set_status(job_id, status="error")
+            val = int(s.split()[1])
+            progress.update("job", job_id, progress=val)
+            _set_status(job_id, prog=val)
+        except (IndexError, ValueError):
+            pass
 
-    threading.Thread(target=worker, daemon=True).start()
+
+def _run_local(job_id, cmd, cwd, log_file, env_vars):
+    """Run the job as a local subprocess (no SLURM — e.g. Windows dev)."""
+    progress.update("job", job_id, status="running", progress=5, step="launching")
+    _set_status(job_id, status="running", prog=5)
+    try:
+        with open(log_file, "w", buffering=1,
+                  encoding="utf-8", errors="replace") as logf:
+            logf.write("$ " + " ".join(cmd) + "\n")
+            logf.write(f"(cwd={cwd})\n\n")
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1, encoding="utf-8", errors="replace",
+                env=env_vars, cwd=cwd,
+            )
+            for line in proc.stdout:
+                logf.write(line)
+                progress.update("job", job_id, append_log=line)
+                _scan_progress(job_id, line)
+            code = proc.wait()
+        _finish(job_id, code)
+    except Exception as exc:  # noqa: BLE001
+        progress.update("job", job_id, status="error", step="failed",
+                        append_log=f"ERROR: {exc}\n")
+        _set_status(job_id, status="error")
+
+
+def _write_batch_script(job_dir, cwd, cmd):
+    """Write the run.sh wrapper that sbatch executes on the compute node."""
+    script = os.path.join(job_dir, "run.sh")
+    body = ("#!/bin/bash\n"
+            f"cd {shlex.quote(cwd)}\n"
+            f"exec {' '.join(shlex.quote(c) for c in cmd)}\n")
+    with open(script, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    try:
+        os.chmod(script, 0o755)
+    except OSError:
+        pass
+    return script
+
+
+def _record_slurm_id(job_dir, slurm_id):
+    try:
+        with open(os.path.join(job_dir, _SLURM_ID_FILE), "w") as fh:
+            fh.write(slurm_id)
+    except OSError:
+        pass
+
+
+def _run_via_sbatch(job_id, cmd, cwd, job_dir, log_file, env_vars,
+                    use_gpu, gpu_model):
+    """Submit the job to a compute node via `sbatch` and tail its output file."""
+    progress.update("job", job_id, status="running", progress=5,
+                    step="đang gửi tới SLURM, chờ cấp GPU…")
+    _set_status(job_id, status="running", prog=5)
+
+    slurm_out = os.path.join(job_dir, "slurm.out")
+    open(slurm_out, "w").close()      # fresh file so the tail starts empty
+    script = _write_batch_script(job_dir, cwd, cmd)
+    submit = ([_SBATCH or "sbatch", "--parsable"]
+              + _sbatch_flags(job_id, cwd, slurm_out, use_gpu, gpu_model)
+              + [script])
+
+    try:
+        with open(log_file, "w", buffering=1,
+                  encoding="utf-8", errors="replace") as logf:
+            logf.write("$ " + " ".join(submit) + "\n")
+            logf.write(f"(cwd={cwd})\n\n")
+
+            res = subprocess.run(
+                submit, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+                env=env_vars, cwd=cwd, timeout=60,
+            )
+            out = (res.stdout or "").strip()
+            # --parsable prints "<jobid>" or "<jobid>;<cluster>".
+            slurm_id = out.split(";")[0].strip() if out else ""
+            if res.returncode != 0 or not slurm_id.isdigit():
+                logf.write(out + "\n")
+                progress.update("job", job_id, status="error", step="sbatch lỗi",
+                                append_log=out +
+                                f"\nsbatch thất bại (mã {res.returncode}).\n")
+                _set_status(job_id, status="error")
+                return
+
+            _record_slurm_id(job_dir, slurm_id)
+            msg = f"Đã gửi SLURM job {slurm_id} (sbatch detached).\n"
+            logf.write(msg)
+            progress.update("job", job_id, append_log=msg,
+                            step="đã gửi, chờ SLURM cấp tài nguyên…")
+            _monitor_sbatch(job_id, slurm_id, slurm_out, logf)
+    except subprocess.TimeoutExpired:
+        progress.update("job", job_id, status="error", step="sbatch treo",
+                        append_log="sbatch không phản hồi trong 60s.\n")
+        _set_status(job_id, status="error")
+    except Exception as exc:  # noqa: BLE001
+        progress.update("job", job_id, status="error", step="failed",
+                        append_log=f"ERROR: {exc}\n")
+        _set_status(job_id, status="error")
+
+
+def _stream_slurm_out(job_id, slurm_out, logf, pos):
+    """Copy newly-appended slurm.out bytes into job.log + the live log. Returns
+    the new read position."""
+    if not os.path.exists(slurm_out):
+        return pos
+    try:
+        with open(slurm_out, "r", encoding="utf-8", errors="replace") as fh:
+            fh.seek(pos)
+            chunk = fh.read()
+            pos = fh.tell()
+    except OSError:
+        return pos
+    if chunk:
+        logf.write(chunk)
+        for line in chunk.splitlines(keepends=True):
+            progress.update("job", job_id, append_log=line)
+            _scan_progress(job_id, line)
+    return pos
+
+
+def _squeue_state(slurm_id):
+    """The job's squeue state (PENDING/RUNNING/…), None if it's gone from the
+    queue (finished), or 'UNKNOWN' on a transient squeue error."""
+    try:
+        res = subprocess.run(
+            ["squeue", "-h", "-j", slurm_id, "-o", "%T"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=30,
+        )
+    except Exception:  # noqa: BLE001
+        return "UNKNOWN"
+    out = (res.stdout or "").strip()
+    if not out:
+        return None
+    return out.splitlines()[0].strip()
+
+
+def _sacct_final(slurm_id):
+    """Final (State, ExitCode) from accounting once the job leaves the queue.
+    Retries briefly because sacct can lag a couple seconds behind squeue."""
+    last_state = None
+    for _ in range(6):
+        try:
+            res = subprocess.run(
+                ["sacct", "-j", slurm_id, "-X", "-n", "-P", "-o", "State,ExitCode"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, timeout=30,
+            )
+        except Exception:  # noqa: BLE001
+            return None, ""
+        out = (res.stdout or "").strip()
+        if out:
+            state, _, exit_code = out.splitlines()[0].partition("|")
+            state, exit_code = state.strip(), exit_code.strip()
+            last_state = state
+            if state and not state.endswith("ING"):   # terminal state reached
+                return state, exit_code
+        time.sleep(2)
+    return last_state, ""
+
+
+def _monitor_sbatch(job_id, slurm_id, slurm_out, logf):
+    """Poll squeue and tail slurm.out until the job ends, then settle status."""
+    pos = 0
+    seen_running = False
+    unknown = 0
+    while True:
+        pos = _stream_slurm_out(job_id, slurm_out, logf, pos)
+        state = _squeue_state(slurm_id)
+        if state is None:
+            break
+        if state == "UNKNOWN":
+            unknown += 1
+            if unknown > 30:        # ~2 min of squeue failures → fall to sacct
+                break
+        else:
+            unknown = 0
+            if state in ("PENDING", "CONFIGURING"):
+                progress.update("job", job_id, step="đang chờ SLURM cấp GPU…")
+            elif state in ("RUNNING", "COMPLETING") and not seen_running:
+                seen_running = True
+                progress.update("job", job_id, progress=8,
+                                step="đã được cấp tài nguyên, đang chạy…")
+        time.sleep(_POLL_SECS)
+
+    time.sleep(1)               # let SLURM flush the final lines to slurm.out
+    _stream_slurm_out(job_id, slurm_out, logf, pos)
+
+    state, exit_code = _sacct_final(slurm_id)
+    if state and state.startswith("COMPLETED"):
+        _finish(job_id, 0)
+    else:
+        detail = (f" trạng thái={state}" if state else "") + \
+                 (f" exit={exit_code}" if exit_code else "")
+        progress.update("job", job_id, status="error", step="job thất bại",
+                        append_log=f"\nSLURM job {slurm_id} kết thúc:{detail}\n")
+        _set_status(job_id, status="error")
 
 
 # --------------------------------------------------------------------------- #
@@ -460,10 +674,29 @@ def zip_outputs(job_id):
     return buf, f"job_{job_id}_outputs.zip"
 
 
+def _scancel_job(job):
+    """Best-effort cancel of a still-running SLURM job before its dirs go away."""
+    job_dir = job.get("logs_path")
+    if not job_dir:
+        return
+    try:
+        with open(os.path.join(job_dir, _SLURM_ID_FILE)) as fh:
+            slurm_id = fh.read().strip()
+    except OSError:
+        return
+    if slurm_id.isdigit() and shutil.which("scancel"):
+        try:
+            subprocess.run(["scancel", slurm_id], timeout=20,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def delete_job(job_id):
     job = get_job(job_id)
     if not job:
         return False
+    _scancel_job(job)
     for path, base in ((job.get("logs_path"), config.JOBS_DIR),
                        (job.get("result_path"), config.RESULTS_DIR)):
         if path and file_utils.is_within(base, path) and os.path.exists(path):
