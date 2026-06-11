@@ -289,6 +289,11 @@ def _launch(job_id, cmd, cwd, job_dir, output_dir, params_file, model_path=""):
         env_vars = dict(os.environ)
         env_vars.update({
             "PYTHONUNBUFFERED": "1",
+            # Compute nodes often have a latin-1 locale, so the job's stdout
+            # defaults to latin-1 and any non-ASCII print() (e.g. a Vietnamese
+            # transcript) raises UnicodeEncodeError. Force UTF-8 stdio; we decode
+            # the stream as UTF-8 below, so this round-trips cleanly.
+            "PYTHONIOENCODING": "utf-8",
             "JOB_ID": str(job_id),
             "JOB_DIR": job_dir,
             "OUTPUT_DIR": output_dir,

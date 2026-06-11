@@ -14,6 +14,15 @@ GPU đang full thì để DEVICE="cpu" (chạy ngay, bỏ chọn "cần GPU" ở
 Khi có GPU trống: đổi DEVICE="cuda", bật "cần GPU", chọn "Loại GPU" = A40/A100.
 """
 import os
+import sys
+# Compute node hay dùng locale latin-1 → print() chữ tiếng Việt sẽ nổ
+# UnicodeEncodeError. Ép stdout/stderr sang UTF-8.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # PHẢI đặt TRƯỚC khi import faster_whisper/huggingface — nếu không nó sẽ thử kiểm
 # tra online rồi TREO vì compute node không có mạng.
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
