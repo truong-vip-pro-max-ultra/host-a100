@@ -202,14 +202,17 @@ def _gres_count():
 def _gpu_flags(gpu_model=""):
     """The srun GPU request flags.
 
-    gpu_model="" → any GPU of the configured kind (config.SLURM_GRES).
+    gpu_model="" → ANY GPU type (untyped `--gres=gpu:N`). This is the "cấp nhanh
+    nhất" choice, so it must NOT pin to the arch family — `gpu:ampere:N` would
+    still queue behind the busy A100/A40 nodes even when idle L40/H200/blackwell
+    nodes are sitting free. Untyped lets SLURM grab whatever is free first.
     gpu_model set (e.g. "a100") → pin to that MODEL via --constraint, because the
     GRES type is only the arch family (ampere = A100 AND A40), so the constraint
     is what actually selects A100 vs A40. We resolve the arch from sinfo to keep
     a typed --gres (known-good on this cluster); fall back to an untyped count.
     """
     if not gpu_model:
-        return [f"--gres={config.SLURM_GRES}"] if config.SLURM_GRES else []
+        return [f"--gres=gpu:{_gres_count()}"]
     arch = ""
     models = gpu.slurm_gpu_models() or []
     for m in models:
