@@ -2,13 +2,13 @@
    dashboard.html and standalone by /dashboard/fragment, which the page polls
    and swaps in place — so this is the single source of truth for both. #}
 <div class="row g-3 mb-3">
-  {% if slurm_gpu_counts %}
+  {% if gpu_models %}
   <div class="col-6 col-xl">
     <div class="card stat"><div class="card-body d-flex align-items-center gap-3">
       <div class="ic g-emerald"><i class="bi bi-gpu-card"></i></div>
-      <div><div class="val">{{ slurm_gpu_counts.free }}<span class="text-muted"
-             style="font-size:1.1rem;font-weight:600">/{{ slurm_gpu_counts.total }}</span></div>
-        <div class="lbl">GPU A100 trống</div></div>
+      <div><div class="val">{{ gpu_models|sum(attribute='free') }}<span class="text-muted"
+             style="font-size:1.1rem;font-weight:600">/{{ gpu_models|sum(attribute='total') }}</span></div>
+        <div class="lbl">GPU trống (mọi loại)</div></div>
     </div></div>
   </div>
   {% endif %}
@@ -59,35 +59,34 @@
         {% endfor %}
       {% elif slurm_active %}
         <div class="alert alert-success py-2 mb-2 small">
-          <i class="bi bi-check-circle"></i> Job được gửi tới node GPU
-          <strong>A100</strong> qua SLURM (<code>{{ slurm_gres }}</code>). App chạy
-          ở node đăng nhập (không gắn GPU) nên panel này hiển thị tình trạng GPU
-          của cả cụm thay vì của node app.
+          <i class="bi bi-check-circle"></i> Job được gửi tới node GPU qua SLURM.
+          App chạy ở node đăng nhập (không gắn GPU) nên panel này hiển thị tình
+          trạng GPU của <strong>cả cụm</strong>, đếm theo <strong>model thật</strong>
+          (nhãn <code>ampere</code> gồm cả A100 lẫn A40 — đây tách riêng).
         </div>
-        {% if slurm_gpu_counts %}
-        <div class="row g-2 text-center mb-3">
-          <div class="col-4">
-            <div class="p-2" style="background:#ecfdf5;border-radius:12px">
-              <div style="font-size:1.6rem;font-weight:800;color:#059669;line-height:1">
-                {{ slurm_gpu_counts.free }}</div>
-              <div class="small text-muted">Còn trống</div></div>
-          </div>
-          <div class="col-4">
-            <div class="p-2" style="background:#eff6ff;border-radius:12px">
-              <div style="font-size:1.6rem;font-weight:800;color:#2563eb;line-height:1">
-                {{ slurm_gpu_counts.used }}</div>
-              <div class="small text-muted">Đang dùng</div></div>
-          </div>
-          <div class="col-4">
-            <div class="p-2" style="background:#f5f3ff;border-radius:12px">
-              <div style="font-size:1.6rem;font-weight:800;color:#7c3aed;line-height:1">
-                {{ slurm_gpu_counts.total }}</div>
-              <div class="small text-muted">Tổng ({{ slurm_gpu_counts.nodes }} node)</div></div>
-          </div>
+        {% if gpu_models %}
+        <div class="table-responsive mb-3">
+          <table class="table table-sm align-middle mb-0">
+            <thead><tr>
+              <th>GPU</th>
+              <th class="text-end">Trống</th>
+              <th class="text-end">Đang dùng</th>
+              <th class="text-end">Tổng</th>
+            </tr></thead>
+            <tbody>
+            {% for m in gpu_models %}
+              <tr>
+                <td><strong>{{ m.model|upper }}</strong>
+                  <span class="text-muted small">({{ m.arch }} · {{ m.nodes }} node)</span></td>
+                <td class="text-end">
+                  <span class="badge {{ 'bg-success' if m.free else 'bg-secondary' }}">{{ m.free }}</span></td>
+                <td class="text-end text-muted">{{ m.used }}</td>
+                <td class="text-end text-muted">{{ m.total }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
         </div>
-        {% endif %}
-        {% if slurm_gpu %}
-          <pre class="logbox mb-0" style="font-size:.72rem">{{ slurm_gpu }}</pre>
         {% else %}
           <p class="text-muted small mb-0">Không đọc được <code>sinfo</code> để
             xem tình trạng GPU của cụm.</p>

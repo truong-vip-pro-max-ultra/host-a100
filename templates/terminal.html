@@ -85,9 +85,15 @@
       </div>
       <div class="form-check form-switch m-0" id="gpuWrap" style="display:none">
         <input class="form-check-input" type="checkbox" id="useGpu" checked>
-        <label class="form-check-label" for="useGpu">
-          Cần GPU ({{ slurm_gres }})</label>
+        <label class="form-check-label" for="useGpu">Cần GPU</label>
       </div>
+      <select class="form-select form-select-sm w-auto" id="gpuModel"
+              style="display:none" title="Loại GPU (ampere = A100 hoặc A40)">
+        <option value="">GPU bất kỳ</option>
+        {% for m in gpu_models %}
+        <option value="{{ m.model }}">{{ m.model|upper }} ({{ m.free }}/{{ m.total }} trống)</option>
+        {% endfor %}
+      </select>
       {% endif %}
       <button class="btn btn-sm btn-light ms-auto" id="clearBtn">
         <i class="bi bi-eraser"></i> Xoá màn hình</button>
@@ -109,6 +115,7 @@
   const onCompute  = document.getElementById('onCompute');
   const useGpu     = document.getElementById('useGpu');
   const gpuWrap    = document.getElementById('gpuWrap');
+  const gpuModel   = document.getElementById('gpuModel');
   const whereBadge = document.getElementById('whereBadge');
 
   let cwd = promptPath.textContent;
@@ -117,7 +124,9 @@
 
   if (onCompute) {
     onCompute.addEventListener('change', () => {
-      gpuWrap.style.display = onCompute.checked ? '' : 'none';
+      const show = onCompute.checked ? '' : 'none';
+      gpuWrap.style.display = show;
+      if (gpuModel) gpuModel.style.display = show;
     });
   }
 
@@ -165,6 +174,7 @@
           command: command,
           on_compute: onCompute ? onCompute.checked : false,
           use_gpu: useGpu ? useGpu.checked : false,
+          gpu_model: gpuModel ? gpuModel.value : '',
         }),
       });
       if (res.status === 401){

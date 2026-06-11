@@ -98,7 +98,9 @@ PORT = int(os.environ.get("HOSTA100_PORT", "8198"))
 # only an optional override, e.g. for a one-off run without editing the file.)
 # =========================================================================== #
 DEFAULT_USE_SLURM = True
-DEFAULT_SLURM_GRES = "gpu:ampere:1"   # "ampere" = A100 on this cluster
+DEFAULT_SLURM_GRES = "gpu:ampere:1"   # arch family, NOT a model: ampere = A100 OR A40.
+                                      # Pick the exact model per-job via the UI's
+                                      # "Loại GPU" dropdown (adds --constraint=<model>).
 DEFAULT_SLURM_TIME = "04:00:00"       # max wall time per job (HH:MM:SS); "" = cluster default
 DEFAULT_SLURM_PARTITION = ""          # set if the cluster requires one
 DEFAULT_SLURM_ACCOUNT = ""            # set if it requires -A <account>

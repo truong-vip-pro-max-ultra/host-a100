@@ -3,12 +3,15 @@
 # Chạy host-a100 trên một node GPU của cụm SLURM.
 #
 # Node đăng nhập (hpc-head1) KHÔNG có GPU — GPU nằm ở các compute node và phải
-# xin qua SLURM. GPU được gắn nhãn theo kiến trúc, KHÔNG phải tên thương mại:
-#     ampere   -> A100 / A30 / A40   (đây là "A100")
-#     hopper   -> H100
-#     lovelace -> RTX 40xx / L40
-#     turing   -> T4 / RTX 20xx
-#     blackwell-> B200 / RTX 50xx
+# xin qua SLURM. GRES được gắn nhãn theo KIẾN TRÚC (họ chip), KHÔNG phải model:
+#     ampere   -> A100 HOẶC A40 (và A4500)   <-- KHÔNG đảm bảo ra A100!
+#     hopper   -> H200
+#     lovelace -> L40 / L40S
+#     turing   -> RTX-6000 / T4 / RTX-2080Ti
+#     blackwell-> RTX 6000 Pro
+# Model thật nằm ở node FEATURE. Muốn ĐÚNG A100 phải thêm constraint:
+#     --gres=gpu:ampere:1 --constraint=a100   (chỉ node ctit089)
+# Xem model + số GPU trống mỗi loại:  sinfo -N -o "%n|%G|%f|%T"
 #
 # Dùng:
 #     sbatch scripts/run_on_gpu.sbatch
@@ -20,7 +23,8 @@
 #     # rồi mở http://localhost:8198
 # ---------------------------------------------------------------------------
 #SBATCH --job-name=host-a100
-#SBATCH --gres=gpu:ampere:1        # 1 GPU A100 (ampere). Đổi nhãn nếu cần.
+#SBATCH --gres=gpu:ampere:1        # 1 GPU họ ampere (A100/A40). Thêm dòng dưới để ép A100:
+##SBATCH --constraint=a100         # bỏ ## để chỉ chạy trên node A100 (ctit089)
 #SBATCH --time=04:00:00            # thời lượng tối đa; tăng/giảm tuỳ nhu cầu
 #SBATCH --output=host-a100-%j.log  # %j = job id
 

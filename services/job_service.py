@@ -19,6 +19,7 @@ browsable and downloadable from the Jobs page.
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -30,7 +31,7 @@ _SRUN = shutil.which("srun")
 import config
 from services import env_service, model_service, project_service
 from services import storage_service as db
-from utils import file_utils, progress
+from utils import file_utils, gpu, progress
 
 # Absolute path to the runner that ships with the platform.
 _RUNNER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -86,7 +87,7 @@ def read_log(job_id):
 
 def submit_job(model_id, env_id, job_name, params_json,
                run_mode="runner", project_id=None, main_file=None,
-               use_gpu=True):
+               use_gpu=True, gpu_model=""):
     """
     Validate inputs, create the DB row + job dirs, and launch the run thread.
 
@@ -177,10 +178,10 @@ def submit_job(model_id, env_id, job_name, params_json,
                "--output", result_path]
         cwd = job_dir
 
-    # Cách B: prepend srun so the job runs on a compute node. GPU jobs request
-    # an A100 (ampere); CPU-only jobs skip --gres so they don't waste a GPU and
-    # get scheduled faster.
-    cmd = _srun_prefix(job_id, cwd, use_gpu=use_gpu) + cmd
+    # Cách B: prepend srun so the job runs on a compute node. GPU jobs request a
+    # GPU (optionally pinned to a specific model via --constraint); CPU-only jobs
+    # skip --gres so they don't waste a GPU and get scheduled faster.
+    cmd = _srun_prefix(job_id, cwd, use_gpu=use_gpu, gpu_model=gpu_model) + cmd
 
     _launch(job_id, cmd, cwd, job_dir, output_dir, params_file,
             model_path=model["path"] if model else "")
@@ -192,7 +193,34 @@ def slurm_active():
     return bool(config.USE_SLURM and _SRUN)
 
 
-def _srun_prefix(job_id, cwd, use_gpu=True):
+def _gres_count():
+    """The GPU count from config.SLURM_GRES (the trailing `:N`), default 1."""
+    m = re.search(r":(\d+)\s*$", config.SLURM_GRES or "")
+    return m.group(1) if m else "1"
+
+
+def _gpu_flags(gpu_model=""):
+    """The srun GPU request flags.
+
+    gpu_model="" → any GPU of the configured kind (config.SLURM_GRES).
+    gpu_model set (e.g. "a100") → pin to that MODEL via --constraint, because the
+    GRES type is only the arch family (ampere = A100 AND A40), so the constraint
+    is what actually selects A100 vs A40. We resolve the arch from sinfo to keep
+    a typed --gres (known-good on this cluster); fall back to an untyped count.
+    """
+    if not gpu_model:
+        return [f"--gres={config.SLURM_GRES}"] if config.SLURM_GRES else []
+    arch = ""
+    models = gpu.slurm_gpu_models() or []
+    for m in models:
+        if m["model"] == gpu_model:
+            arch = m.get("arch", "")
+            break
+    gres = f"gpu:{arch}:{_gres_count()}" if arch else f"gpu:{_gres_count()}"
+    return [f"--gres={gres}", f"--constraint={gpu_model}"]
+
+
+def _srun_prefix(job_id, cwd, use_gpu=True, gpu_model=""):
     """Build the `srun ...` prefix that sends a job to a compute node.
 
     Returns [] when SLURM dispatch is off or srun is unavailable, in which case
@@ -201,8 +229,10 @@ def _srun_prefix(job_id, cwd, use_gpu=True):
     runs the command in the job's working dir on the (shared-filesystem) node,
     and --export=ALL forwards JOB_DIR/OUTPUT_DIR/MODEL_PATH/etc. to the job.
 
-    use_gpu=False omits --gres so a CPU-only task doesn't tie up an A100 and is
-    scheduled on any free node (usually much sooner than a GPU one).
+    use_gpu=False omits --gres so a CPU-only task doesn't tie up a GPU and is
+    scheduled on any free node (usually much sooner than a GPU one). gpu_model
+    optionally pins the run to a specific GPU model (e.g. "a100") — see
+    _gpu_flags.
     """
     if not slurm_active():
         return []
@@ -211,8 +241,9 @@ def _srun_prefix(job_id, cwd, use_gpu=True):
            "--chdir", cwd,
            "--export=ALL",
            "--unbuffered"]
-    if use_gpu and config.SLURM_GRES:
-        pre.insert(1, f"--gres={config.SLURM_GRES}")
+    if use_gpu:
+        for i, flag in enumerate(_gpu_flags(gpu_model), start=1):
+            pre.insert(i, flag)
     if config.SLURM_PARTITION:
         pre += ["--partition", config.SLURM_PARTITION]
     if config.SLURM_ACCOUNT:

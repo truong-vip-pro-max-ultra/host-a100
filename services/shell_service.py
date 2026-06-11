@@ -117,7 +117,7 @@ def _handle_interactive(command):
     return None, command
 
 
-def run_command(command, cwd, use_gpu=False, on_compute=False,
+def run_command(command, cwd, use_gpu=False, on_compute=False, gpu_model="",
                 timeout=DEFAULT_TIMEOUT):
     """Run one command and return a dict the JSON endpoint hands to the UI.
 
@@ -152,7 +152,8 @@ def run_command(command, cwd, use_gpu=False, on_compute=False,
     # a compute node we wrap the command in `bash -lc "<command>"`. _srun_prefix
     # returns [] when SLURM is unavailable/off, so we transparently fall back to
     # local execution.
-    prefix = job_service._srun_prefix("shell", cwd, use_gpu=use_gpu) if on_compute else []
+    prefix = job_service._srun_prefix("shell", cwd, use_gpu=use_gpu,
+                                      gpu_model=gpu_model) if on_compute else []
     if prefix:
         argv, use_shell, where = prefix + ["bash", "-lc", command], False, "compute"
     else:

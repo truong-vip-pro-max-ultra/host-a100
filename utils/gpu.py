@@ -86,85 +86,97 @@ def gpu_diagnostics():
     return "\n".join(lines)
 
 
-def slurm_gpu_raw(arch="ampere"):
-    """A read-only snapshot of GPU availability on the SLURM cluster.
+def _gpu_count_any(field):
+    """Sum the GPU counts of ANY type in a SLURM GRES / GresUsed field.
 
-    The dashboard runs on the login node, which has no GPU, so nvidia-smi there
-    is misleading. When jobs are dispatched via SLURM the relevant question is
-    "how many <arch> GPUs are free on the cluster" — sinfo answers that without
-    consuming an allocation. Returns text (filtered to the arch) or None.
+    Handles `gpu:ampere:4`, `gpu:ampere:2(IDX:0-1)` and comma-separated mixed
+    lists like `gpu:turing:2,gpu:ampere:1`.
+    """
+    return sum(int(n) for n in re.findall(r"gpu:[^:]+:(\d+)", field))
+
+
+# SLURM node "states" that mean the node can't accept new work right now, so its
+# GPUs must NOT be counted as free even if they look idle.
+_UNUSABLE = ("down", "drain", "drng", "resv", "maint", "inval", "unk",
+             "fail", "boot", "power", "plnd")
+
+# Node FEATURE tokens that are NOT a GPU model (CPU vendor / instruction sets /
+# GPU vendor line). Whatever feature remains after removing these is the GPU
+# model (a100, a40, l40, l40s, t4, h200nvl, rtx-6000, rtx6000pro, ...).
+_NON_MODEL_FEATS = frozenset({
+    "intel", "amd", "avx", "avx2", "avx512", "avx512f",
+    "tesla", "quadro", "geforce", "nvidia",
+})
+
+
+def _model_from_features(feats):
+    """Pick the GPU-model token out of a comma-separated AVAIL_FEATURES string."""
+    for tok in feats.split(","):
+        tok = tok.strip().lower()
+        if tok and tok not in _NON_MODEL_FEATS:
+            return tok
+    return None
+
+
+def slurm_gpu_models():
+    """Per-model GPU availability across the cluster — the honest answer to
+    "how many <model> GPUs are free".
+
+    CRUCIAL: on this cluster the SLURM GRES *type* is the architecture FAMILY
+    (ampere, turing, lovelace, hopper, blackwell), which is NOT the GPU model —
+    e.g. `gpu:ampere` spans both A100 and A40. The real model lives in the node
+    FEATURE list, so we key the counts off that. `sinfo -N` lists a node once per
+    partition, so we dedup by node host. `free` excludes down/drain/reserved
+    nodes (you can't be scheduled onto them).
+
+    Parses `sinfo` (read-only, no allocation). Returns a list of
+    {model, arch, total, used, free, nodes} sorted by free-desc then model, or
+    None when sinfo is unavailable / no GPU nodes exist. Generous column widths
+    keep any single field from overflowing and bleeding into the next.
     """
     sinfo = shutil.which("sinfo")
     if not sinfo:
         return None
     try:
         out = subprocess.run(
-            [sinfo, "-h", "-N",
-             "-O", "NodeHost:14,Gres:22,GresUsed:24,StateLong:12"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except Exception:  # noqa: BLE001
-        return None
-    rows = [l.rstrip() for l in out.stdout.splitlines()
-            if arch in l.lower() and "gpu" in l.lower()]
-    if not rows:
-        return None
-    header = f"{'NODE':<14}{'GRES (tổng)':<22}{'GRES đã dùng':<24}TRẠNG THÁI"
-    return header + "\n" + "\n".join(rows)
-
-
-def _count_gpus(field, arch):
-    """Sum the GPU counts of `arch` in a SLURM GRES / GresUsed field.
-
-    Handles `gpu:ampere:4`, `gpu:ampere:2(IDX:0-1)` and comma-separated lists.
-    """
-    return sum(int(n) for n in re.findall(rf"gpu:{re.escape(arch)}:(\d+)", field))
-
-
-def slurm_gpu_counts(arch="ampere"):
-    """Aggregate how many `arch` GPUs the cluster has, is using, and has free.
-
-    Parses `sinfo` (read-only, no allocation) and returns
-    {total, used, free, nodes} or None when sinfo is unavailable / reports no
-    GPUs of this arch. `free` only counts GPUs on nodes that can actually accept
-    work — nodes in a down/drain/reserved/etc. state are excluded from free even
-    if their GPUs look idle, because you can't be scheduled onto them.
-
-    StateLong is queried FIRST and GresUsed LAST so a long IDX list in GresUsed
-    can't bleed into and corrupt the columns we slice for state/total.
-    """
-    sinfo = shutil.which("sinfo")
-    if not sinfo:
-        return None
-    try:
-        out = subprocess.run(
-            [sinfo, "-h", "-N", "-O", "StateLong:20,Gres:80,GresUsed:200"],
+            [sinfo, "-h", "-N", "-O",
+             "NodeHost:20,StateLong:14,Gres:40,GresUsed:150,Features:160"],
             capture_output=True, text=True, timeout=10,
         )
     except Exception:  # noqa: BLE001
         return None
 
-    _UNUSABLE = ("down", "drain", "drng", "resv", "maint", "inval", "unk",
-                 "fail", "boot", "power", "plnd")
-    total = used = free = nodes = 0
+    seen = set()
+    models = {}  # model -> {arch, total, used, free, nodes}
     for line in out.stdout.splitlines():
-        if "gpu" not in line.lower() or arch not in line.lower():
+        node = line[0:20].strip()
+        if not node or node in seen:
             continue
-        state = line[0:20].strip().lower()
-        gres = line[20:100]
-        gres_used = line[100:]
-        node_total = _count_gpus(gres, arch)
+        gres = line[34:74]
+        node_total = _gpu_count_any(gres)
         if node_total == 0:
             continue
-        node_used = _count_gpus(gres_used, arch)
-        total += node_total
-        used += node_used
-        nodes += 1
+        seen.add(node)
+        state = line[20:34].strip().lower()
+        gres_used = line[74:224]
+        feats = line[224:]
+        model = _model_from_features(feats)
+        if not model:
+            continue
+        arch_m = re.search(r"gpu:([^:]+):", gres)
+        node_used = _gpu_count_any(gres_used)
+        m = models.setdefault(model, {"arch": arch_m.group(1) if arch_m else "",
+                                      "total": 0, "used": 0, "free": 0,
+                                      "nodes": 0})
+        m["total"] += node_total
+        m["used"] += node_used
+        m["nodes"] += 1
         if not any(bad in state for bad in _UNUSABLE):
-            free += max(0, node_total - node_used)
-    if total == 0:
+            m["free"] += max(0, node_total - node_used)
+    if not models:
         return None
-    return {"total": total, "used": used, "free": free, "nodes": nodes}
+    return [dict(model=k, **v) for k, v in
+            sorted(models.items(), key=lambda kv: (-kv[1]["free"], kv[0]))]
 
 
 def raw_nvidia_smi():

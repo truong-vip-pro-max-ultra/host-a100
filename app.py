@@ -141,8 +141,7 @@ def _dashboard_context():
         ram=sysinfo.ram_info(),
         slurm_active=job_service.slurm_active(),
         slurm_gres=config.SLURM_GRES,
-        slurm_gpu=gpu.slurm_gpu_raw(),
-        slurm_gpu_counts=gpu.slurm_gpu_counts(),
+        gpu_models=gpu.slurm_gpu_models(),
     )
 
 
@@ -496,6 +495,7 @@ def jobs_page():
         projects=project_service.list_projects(),
         slurm_active=job_service.slurm_active(),
         slurm_gres=config.SLURM_GRES,
+        gpu_models=gpu.slurm_gpu_models(),
     )
 
 
@@ -510,6 +510,8 @@ def job_submit():
     params_json = request.form.get("params", "")
     # Checkbox: present only when ticked. Default to GPU on (A100 platform).
     use_gpu = request.form.get("use_gpu") is not None
+    # Optional GPU-model pin (e.g. "a100"); "" = any GPU of the configured kind.
+    gpu_model = request.form.get("gpu_model", "").strip()
 
     if not env_id:
         flash("Hãy chọn một môi trường.", "danger")
@@ -525,7 +527,7 @@ def job_submit():
         job_id = job_service.submit_job(
             model_id, env_id, job_name, params_json,
             run_mode=run_mode, project_id=project_id, main_file=main_file,
-            use_gpu=use_gpu,
+            use_gpu=use_gpu, gpu_model=gpu_model,
         )
     except ValueError as exc:
         flash(str(exc), "danger")
@@ -599,6 +601,7 @@ def terminal_page():
         cwd=cwd,
         slurm_active=job_service.slurm_active(),
         slurm_gres=config.SLURM_GRES,
+        gpu_models=gpu.slurm_gpu_models(),
     )
 
 
@@ -608,9 +611,10 @@ def terminal_run():
     command = data.get("command", "")
     on_compute = bool(data.get("on_compute"))
     use_gpu = bool(data.get("use_gpu"))
+    gpu_model = (data.get("gpu_model") or "").strip()
     cwd = session.get("term_cwd") or shell_service.initial_cwd()
-    result = shell_service.run_command(command, cwd,
-                                       use_gpu=use_gpu, on_compute=on_compute)
+    result = shell_service.run_command(command, cwd, use_gpu=use_gpu,
+                                       on_compute=on_compute, gpu_model=gpu_model)
     # Persist the (possibly changed) working directory so `cd` sticks.
     session["term_cwd"] = result["cwd"]
     return jsonify(result)
