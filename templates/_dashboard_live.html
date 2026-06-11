@@ -57,6 +57,10 @@
           </div>
         </div>
         {% endfor %}
+        <details class="mt-2">
+          <summary class="text-muted small" style="cursor:pointer">Kết quả nvidia-smi gốc</summary>
+          <pre class="logbox mt-2">{{ nvidia_smi }}</pre>
+        </details>
       {% elif slurm_active %}
         <div class="alert alert-success py-2 mb-2 small">
           <i class="bi bi-check-circle"></i> Job được gửi tới node GPU qua SLURM.
@@ -97,10 +101,6 @@
           <p class="mb-0 mt-2">Không phát hiện GPU NVIDIA trên máy chủ này.</p>
         </div>
       {% endif %}
-      <details class="mt-2">
-        <summary class="text-muted small" style="cursor:pointer">Kết quả nvidia-smi gốc</summary>
-        <pre class="logbox mt-2">{{ nvidia_smi }}</pre>
-      </details>
     </div></div>
   </div>
 

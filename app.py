@@ -128,9 +128,13 @@ def _dashboard_context():
     """Gather all the live dashboard data. Shared by the full page and the
     fragment endpoint the page polls, so both render identical numbers."""
     used, total, free = db.disk_usage()
+    gpus = gpu.gpu_summary()
     return dict(
-        gpus=gpu.gpu_summary(),
-        nvidia_smi=gpu.raw_nvidia_smi(),
+        gpus=gpus,
+        # Only meaningful when this host has a local GPU. On the login node it
+        # would just run nvidia-smi + the lspci diagnostic every poll for a
+        # "not found" message the SLURM per-model table already explains.
+        nvidia_smi=gpu.raw_nvidia_smi() if gpus else "",
         models=model_service.list_models(),
         envs=env_service.list_envs(),
         jobs=job_service.list_jobs(),
