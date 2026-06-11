@@ -125,11 +125,11 @@ def _vstatus(status):
 # --------------------------------------------------------------------------- #
 # Dashboard
 # --------------------------------------------------------------------------- #
-@app.route("/")
-def dashboard():
+def _dashboard_context():
+    """Gather all the live dashboard data. Shared by the full page and the
+    fragment endpoint the page polls, so both render identical numbers."""
     used, total, free = db.disk_usage()
-    return render_template(
-        "dashboard.html",
+    return dict(
         gpus=gpu.gpu_summary(),
         nvidia_smi=gpu.raw_nvidia_smi(),
         models=model_service.list_models(),
@@ -145,6 +145,19 @@ def dashboard():
         slurm_gpu=gpu.slurm_gpu_raw(),
         slurm_gpu_counts=gpu.slurm_gpu_counts(),
     )
+
+
+@app.route("/")
+def dashboard():
+    return render_template("dashboard.html", **_dashboard_context())
+
+
+@app.route("/dashboard/fragment")
+def dashboard_fragment():
+    """Just the live part of the dashboard, polled by the page so it refreshes
+    in place without a full reload (which would re-run nvidia-smi/sinfo and make
+    the page stutter)."""
+    return render_template("_dashboard_live.html", **_dashboard_context())
 
 
 # --------------------------------------------------------------------------- #
