@@ -2,6 +2,16 @@
 {% block title %}Dự án{% endblock %}
 {% block page_title %}Dự án{% endblock %}
 {% block page_sub %}Dán hoặc tải code lên, rồi chạy trên A100{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css">
+<style>
+  .CodeMirror{ height:440px; border:1px solid var(--line); border-radius:12px;
+    font-size:.82rem; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  .CodeMirror-gutters{ border-radius:12px 0 0 12px; }
+</style>
+{% endblock %}
+
 {% block content %}
 
 <div class="row g-3">
@@ -104,10 +114,10 @@
         <div class="card"><div class="card-body">
           <h6 class="card-title">Dán / sửa một file</h6>
           <form method="post" action="{{ url_for('project_save_file', project_id=selected.id) }}">
-            <input class="form-control mb-2" name="relpath"
+            <input class="form-control mb-2" name="relpath" id="relpath"
                    value="{{ open_file or '' }}"
                    placeholder="tên file, vd: main.py hoặc src/model.py" required>
-            <textarea class="form-control font-monospace mb-2" name="content"
+            <textarea class="form-control font-monospace mb-2" name="content" id="codeArea"
                       rows="16" style="font-size:.82rem"
                       placeholder="# dán code của bạn vào đây">{{ open_content or '' }}</textarea>
             <div class="form-check mb-2">
@@ -124,4 +134,65 @@
     {% endif %}
   </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+{% if selected %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/javascript/javascript.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/yaml/yaml.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/shell/shell.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/closebrackets.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/selection/active-line.min.js"></script>
+<script>
+(function(){
+  const area = document.getElementById('codeArea');
+  if (!area || !window.CodeMirror) return;   // CDN blocked → plain textarea still works
+
+  // Map a filename to a CodeMirror mode.
+  function modeFor(name){
+    const n = (name || '').toLowerCase();
+    if (n.endsWith('.py'))  return 'python';
+    if (n.endsWith('.js'))  return 'javascript';
+    if (n.endsWith('.json')) return {name:'javascript', json:true};
+    if (n.endsWith('.yaml') || n.endsWith('.yml')) return 'yaml';
+    if (n.endsWith('.sh') || n.endsWith('.bash')) return 'shell';
+    return null;   // plain text
+  }
+
+  const relpath = document.getElementById('relpath');
+  const cm = CodeMirror.fromTextArea(area, {
+    mode: modeFor(relpath ? relpath.value : ''),
+    theme: 'material-darker',
+    lineNumbers: true,
+    indentUnit: 4,
+    tabSize: 4,
+    indentWithTabs: false,
+    matchBrackets: true,
+    autoCloseBrackets: true,
+    styleActiveLine: true,
+    lineWrapping: false,
+    // Tab inserts spaces (or indents the selection) instead of a tab char.
+    extraKeys: {
+      Tab: (c) => {
+        if (c.somethingSelected()) c.indentSelection('add');
+        else c.replaceSelection(' '.repeat(c.getOption('indentUnit')), 'end');
+      },
+      'Shift-Tab': (c) => c.indentSelection('subtract'),
+    },
+  });
+  // CodeMirror.fromTextArea auto-copies content back to the textarea on submit.
+
+  // Re-detect language when the user edits the filename.
+  if (relpath){
+    relpath.addEventListener('input', () => {
+      const m = modeFor(relpath.value);
+      cm.setOption('mode', m);
+    });
+  }
+})();
+</script>
+{% endif %}
 {% endblock %}
