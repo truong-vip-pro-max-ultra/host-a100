@@ -64,9 +64,11 @@
       {% elif slurm_active %}
         <div class="alert alert-success py-2 mb-2 small">
           <i class="bi bi-check-circle"></i> Job được gửi tới node GPU qua SLURM.
-          App chạy ở node đăng nhập (không gắn GPU) nên panel này hiển thị tình
-          trạng GPU của <strong>cả cụm</strong>, đếm theo <strong>model thật</strong>
-          (nhãn <code>ampere</code> gồm cả A100 lẫn A40 — đây tách riêng).
+          Bảng dưới chỉ tính GPU trong partition bạn dùng được
+          (<code>{{ slurm_partition or 'cả cụm' }}</code>), đếm theo
+          <strong>model thật</strong> (nhãn <code>ampere</code> gồm cả A100 lẫn A40).
+          GPU idle ở partition nhóm khác (debug/dacs-scs/…) không submit được nên
+          không hiện ở đây.
         </div>
         {% if gpu_models %}
         <div class="table-responsive mb-3">

@@ -102,7 +102,12 @@ DEFAULT_SLURM_GRES = "gpu:ampere:1"   # arch family, NOT a model: ampere = A100 
                                       # Pick the exact model per-job via the UI's
                                       # "Loại GPU" dropdown (adds --constraint=<model>).
 DEFAULT_SLURM_TIME = "04:00:00"       # max wall time per job (HH:MM:SS); "" = cluster default
-DEFAULT_SLURM_PARTITION = ""          # set if the cluster requires one
+# The GPU partition this account can actually submit to (AllowAccounts=ALL).
+# `main` is the catch-all (CPU+GPU) where GPU jobs queue behind everything; the
+# idle GPUs (debug / research-group partitions) are NOT accessible to us. Pinning
+# to main-gpu targets the right partition AND lets the dashboard show only the
+# GPUs we can really get. "" = don't pass --partition (cluster default).
+DEFAULT_SLURM_PARTITION = "main-gpu"
 DEFAULT_SLURM_ACCOUNT = ""            # set if it requires -A <account>
 DEFAULT_SLURM_CPUS = ""               # e.g. "4"
 DEFAULT_SLURM_MEM = ""                # e.g. "16G"

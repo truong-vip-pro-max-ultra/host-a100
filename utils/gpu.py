@@ -118,9 +118,9 @@ def _model_from_features(feats):
     return None
 
 
-def slurm_gpu_models():
-    """Per-model GPU availability across the cluster — the honest answer to
-    "how many <model> GPUs are free".
+def slurm_gpu_models(partition=None):
+    """Per-model GPU availability — the honest answer to "how many <model> GPUs
+    can I actually get".
 
     CRUCIAL: on this cluster the SLURM GRES *type* is the architecture FAMILY
     (ampere, turing, lovelace, hopper, blackwell), which is NOT the GPU model —
@@ -128,6 +128,10 @@ def slurm_gpu_models():
     FEATURE list, so we key the counts off that. `sinfo -N` lists a node once per
     partition, so we dedup by node host. `free` excludes down/drain/reserved
     nodes (you can't be scheduled onto them).
+
+    `partition` scopes the query (sinfo -p) so counts reflect only nodes you can
+    submit to — the idle GPUs in admin/research-group partitions are unreachable,
+    so counting them cluster-wide is misleading. None = whole cluster.
 
     Parses `sinfo` (read-only, no allocation). Returns a list of
     {model, arch, total, used, free, down, nodes} sorted by free-desc then model,
@@ -138,12 +142,12 @@ def slurm_gpu_models():
     sinfo = shutil.which("sinfo")
     if not sinfo:
         return None
+    cmd = [sinfo, "-h", "-N", "-O",
+           "NodeHost:20,StateLong:14,Gres:40,GresUsed:150,Features:160"]
+    if partition:
+        cmd += ["-p", partition]
     try:
-        out = subprocess.run(
-            [sinfo, "-h", "-N", "-O",
-             "NodeHost:20,StateLong:14,Gres:40,GresUsed:150,Features:160"],
-            capture_output=True, text=True, timeout=10,
-        )
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     except Exception:  # noqa: BLE001
         return None
 
