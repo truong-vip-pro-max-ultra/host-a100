@@ -130,9 +130,10 @@ def slurm_gpu_models():
     nodes (you can't be scheduled onto them).
 
     Parses `sinfo` (read-only, no allocation). Returns a list of
-    {model, arch, total, used, free, nodes} sorted by free-desc then model, or
-    None when sinfo is unavailable / no GPU nodes exist. Generous column widths
-    keep any single field from overflowing and bleeding into the next.
+    {model, arch, total, used, free, down, nodes} sorted by free-desc then model,
+    or None when sinfo is unavailable / no GPU nodes exist. `total = used + free
+    + down`; `down` = GPUs on unschedulable (down/drain/...) nodes. Generous
+    column widths keep any single field from overflowing into the next.
     """
     sinfo = shutil.which("sinfo")
     if not sinfo:
@@ -147,7 +148,7 @@ def slurm_gpu_models():
         return None
 
     seen = set()
-    models = {}  # model -> {arch, total, used, free, nodes}
+    models = {}  # model -> {arch, total, used, free, down, nodes}
     for line in out.stdout.splitlines():
         node = line[0:20].strip()
         if not node or node in seen:
@@ -167,11 +168,15 @@ def slurm_gpu_models():
         node_used = _gpu_count_any(gres_used)
         m = models.setdefault(model, {"arch": arch_m.group(1) if arch_m else "",
                                       "total": 0, "used": 0, "free": 0,
-                                      "nodes": 0})
+                                      "down": 0, "nodes": 0})
         m["total"] += node_total
-        m["used"] += node_used
         m["nodes"] += 1
-        if not any(bad in state for bad in _UNUSABLE):
+        if any(bad in state for bad in _UNUSABLE):
+            # Node can't be scheduled onto — its GPUs are neither free nor really
+            # "in use" (GresUsed is unreliable when down), so bucket them as down.
+            m["down"] += node_total
+        else:
+            m["used"] += node_used
             m["free"] += max(0, node_total - node_used)
     if not models:
         return None

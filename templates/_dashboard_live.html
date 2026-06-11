@@ -81,7 +81,9 @@
             {% for m in gpu_models %}
               <tr>
                 <td><strong>{{ m.model|upper }}</strong>
-                  <span class="text-muted small">({{ m.arch }} · {{ m.nodes }} node)</span></td>
+                  <span class="text-muted small">({{ m.arch }} · {{ m.nodes }} node)</span>
+                  {% if m.down %}<span class="badge bg-warning text-dark"
+                    title="GPU trên node đang down/bảo trì — không xếp lịch được">{{ m.down }} down</span>{% endif %}</td>
                 <td class="text-end">
                   <span class="badge {{ 'bg-success' if m.free else 'bg-secondary' }}">{{ m.free }}</span></td>
                 <td class="text-end text-muted">{{ m.used }}</td>
