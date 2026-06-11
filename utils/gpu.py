@@ -7,6 +7,7 @@ on a non-GPU box) the helpers degrade gracefully.
 """
 import glob
 import os
+import re
 import shutil
 import subprocess
 
@@ -110,6 +111,60 @@ def slurm_gpu_raw(arch="ampere"):
         return None
     header = f"{'NODE':<14}{'GRES (tổng)':<22}{'GRES đã dùng':<24}TRẠNG THÁI"
     return header + "\n" + "\n".join(rows)
+
+
+def _count_gpus(field, arch):
+    """Sum the GPU counts of `arch` in a SLURM GRES / GresUsed field.
+
+    Handles `gpu:ampere:4`, `gpu:ampere:2(IDX:0-1)` and comma-separated lists.
+    """
+    return sum(int(n) for n in re.findall(rf"gpu:{re.escape(arch)}:(\d+)", field))
+
+
+def slurm_gpu_counts(arch="ampere"):
+    """Aggregate how many `arch` GPUs the cluster has, is using, and has free.
+
+    Parses `sinfo` (read-only, no allocation) and returns
+    {total, used, free, nodes} or None when sinfo is unavailable / reports no
+    GPUs of this arch. `free` only counts GPUs on nodes that can actually accept
+    work — nodes in a down/drain/reserved/etc. state are excluded from free even
+    if their GPUs look idle, because you can't be scheduled onto them.
+
+    StateLong is queried FIRST and GresUsed LAST so a long IDX list in GresUsed
+    can't bleed into and corrupt the columns we slice for state/total.
+    """
+    sinfo = shutil.which("sinfo")
+    if not sinfo:
+        return None
+    try:
+        out = subprocess.run(
+            [sinfo, "-h", "-N", "-O", "StateLong:20,Gres:80,GresUsed:200"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+    _UNUSABLE = ("down", "drain", "drng", "resv", "maint", "inval", "unk",
+                 "fail", "boot", "power", "plnd")
+    total = used = free = nodes = 0
+    for line in out.stdout.splitlines():
+        if "gpu" not in line.lower() or arch not in line.lower():
+            continue
+        state = line[0:20].strip().lower()
+        gres = line[20:100]
+        gres_used = line[100:]
+        node_total = _count_gpus(gres, arch)
+        if node_total == 0:
+            continue
+        node_used = _count_gpus(gres_used, arch)
+        total += node_total
+        used += node_used
+        nodes += 1
+        if not any(bad in state for bad in _UNUSABLE):
+            free += max(0, node_total - node_used)
+    if total == 0:
+        return None
+    return {"total": total, "used": used, "free": free, "nodes": nodes}
 
 
 def raw_nvidia_smi():

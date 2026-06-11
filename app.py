@@ -143,6 +143,7 @@ def dashboard():
         slurm_active=job_service.slurm_active(),
         slurm_gres=config.SLURM_GRES,
         slurm_gpu=gpu.slurm_gpu_raw(),
+        slurm_gpu_counts=gpu.slurm_gpu_counts(),
     )
 
 

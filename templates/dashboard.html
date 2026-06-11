@@ -9,25 +9,35 @@
 {% block content %}
 
 <div class="row g-3 mb-3">
-  <div class="col-6 col-xl-3">
+  {% if slurm_gpu_counts %}
+  <div class="col-6 col-xl">
+    <div class="card stat"><div class="card-body d-flex align-items-center gap-3">
+      <div class="ic g-emerald"><i class="bi bi-gpu-card"></i></div>
+      <div><div class="val">{{ slurm_gpu_counts.free }}<span class="text-muted"
+             style="font-size:1.1rem;font-weight:600">/{{ slurm_gpu_counts.total }}</span></div>
+        <div class="lbl">GPU A100 trống</div></div>
+    </div></div>
+  </div>
+  {% endif %}
+  <div class="col-6 col-xl">
     <div class="card stat"><div class="card-body d-flex align-items-center gap-3">
       <div class="ic g-indigo"><i class="bi bi-box-seam-fill"></i></div>
       <div><div class="val">{{ models|length }}</div><div class="lbl">Mô hình</div></div>
     </div></div>
   </div>
-  <div class="col-6 col-xl-3">
+  <div class="col-6 col-xl">
     <div class="card stat"><div class="card-body d-flex align-items-center gap-3">
       <div class="ic g-emerald"><i class="bi bi-stack"></i></div>
       <div><div class="val">{{ envs|length }}</div><div class="lbl">Môi trường</div></div>
     </div></div>
   </div>
-  <div class="col-6 col-xl-3">
+  <div class="col-6 col-xl">
     <div class="card stat"><div class="card-body d-flex align-items-center gap-3">
       <div class="ic g-sky"><i class="bi bi-cpu-fill"></i></div>
       <div><div class="val">{{ active|length }}</div><div class="lbl">Tác vụ đang chạy</div></div>
     </div></div>
   </div>
-  <div class="col-6 col-xl-3">
+  <div class="col-6 col-xl">
     <div class="card stat"><div class="card-body d-flex align-items-center gap-3">
       <div class="ic g-amber"><i class="bi bi-hdd-fill"></i></div>
       <div><div class="val">{{ disk.pct }}%</div>
@@ -61,6 +71,28 @@
           ở node đăng nhập (không gắn GPU) nên panel này hiển thị tình trạng GPU
           của cả cụm thay vì của node app.
         </div>
+        {% if slurm_gpu_counts %}
+        <div class="row g-2 text-center mb-3">
+          <div class="col-4">
+            <div class="p-2" style="background:#ecfdf5;border-radius:12px">
+              <div style="font-size:1.6rem;font-weight:800;color:#059669;line-height:1">
+                {{ slurm_gpu_counts.free }}</div>
+              <div class="small text-muted">Còn trống</div></div>
+          </div>
+          <div class="col-4">
+            <div class="p-2" style="background:#eff6ff;border-radius:12px">
+              <div style="font-size:1.6rem;font-weight:800;color:#2563eb;line-height:1">
+                {{ slurm_gpu_counts.used }}</div>
+              <div class="small text-muted">Đang dùng</div></div>
+          </div>
+          <div class="col-4">
+            <div class="p-2" style="background:#f5f3ff;border-radius:12px">
+              <div style="font-size:1.6rem;font-weight:800;color:#7c3aed;line-height:1">
+                {{ slurm_gpu_counts.total }}</div>
+              <div class="small text-muted">Tổng ({{ slurm_gpu_counts.nodes }} node)</div></div>
+          </div>
+        </div>
+        {% endif %}
         {% if slurm_gpu %}
           <pre class="logbox mb-0" style="font-size:.72rem">{{ slurm_gpu }}</pre>
         {% else %}
