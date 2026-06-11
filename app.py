@@ -590,7 +590,11 @@ def job_result(job_id):
 # --------------------------------------------------------------------------- #
 @app.route("/terminal")
 def terminal_page():
-    cwd = session.get("term_cwd") or shell_service.initial_cwd()
+    # A fresh page load (or reload) starts back at the initial directory — a
+    # reload shouldn't inherit a cwd left over from earlier `cd`s. The cwd then
+    # persists across commands within the session until the next reload.
+    cwd = shell_service.initial_cwd()
+    session["term_cwd"] = cwd
     return render_template(
         "terminal.html",
         cwd=cwd,

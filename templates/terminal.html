@@ -14,26 +14,27 @@
   .term-head .title{ color:#7c8aa3; font-size:.8rem; font-weight:600;
     margin-left:6px; font-family:'Inter',sans-serif; }
   .term-head .where{ margin-left:auto; }
-  .term-body{ padding:16px; height:58vh; overflow:auto; font-size:.82rem;
-    line-height:1.55; color:#cbd5e1;
+  /* Toàn bộ console cuộn trong một vùng; ô nhập là DÒNG CUỐI bên trong vùng này
+     nên prompt + con trỏ luôn nằm ngay dưới kết quả mới nhất, như SSH/cmd. */
+  .term-body{ padding:16px; height:60vh; overflow:auto; font-size:.82rem;
+    line-height:1.55; color:#cbd5e1; cursor:text;
     font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
   .term-body .out{ white-space:pre-wrap; word-break:break-word; margin:0 0 2px; }
-  .term-body .cmd-line{ display:flex; gap:8px; white-space:pre-wrap;
-    word-break:break-word; }
+  .cmd-line, .term-input-line{ display:flex; gap:8px; align-items:baseline;
+    white-space:pre-wrap; word-break:break-word; }
   .term-prompt{ color:#34d399; font-weight:600; flex-shrink:0; }
   .term-prompt .path{ color:#60a5fa; }
   .term-cmd{ color:#e2e8f0; }
   .out.err{ color:#fca5a5; }
   .out.note{ color:#7c8aa3; }
-  .term-input-row{ display:flex; align-items:center; gap:8px; padding:12px 16px;
-    background:#0b1220; border-top:1px solid #1e293b; }
   .term-input{ flex:1; background:transparent; border:none; outline:none;
-    color:#e2e8f0; font-size:.85rem; caret-color:#34d399;
+    color:#e2e8f0; font-size:.82rem; caret-color:#34d399; padding:0;
     font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
   .term-input::placeholder{ color:#475569; }
-  .term-input:focus{ box-shadow:none; }
-  .spin{ width:14px; height:14px; border:2px solid #334155; border-top-color:#34d399;
-    border-radius:50%; animation:tspin .7s linear infinite; }
+  .term-input:focus{ box-shadow:none; outline:none; }
+  .spin{ width:13px; height:13px; border:2px solid #334155; border-top-color:#34d399;
+    border-radius:50%; animation:tspin .7s linear infinite; flex-shrink:0;
+    align-self:center; }
   @keyframes tspin{ to{ transform:rotate(360deg); } }
 </style>
 
@@ -57,24 +58,21 @@
         <span class="term-dot" style="background:#34d399"></span>
         <span class="title">hpc — host-a100</span>
         <span class="where">
-          {% if slurm_active %}
           <span class="badge" id="whereBadge"
                 style="background:#1e293b;color:#93c5fd">node đăng nhập</span>
-          {% else %}
-          <span class="badge" style="background:#1e293b;color:#93c5fd">node đăng nhập</span>
-          {% endif %}
         </span>
       </div>
       <div class="term-body" id="termBody">
-        <p class="out note">host-a100 terminal — gõ <code>help</code> của hệ thống,
-          ví dụ <code>ls</code>, <code>nvidia-smi</code>, <code>squeue</code>.
-          Phím ↑/↓ để xem lại lệnh cũ.</p>
-      </div>
-      <div class="term-input-row">
-        <span class="term-prompt"><span class="path" id="promptPath">{{ cwd }}</span> $</span>
-        <input class="term-input" id="termInput" autocomplete="off" spellcheck="false"
-               placeholder="nhập lệnh rồi Enter…" autofocus>
-        <span id="termSpin" style="display:none"><span class="spin"></span></span>
+        <p class="out note">host-a100 terminal — ví dụ <code>ls</code>,
+          <code>nvidia-smi</code>, <code>squeue</code>. Phím ↑/↓ xem lại lệnh cũ,
+          <code>clear</code> hoặc Ctrl+L để xoá màn hình.</p>
+        <!-- Dòng nhập luôn là phần tử CUỐI trong vùng cuộn này -->
+        <div class="term-input-line" id="inputLine">
+          <span class="term-prompt"><span class="path" id="promptPath">{{ cwd }}</span> $</span>
+          <input class="term-input" id="termInput" autocomplete="off" spellcheck="false"
+                 placeholder="nhập lệnh rồi Enter…" autofocus>
+          <span id="termSpin" style="display:none"><span class="spin"></span></span>
+        </div>
       </div>
     </div>
 
@@ -105,6 +103,7 @@
   const body   = document.getElementById('termBody');
   const input  = document.getElementById('termInput');
   const spin   = document.getElementById('termSpin');
+  const inputLine  = document.getElementById('inputLine');
   const promptPath = document.getElementById('promptPath');
   const clearBtn   = document.getElementById('clearBtn');
   const onCompute  = document.getElementById('onCompute');
@@ -124,11 +123,12 @@
 
   function scrollDown(){ body.scrollTop = body.scrollHeight; }
 
-  function addEl(cls, text){
+  // Mọi dòng output/echo được chèn NGAY TRƯỚC dòng nhập, nên dòng nhập luôn ở cuối.
+  function addOut(cls, text){
     const p = document.createElement('p');
     p.className = cls;
-    p.textContent = text;          // textContent => an toàn, không dính HTML injection
-    body.appendChild(p);
+    p.textContent = text;        // textContent => an toàn, không dính HTML injection
+    body.insertBefore(p, inputLine);
     return p;
   }
 
@@ -143,7 +143,13 @@
     cm.className = 'term-cmd';
     cm.textContent = command;
     line.appendChild(pr); line.appendChild(cm);
-    body.appendChild(line);
+    body.insertBefore(line, inputLine);
+  }
+
+  function clearScreen(){
+    // Xoá mọi thứ trừ chính dòng nhập.
+    [...body.children].forEach(el => { if (el !== inputLine) el.remove(); });
+    input.focus();
   }
 
   async function run(command){
@@ -162,19 +168,18 @@
         }),
       });
       if (res.status === 401){
-        addEl('out err', 'Phiên đã hết hạn — hãy tải lại trang và đăng nhập lại.');
+        addOut('out err', 'Phiên đã hết hạn — hãy tải lại trang và đăng nhập lại.');
         return;
       }
       const data = await res.json();
-      if (data.output) addEl(data.exit_code === 0 ? 'out' : 'out err', data.output.replace(/\n$/, ''));
+      if (data.output) addOut(data.exit_code === 0 ? 'out' : 'out err', data.output.replace(/\n$/, ''));
       if (typeof data.exit_code === 'number' && data.exit_code !== 0)
-        addEl('out note', '[mã thoát: ' + data.exit_code + ']');
+        addOut('out note', '[mã thoát: ' + data.exit_code + ']');
       if (data.cwd){ cwd = data.cwd; promptPath.textContent = cwd; }
-      if (whereBadge && data.where){
+      if (whereBadge && data.where)
         whereBadge.textContent = data.where === 'compute' ? 'node tính toán' : 'node đăng nhập';
-      }
     } catch(e){
-      addEl('out err', 'Lỗi mạng: ' + e);
+      addOut('out err', 'Lỗi mạng: ' + e);
     } finally {
       input.disabled = false;
       spin.style.display = 'none';
@@ -186,13 +191,17 @@
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter'){
       const command = input.value;
-      if (command.trim()){
+      input.value = '';
+      const trimmed = command.trim();
+      if (trimmed){
         history.push(command);
         if (history.length > 200) history.shift();
       }
       histIdx = -1;
-      input.value = '';
-      if (command.trim()) run(command);
+      // `clear`/`cls` xử lý ngay ở client (lệnh clear của shell chỉ in escape
+      // code, không xoá được console web).
+      if (trimmed === 'clear' || trimmed === 'cls'){ clearScreen(); return; }
+      if (trimmed) run(command);
     } else if (e.key === 'ArrowUp'){
       if (!history.length) return;
       e.preventDefault();
@@ -206,16 +215,16 @@
       histIdx++;
       if (histIdx >= history.length){ histIdx = -1; input.value = ''; }
       else input.value = history[histIdx];
-    } else if (e.ctrlKey && e.key === 'l'){
+    } else if (e.ctrlKey && (e.key === 'l' || e.key === 'L')){
       e.preventDefault();
-      body.innerHTML = '';
+      clearScreen();
     }
   });
 
-  clearBtn.addEventListener('click', () => { body.innerHTML = ''; input.focus(); });
+  clearBtn.addEventListener('click', clearScreen);
 
-  // Bấm bất kỳ đâu trong console => focus ô nhập (trừ khi đang bôi chọn text).
-  body.parentElement.addEventListener('click', () => {
+  // Bấm vào vùng console => focus ô nhập (trừ khi đang bôi chọn text để copy).
+  body.addEventListener('click', () => {
     if (!window.getSelection().toString()) input.focus();
   });
 })();
