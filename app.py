@@ -22,7 +22,8 @@ from flask import (Flask, abort, flash, jsonify, redirect, render_template,
 
 import config
 from services import (env_service, job_service, model_service,
-                      project_service, storage_service as db)
+                      project_service, shell_service,
+                      storage_service as db)
 from utils import file_utils, gpu, progress, sysinfo
 
 app = Flask(__name__)
@@ -58,6 +59,7 @@ def _require_login():
         return
     # Don't redirect API/JSON polls into an HTML login page; 401 is clearer.
     if request.path.startswith(("/status/", "/upload/")) \
+            or request.path == "/terminal/run" \
             or request.path.endswith(".json"):
         return jsonify({"error": "unauthenticated"}), 401
     return redirect(url_for("login", next=request.path))
@@ -566,6 +568,35 @@ def job_result(job_id):
         abort(404)
     return send_from_directory(config.RESULTS_DIR, os.path.basename(rp),
                                as_attachment=True)
+
+
+# --------------------------------------------------------------------------- #
+# Terminal (SSH-like command console). Runs real commands on the host for the
+# authenticated owner — see services/shell_service.py for the trust model.
+# --------------------------------------------------------------------------- #
+@app.route("/terminal")
+def terminal_page():
+    cwd = session.get("term_cwd") or shell_service.initial_cwd()
+    return render_template(
+        "terminal.html",
+        cwd=cwd,
+        slurm_active=job_service.slurm_active(),
+        slurm_gres=config.SLURM_GRES,
+    )
+
+
+@app.route("/terminal/run", methods=["POST"])
+def terminal_run():
+    data = request.get_json(silent=True) or {}
+    command = data.get("command", "")
+    on_compute = bool(data.get("on_compute"))
+    use_gpu = bool(data.get("use_gpu"))
+    cwd = session.get("term_cwd") or shell_service.initial_cwd()
+    result = shell_service.run_command(command, cwd,
+                                       use_gpu=use_gpu, on_compute=on_compute)
+    # Persist the (possibly changed) working directory so `cd` sticks.
+    session["term_cwd"] = result["cwd"]
+    return jsonify(result)
 
 
 # --------------------------------------------------------------------------- #

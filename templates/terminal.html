@@ -1,0 +1,223 @@
+{% extends "base.html" %}
+{% block title %}Terminal{% endblock %}
+{% block page_title %}Terminal{% endblock %}
+{% block page_sub %}Gõ lệnh và máy chủ thực thi rồi trả kết quả về — giống một phiên SSH{% endblock %}
+{% block content %}
+
+<style>
+  /* Console dùng đúng tông màu của .logbox / sidebar để khớp giao diện. */
+  .term{ background:#0b1220; border:1px solid #1e293b; border-radius:var(--radius);
+    box-shadow:var(--shadow); overflow:hidden; display:flex; flex-direction:column; }
+  .term-head{ display:flex; align-items:center; gap:8px; padding:10px 16px;
+    background:#111a2e; border-bottom:1px solid #1e293b; }
+  .term-dot{ width:11px; height:11px; border-radius:50%; }
+  .term-head .title{ color:#7c8aa3; font-size:.8rem; font-weight:600;
+    margin-left:6px; font-family:'Inter',sans-serif; }
+  .term-head .where{ margin-left:auto; }
+  .term-body{ padding:16px; height:58vh; overflow:auto; font-size:.82rem;
+    line-height:1.55; color:#cbd5e1;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  .term-body .out{ white-space:pre-wrap; word-break:break-word; margin:0 0 2px; }
+  .term-body .cmd-line{ display:flex; gap:8px; white-space:pre-wrap;
+    word-break:break-word; }
+  .term-prompt{ color:#34d399; font-weight:600; flex-shrink:0; }
+  .term-prompt .path{ color:#60a5fa; }
+  .term-cmd{ color:#e2e8f0; }
+  .out.err{ color:#fca5a5; }
+  .out.note{ color:#7c8aa3; }
+  .term-input-row{ display:flex; align-items:center; gap:8px; padding:12px 16px;
+    background:#0b1220; border-top:1px solid #1e293b; }
+  .term-input{ flex:1; background:transparent; border:none; outline:none;
+    color:#e2e8f0; font-size:.85rem; caret-color:#34d399;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  .term-input::placeholder{ color:#475569; }
+  .term-input:focus{ box-shadow:none; }
+  .spin{ width:14px; height:14px; border:2px solid #334155; border-top-color:#34d399;
+    border-radius:50%; animation:tspin .7s linear infinite; }
+  @keyframes tspin{ to{ transform:rotate(360deg); } }
+</style>
+
+<div class="row g-3">
+  <div class="col-12">
+    <div class="alert alert-warning d-flex align-items-start gap-2 mb-3" role="alert">
+      <i class="bi bi-exclamation-triangle-fill mt-1"></i>
+      <div>Lệnh chạy <strong>trực tiếp trên máy chủ</strong> với quyền tài khoản
+        đang chạy app — đây không phải sandbox. Chỉ dùng khi đã bật mật khẩu đăng
+        nhập. Đây là phiên một-lệnh-một-kết-quả (không có TTY): các chương trình
+        tương tác như <code>top</code>, <code>vim</code> sẽ không hoạt động — việc
+        dài hãy dùng trang Tác vụ.</div>
+    </div>
+  </div>
+
+  <div class="col-12">
+    <div class="term">
+      <div class="term-head">
+        <span class="term-dot" style="background:#f87171"></span>
+        <span class="term-dot" style="background:#fbbf24"></span>
+        <span class="term-dot" style="background:#34d399"></span>
+        <span class="title">hpc — host-a100</span>
+        <span class="where">
+          {% if slurm_active %}
+          <span class="badge" id="whereBadge"
+                style="background:#1e293b;color:#93c5fd">node đăng nhập</span>
+          {% else %}
+          <span class="badge" style="background:#1e293b;color:#93c5fd">node đăng nhập</span>
+          {% endif %}
+        </span>
+      </div>
+      <div class="term-body" id="termBody">
+        <p class="out note">host-a100 terminal — gõ <code>help</code> của hệ thống,
+          ví dụ <code>ls</code>, <code>nvidia-smi</code>, <code>squeue</code>.
+          Phím ↑/↓ để xem lại lệnh cũ.</p>
+      </div>
+      <div class="term-input-row">
+        <span class="term-prompt"><span class="path" id="promptPath">{{ cwd }}</span> $</span>
+        <input class="term-input" id="termInput" autocomplete="off" spellcheck="false"
+               placeholder="nhập lệnh rồi Enter…" autofocus>
+        <span id="termSpin" style="display:none"><span class="spin"></span></span>
+      </div>
+    </div>
+
+    <div class="d-flex flex-wrap align-items-center gap-3 mt-2">
+      {% if slurm_active %}
+      <div class="form-check form-switch m-0">
+        <input class="form-check-input" type="checkbox" id="onCompute">
+        <label class="form-check-label" for="onCompute">
+          Chạy trên node tính toán (qua <code>srun</code>)</label>
+      </div>
+      <div class="form-check form-switch m-0" id="gpuWrap" style="display:none">
+        <input class="form-check-input" type="checkbox" id="useGpu" checked>
+        <label class="form-check-label" for="useGpu">
+          Cần GPU ({{ slurm_gres }})</label>
+      </div>
+      {% endif %}
+      <button class="btn btn-sm btn-light ms-auto" id="clearBtn">
+        <i class="bi bi-eraser"></i> Xoá màn hình</button>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function(){
+  const body   = document.getElementById('termBody');
+  const input  = document.getElementById('termInput');
+  const spin   = document.getElementById('termSpin');
+  const promptPath = document.getElementById('promptPath');
+  const clearBtn   = document.getElementById('clearBtn');
+  const onCompute  = document.getElementById('onCompute');
+  const useGpu     = document.getElementById('useGpu');
+  const gpuWrap    = document.getElementById('gpuWrap');
+  const whereBadge = document.getElementById('whereBadge');
+
+  let cwd = promptPath.textContent;
+  const history = [];
+  let histIdx = -1;   // -1 = đang gõ lệnh mới
+
+  if (onCompute) {
+    onCompute.addEventListener('change', () => {
+      gpuWrap.style.display = onCompute.checked ? '' : 'none';
+    });
+  }
+
+  function scrollDown(){ body.scrollTop = body.scrollHeight; }
+
+  function addEl(cls, text){
+    const p = document.createElement('p');
+    p.className = cls;
+    p.textContent = text;          // textContent => an toàn, không dính HTML injection
+    body.appendChild(p);
+    return p;
+  }
+
+  function echoCommand(path, command){
+    const line = document.createElement('div');
+    line.className = 'cmd-line';
+    const pr = document.createElement('span');
+    pr.className = 'term-prompt';
+    pr.innerHTML = '<span class="path"></span> $';
+    pr.querySelector('.path').textContent = path;
+    const cm = document.createElement('span');
+    cm.className = 'term-cmd';
+    cm.textContent = command;
+    line.appendChild(pr); line.appendChild(cm);
+    body.appendChild(line);
+  }
+
+  async function run(command){
+    echoCommand(cwd, command);
+    scrollDown();
+    input.disabled = true;
+    spin.style.display = '';
+    try {
+      const res = await fetch('{{ url_for("terminal_run") }}', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          command: command,
+          on_compute: onCompute ? onCompute.checked : false,
+          use_gpu: useGpu ? useGpu.checked : false,
+        }),
+      });
+      if (res.status === 401){
+        addEl('out err', 'Phiên đã hết hạn — hãy tải lại trang và đăng nhập lại.');
+        return;
+      }
+      const data = await res.json();
+      if (data.output) addEl(data.exit_code === 0 ? 'out' : 'out err', data.output.replace(/\n$/, ''));
+      if (typeof data.exit_code === 'number' && data.exit_code !== 0)
+        addEl('out note', '[mã thoát: ' + data.exit_code + ']');
+      if (data.cwd){ cwd = data.cwd; promptPath.textContent = cwd; }
+      if (whereBadge && data.where){
+        whereBadge.textContent = data.where === 'compute' ? 'node tính toán' : 'node đăng nhập';
+      }
+    } catch(e){
+      addEl('out err', 'Lỗi mạng: ' + e);
+    } finally {
+      input.disabled = false;
+      spin.style.display = 'none';
+      input.focus();
+      scrollDown();
+    }
+  }
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter'){
+      const command = input.value;
+      if (command.trim()){
+        history.push(command);
+        if (history.length > 200) history.shift();
+      }
+      histIdx = -1;
+      input.value = '';
+      if (command.trim()) run(command);
+    } else if (e.key === 'ArrowUp'){
+      if (!history.length) return;
+      e.preventDefault();
+      if (histIdx === -1) histIdx = history.length;
+      histIdx = Math.max(0, histIdx - 1);
+      input.value = history[histIdx];
+      input.setSelectionRange(input.value.length, input.value.length);
+    } else if (e.key === 'ArrowDown'){
+      if (histIdx === -1) return;
+      e.preventDefault();
+      histIdx++;
+      if (histIdx >= history.length){ histIdx = -1; input.value = ''; }
+      else input.value = history[histIdx];
+    } else if (e.ctrlKey && e.key === 'l'){
+      e.preventDefault();
+      body.innerHTML = '';
+    }
+  });
+
+  clearBtn.addEventListener('click', () => { body.innerHTML = ''; input.focus(); });
+
+  // Bấm bất kỳ đâu trong console => focus ô nhập (trừ khi đang bôi chọn text).
+  body.parentElement.addEventListener('click', () => {
+    if (!window.getSelection().toString()) input.focus();
+  });
+})();
+</script>
+{% endblock %}
