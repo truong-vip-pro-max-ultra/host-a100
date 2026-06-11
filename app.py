@@ -22,13 +22,22 @@ from flask import (Flask, abort, flash, jsonify, redirect, render_template,
 
 import config
 from services import (env_service, job_service, model_service,
-                      project_service, shell_service,
+                      project_service, pty_service, shell_service,
                       storage_service as db)
 from utils import file_utils, gpu, progress, sysinfo
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = config.MAX_CONTENT_LENGTH
 app.secret_key = config.SECRET_KEY
+
+# Optional WebSocket support for the interactive (PTY) terminal. If flask-sock
+# isn't installed the rest of the app is unaffected — the terminal page just
+# shows install instructions instead of the live console.
+try:
+    from flask_sock import Sock
+    sock = Sock(app)
+except Exception:  # noqa: BLE001
+    sock = None
 
 # Temp area for in-flight uploads, on the same filesystem as /data so the
 # background finalize can rename instead of copy.
@@ -623,7 +632,26 @@ def terminal_page():
         slurm_active=job_service.slurm_active(),
         slurm_gres=config.SLURM_GRES,
         gpu_models=gpu.slurm_gpu_models(config.SLURM_PARTITION or None),
+        pty_enabled=bool(sock) and pty_service.available(),
     )
+
+
+if sock is not None:
+    @sock.route("/terminal/pty")
+    def terminal_pty(ws):
+        """Interactive PTY shell over a WebSocket (vim/nano/htop/REPL work).
+
+        Auth is enforced by the same before_request gate as /terminal/* (an
+        unauthenticated handshake gets a 401 and never upgrades); we re-check
+        here as defence in depth. Query params choose where the shell runs.
+        """
+        if config.AUTH_ENABLED and not session.get("auth_ok"):
+            return
+        on_compute = request.args.get("on_compute") == "1"
+        use_gpu = request.args.get("use_gpu") == "1"
+        gpu_model = (request.args.get("gpu_model") or "").strip()
+        pty_service.open_session(ws, on_compute=on_compute, use_gpu=use_gpu,
+                                 gpu_model=gpu_model)
 
 
 @app.route("/terminal/run", methods=["POST"])

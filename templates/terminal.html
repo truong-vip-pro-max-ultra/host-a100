@@ -1,282 +1,169 @@
 {% extends "base.html" %}
 {% block title %}Terminal{% endblock %}
 {% block page_title %}Terminal{% endblock %}
-{% block page_sub %}Gõ lệnh và máy chủ thực thi rồi trả kết quả về — giống một phiên SSH{% endblock %}
-{% block content %}
+{% block page_sub %}Phiên tương tác thật (PTY) — vim/nano/htop/REPL đều chạy được{% endblock %}
 
+{% block head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
 <style>
-  /* Console dùng đúng tông màu của .logbox / sidebar để khớp giao diện. */
-  .term{ background:#0b1220; border:1px solid #1e293b; border-radius:var(--radius);
-    box-shadow:var(--shadow); overflow:hidden; display:flex; flex-direction:column; }
-  .term-head{ display:flex; align-items:center; gap:8px; padding:10px 16px;
+  .termbox{ background:#0b1220; border:1px solid #1e293b; border-radius:var(--radius);
+    box-shadow:var(--shadow); overflow:hidden; }
+  .termbox .term-head{ display:flex; align-items:center; gap:8px; padding:10px 16px;
     background:#111a2e; border-bottom:1px solid #1e293b; }
   .term-dot{ width:11px; height:11px; border-radius:50%; }
-  .term-head .title{ color:#7c8aa3; font-size:.8rem; font-weight:600;
-    margin-left:6px; font-family:'Inter',sans-serif; }
+  .term-head .title{ color:#7c8aa3; font-size:.8rem; font-weight:600; margin-left:6px; }
   .term-head .where{ margin-left:auto; }
-  /* Toàn bộ console cuộn trong một vùng; ô nhập là DÒNG CUỐI bên trong vùng này
-     nên prompt + con trỏ luôn nằm ngay dưới kết quả mới nhất, như SSH/cmd. */
-  .term-body{ padding:16px; height:60vh; overflow:auto; font-size:.82rem;
-    line-height:1.55; color:#cbd5e1; cursor:text;
-    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
-  .term-body .out{ white-space:pre-wrap; word-break:break-word; margin:0 0 2px; }
-  .cmd-line, .term-input-line{ display:flex; gap:8px; align-items:baseline;
-    white-space:pre-wrap; word-break:break-word; }
-  .term-prompt{ color:#34d399; font-weight:600; flex-shrink:0; }
-  .term-prompt .path{ color:#60a5fa; }
-  .term-cmd{ color:#e2e8f0; }
-  .out.err{ color:#fca5a5; }
-  .out.note{ color:#7c8aa3; }
-  .term-input{ flex:1; background:transparent; border:none; outline:none;
-    color:#e2e8f0; font-size:.82rem; caret-color:#34d399; padding:0;
-    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
-  .term-input::placeholder{ color:#475569; }
-  .term-input:focus{ box-shadow:none; outline:none; }
-  .spin{ width:13px; height:13px; border:2px solid #334155; border-top-color:#34d399;
-    border-radius:50%; animation:tspin .7s linear infinite; flex-shrink:0;
-    align-self:center; }
-  @keyframes tspin{ to{ transform:rotate(360deg); } }
+  #xterm{ height:62vh; padding:8px 10px; }
+  .xterm .xterm-viewport{ border-radius:0 0 var(--radius) var(--radius); }
 </style>
+{% endblock %}
 
-<div class="row g-3">
-  <div class="col-12">
-    <div class="alert alert-warning d-flex align-items-start gap-2 mb-3" role="alert">
-      <i class="bi bi-exclamation-triangle-fill mt-1"></i>
-      <div>Lệnh chạy <strong>trực tiếp trên máy chủ</strong> với quyền tài khoản
-        đang chạy app — đây không phải sandbox. Chỉ dùng khi đã bật mật khẩu đăng
-        nhập. Đây là phiên một-lệnh-một-kết-quả (không có TTY): các chương trình
-        tương tác như <code>top</code>, <code>vim</code> sẽ không hoạt động — việc
-        dài hãy dùng trang Tác vụ.</div>
-    </div>
-  </div>
+{% block content %}
 
-  <div class="col-12">
-    <div class="term">
-      <div class="term-head">
-        <span class="term-dot" style="background:#f87171"></span>
-        <span class="term-dot" style="background:#fbbf24"></span>
-        <span class="term-dot" style="background:#34d399"></span>
-        <span class="title">hpc — host-a100</span>
-        <span class="where">
-          <span class="badge" id="whereBadge"
-                style="background:#1e293b;color:#93c5fd">node đăng nhập</span>
-        </span>
-      </div>
-      <div class="term-body" id="termBody">
-        <p class="out note">host-a100 terminal — ví dụ <code>ls</code>,
-          <code>nvidia-smi</code>, <code>squeue</code>. Phím ↑/↓ xem lại lệnh cũ,
-          <code>clear</code> hoặc Ctrl+L để xoá màn hình.</p>
-        <!-- Dòng nhập luôn là phần tử CUỐI trong vùng cuộn này -->
-        <div class="term-input-line" id="inputLine">
-          <span class="term-prompt"><span class="path" id="promptPath">{{ cwd }}</span> $</span>
-          <input class="term-input" id="termInput" autocomplete="off" spellcheck="false"
-                 placeholder="nhập lệnh rồi Enter…" autofocus>
-          <span id="termSpin" style="display:none"><span class="spin"></span></span>
-        </div>
-      </div>
-    </div>
-
-    <div class="d-flex flex-wrap align-items-center gap-3 mt-2">
-      {% if slurm_active %}
-      <div class="form-check form-switch m-0">
-        <input class="form-check-input" type="checkbox" id="onCompute">
-        <label class="form-check-label" for="onCompute">
-          Chạy trên node tính toán (qua <code>srun</code>)</label>
-      </div>
-      <div class="form-check form-switch m-0" id="gpuWrap" style="display:none">
-        <input class="form-check-input" type="checkbox" id="useGpu" checked>
-        <label class="form-check-label" for="useGpu">Cần GPU</label>
-      </div>
-      <select class="form-select form-select-sm w-auto" id="gpuModel"
-              style="display:none" title="Loại GPU (ampere = A100 hoặc A40)">
-        <option value="">GPU bất kỳ</option>
-        {% for m in gpu_models %}
-        <option value="{{ m.model }}">{{ m.model|upper }} ({{ m.free }}/{{ m.total }} trống)</option>
-        {% endfor %}
-      </select>
-      {% endif %}
-      <button class="btn btn-sm btn-light ms-auto" id="clearBtn">
-        <i class="bi bi-eraser"></i> Xoá màn hình</button>
-    </div>
-  </div>
+<div class="alert alert-warning d-flex align-items-start gap-2 mb-3" role="alert">
+  <i class="bi bi-exclamation-triangle-fill mt-1"></i>
+  <div>Shell chạy <strong>trực tiếp trên máy chủ</strong> với quyền tài khoản đang
+    chạy app — <strong>không phải sandbox</strong>. Chỉ dùng khi đã bật mật khẩu
+    đăng nhập. Đây là TTY thật nên <code>vim</code>/<code>nano</code>/<code>htop</code>/REPL
+    hoạt động bình thường.</div>
 </div>
 
+{% if pty_enabled %}
+<div class="termbox">
+  <div class="term-head">
+    <span class="term-dot" style="background:#f87171"></span>
+    <span class="term-dot" style="background:#fbbf24"></span>
+    <span class="term-dot" style="background:#34d399"></span>
+    <span class="title">hpc — host-a100</span>
+    <span class="where">
+      <span class="badge" id="connBadge" style="background:#1e293b;color:#93c5fd">đang kết nối…</span>
+    </span>
+  </div>
+  <div id="xterm"></div>
+</div>
+
+<div class="d-flex flex-wrap align-items-center gap-3 mt-2">
+  {% if slurm_active %}
+  <div class="form-check form-switch m-0">
+    <input class="form-check-input" type="checkbox" id="onCompute">
+    <label class="form-check-label" for="onCompute">
+      Shell trên node tính toán (qua <code>srun --pty</code>)</label>
+  </div>
+  <div class="form-check form-switch m-0" id="gpuWrap" style="display:none">
+    <input class="form-check-input" type="checkbox" id="useGpu" checked>
+    <label class="form-check-label" for="useGpu">Cần GPU</label>
+  </div>
+  <select class="form-select form-select-sm w-auto" id="gpuModel"
+          style="display:none" title="Loại GPU (ampere = A100 hoặc A40)">
+    <option value="">GPU bất kỳ</option>
+    {% for m in gpu_models %}
+    <option value="{{ m.model }}">{{ m.model|upper }} ({{ m.free }}/{{ m.total }} trống)</option>
+    {% endfor %}
+  </select>
+  {% endif %}
+  <button class="btn btn-sm btn-primary ms-auto" id="connectBtn">
+    <i class="bi bi-plug"></i> Kết nối lại</button>
+</div>
+{% if slurm_active %}
+<div class="form-text mt-1">Đổi node/GPU xong bấm <strong>Kết nối lại</strong> để mở
+  shell mới. Vào node tính toán có thể phải chờ SLURM cấp tài nguyên.</div>
+{% endif %}
+
+{% else %}
+<div class="alert alert-secondary">
+  <h6 class="mb-2"><i class="bi bi-info-circle"></i> Terminal tương tác chưa bật</h6>
+  Cần thư viện <code>flask-sock</code> và một hệ POSIX (Linux). Cài rồi khởi động lại app:
+  <pre class="logbox mt-2 mb-0">pip install flask-sock
+# rồi: pkill -f "python3 app.py"  &amp;&amp;  python3 app.py</pre>
+</div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
+{% if pty_enabled %}
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
 <script>
 (function(){
-  const body   = document.getElementById('termBody');
-  const input  = document.getElementById('termInput');
-  const spin   = document.getElementById('termSpin');
-  const inputLine  = document.getElementById('inputLine');
-  const promptPath = document.getElementById('promptPath');
-  const clearBtn   = document.getElementById('clearBtn');
-  const onCompute  = document.getElementById('onCompute');
-  const useGpu     = document.getElementById('useGpu');
-  const gpuWrap    = document.getElementById('gpuWrap');
-  const gpuModel   = document.getElementById('gpuModel');
-  const whereBadge = document.getElementById('whereBadge');
+  const badge   = document.getElementById('connBadge');
+  const onComp  = document.getElementById('onCompute');
+  const useGpu  = document.getElementById('useGpu');
+  const gpuWrap = document.getElementById('gpuWrap');
+  const gpuModel= document.getElementById('gpuModel');
+  const connect = document.getElementById('connectBtn');
 
-  let cwd = promptPath.textContent;
-  const history = [];
-  let histIdx = -1;   // -1 = đang gõ lệnh mới
-
-  if (onCompute) {
-    onCompute.addEventListener('change', () => {
-      const show = onCompute.checked ? '' : 'none';
+  if (onComp){
+    onComp.addEventListener('change', () => {
+      const show = onComp.checked ? '' : 'none';
       gpuWrap.style.display = show;
       if (gpuModel) gpuModel.style.display = show;
     });
   }
 
-  function scrollDown(){ body.scrollTop = body.scrollHeight; }
+  let term, fit, ws;
 
-  // Mọi dòng output/echo được chèn NGAY TRƯỚC dòng nhập, nên dòng nhập luôn ở cuối.
-  function addOut(cls, text){
-    const p = document.createElement('p');
-    p.className = cls;
-    p.textContent = text;        // textContent => an toàn, không dính HTML injection
-    body.insertBefore(p, inputLine);
-    return p;
+  function setBadge(text, color){
+    badge.textContent = text;
+    badge.style.color = color || '#93c5fd';
   }
 
-  function echoCommand(path, command){
-    const line = document.createElement('div');
-    line.className = 'cmd-line';
-    const pr = document.createElement('span');
-    pr.className = 'term-prompt';
-    pr.innerHTML = '<span class="path"></span> $';
-    pr.querySelector('.path').textContent = path;
-    const cm = document.createElement('span');
-    cm.className = 'term-cmd';
-    cm.textContent = command;
-    line.appendChild(pr); line.appendChild(cm);
-    body.insertBefore(line, inputLine);
-  }
-
-  function clearScreen(){
-    // Xoá mọi thứ trừ chính dòng nhập.
-    [...body.children].forEach(el => { if (el !== inputLine) el.remove(); });
-    input.focus();
-  }
-
-  async function run(command){
-    echoCommand(cwd, command);
-    scrollDown();
-    input.disabled = true;
-    spin.style.display = '';
-    try {
-      const res = await fetch('{{ url_for("terminal_run") }}', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          command: command,
-          on_compute: onCompute ? onCompute.checked : false,
-          use_gpu: useGpu ? useGpu.checked : false,
-          gpu_model: gpuModel ? gpuModel.value : '',
-        }),
-      });
-      if (res.status === 401){
-        addOut('out err', 'Phiên đã hết hạn — hãy tải lại trang và đăng nhập lại.');
-        return;
-      }
-      const data = await res.json();
-      if (data.output) addOut(data.exit_code === 0 ? 'out' : 'out err', data.output.replace(/\n$/, ''));
-      if (typeof data.exit_code === 'number' && data.exit_code !== 0)
-        addOut('out note', '[mã thoát: ' + data.exit_code + ']');
-      if (data.cwd){ cwd = data.cwd; promptPath.textContent = cwd; }
-      if (whereBadge && data.where)
-        whereBadge.textContent = data.where === 'compute' ? 'node tính toán' : 'node đăng nhập';
-    } catch(e){
-      addOut('out err', 'Lỗi mạng: ' + e);
-    } finally {
-      input.disabled = false;
-      spin.style.display = 'none';
-      input.focus();
-      scrollDown();
+  function sendResize(){
+    if (ws && ws.readyState === WebSocket.OPEN && term){
+      ws.send(JSON.stringify({type:'resize', cols:term.cols, rows:term.rows}));
     }
   }
 
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter'){
-      const command = input.value;
-      input.value = '';
-      const trimmed = command.trim();
-      if (trimmed){
-        history.push(command);
-        if (history.length > 200) history.shift();
-      }
-      histIdx = -1;
-      // `clear`/`cls` xử lý ngay ở client (lệnh clear của shell chỉ in escape
-      // code, không xoá được console web).
-      if (trimmed === 'clear' || trimmed === 'cls'){ clearScreen(); return; }
-      if (trimmed) run(command);
-    } else if (e.key === 'ArrowUp'){
-      if (!history.length) return;
-      e.preventDefault();
-      if (histIdx === -1) histIdx = history.length;
-      histIdx = Math.max(0, histIdx - 1);
-      input.value = history[histIdx];
-      input.setSelectionRange(input.value.length, input.value.length);
-    } else if (e.key === 'ArrowDown'){
-      if (histIdx === -1) return;
-      e.preventDefault();
-      histIdx++;
-      if (histIdx >= history.length){ histIdx = -1; input.value = ''; }
-      else input.value = history[histIdx];
-    } else if (e.key === 'Tab'){
-      e.preventDefault();   // chặn Tab nhảy focus sang phần tử khác
-      complete();
-    } else if (e.ctrlKey && (e.key === 'l' || e.key === 'L')){
-      e.preventDefault();
-      clearScreen();
-    }
-  });
+  function open(){
+    // Tear down any previous session.
+    if (ws){ try{ ws.close(); }catch(e){} ws = null; }
+    if (term){ term.dispose(); term = null; }
 
-  function commonPrefix(arr){
-    if (!arr.length) return '';
-    let p = arr[0];
-    for (const s of arr){
-      while (!s.startsWith(p)) p = p.slice(0, -1);
-      if (!p) break;
+    term = new Terminal({
+      fontSize: 13, cursorBlink: true,
+      fontFamily: 'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace',
+      theme: { background:'#0b1220', foreground:'#cbd5e1', cursor:'#34d399' },
+    });
+    fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(document.getElementById('xterm'));
+    fit.fit();
+
+    const params = new URLSearchParams();
+    if (onComp && onComp.checked){
+      params.set('on_compute', '1');
+      params.set('use_gpu', useGpu && useGpu.checked ? '1' : '0');
+      if (gpuModel) params.set('gpu_model', gpuModel.value || '');
     }
-    return p;
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/terminal/pty?${params}`);
+    ws.binaryType = 'arraybuffer';
+
+    setBadge('đang kết nối…', '#fbbf24');
+    ws.onopen = () => {
+      setBadge(onComp && onComp.checked ? 'node tính toán' : 'node đăng nhập', '#34d399');
+      sendResize();
+      term.focus();
+    };
+    ws.onmessage = (ev) => {
+      term.write(typeof ev.data === 'string' ? ev.data : new Uint8Array(ev.data));
+    };
+    ws.onclose = () => {
+      setBadge('đã ngắt — bấm Kết nối lại', '#fca5a5');
+      if (term) term.write('\r\n\x1b[31m[phiên đã kết thúc]\x1b[0m\r\n');
+    };
+    ws.onerror = () => setBadge('lỗi kết nối', '#fca5a5');
+
+    term.onData((d) => {
+      if (ws && ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({type:'input', data:d}));
+    });
+    term.onResize(sendResize);
   }
 
-  async function complete(){
-    const val = input.value;
-    try {
-      const res = await fetch('{{ url_for("terminal_complete") }}', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: val}),
-      });
-      if (!res.ok) return;
-      const data = await res.json();          // {matches, token}
-      const matches = data.matches || [];
-      if (!matches.length) return;
-      const head = val.slice(0, val.length - (data.token || '').length);
-      if (matches.length === 1){
-        input.value = head + matches[0];
-      } else {
-        const cp = commonPrefix(matches);
-        if (cp.length > (data.token || '').length){
-          input.value = head + cp;            // điền tới phần chung dài nhất
-        } else {
-          // không tiến thêm được → liệt kê các lựa chọn (như bấm Tab lần 2 ở bash)
-          addOut('out note', matches.join('   '));
-          scrollDown();
-        }
-      }
-    } catch(e){ /* bỏ qua lỗi gợi ý */ }
-  }
-
-  clearBtn.addEventListener('click', clearScreen);
-
-  // Bấm vào vùng console => focus ô nhập (trừ khi đang bôi chọn text để copy).
-  body.addEventListener('click', () => {
-    if (!window.getSelection().toString()) input.focus();
-  });
+  window.addEventListener('resize', () => { if (fit){ fit.fit(); sendResize(); } });
+  connect.addEventListener('click', open);
+  open();
 })();
 </script>
+{% endif %}
 {% endblock %}
