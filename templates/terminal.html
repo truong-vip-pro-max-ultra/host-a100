@@ -215,11 +215,51 @@
       histIdx++;
       if (histIdx >= history.length){ histIdx = -1; input.value = ''; }
       else input.value = history[histIdx];
+    } else if (e.key === 'Tab'){
+      e.preventDefault();   // chặn Tab nhảy focus sang phần tử khác
+      complete();
     } else if (e.ctrlKey && (e.key === 'l' || e.key === 'L')){
       e.preventDefault();
       clearScreen();
     }
   });
+
+  function commonPrefix(arr){
+    if (!arr.length) return '';
+    let p = arr[0];
+    for (const s of arr){
+      while (!s.startsWith(p)) p = p.slice(0, -1);
+      if (!p) break;
+    }
+    return p;
+  }
+
+  async function complete(){
+    const val = input.value;
+    try {
+      const res = await fetch('{{ url_for("terminal_complete") }}', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: val}),
+      });
+      if (!res.ok) return;
+      const data = await res.json();          // {matches, token}
+      const matches = data.matches || [];
+      if (!matches.length) return;
+      const head = val.slice(0, val.length - (data.token || '').length);
+      if (matches.length === 1){
+        input.value = head + matches[0];
+      } else {
+        const cp = commonPrefix(matches);
+        if (cp.length > (data.token || '').length){
+          input.value = head + cp;            // điền tới phần chung dài nhất
+        } else {
+          // không tiến thêm được → liệt kê các lựa chọn (như bấm Tab lần 2 ở bash)
+          addOut('out note', matches.join('   '));
+          scrollDown();
+        }
+      }
+    } catch(e){ /* bỏ qua lỗi gợi ý */ }
+  }
 
   clearBtn.addEventListener('click', clearScreen);
 

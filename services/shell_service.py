@@ -16,6 +16,7 @@ IMPORTANT: this is a REAL shell for the trusted owner (shell=True), NOT a
 sandbox. Do not expose the app without a password (config.AUTH_ENABLED).
 """
 import os
+import re
 import shlex
 import subprocess
 
@@ -66,6 +67,56 @@ def _clip(text):
     return text
 
 
+# Interactive programs that can't run without a TTY. Editors/pagers are refused
+# with a hint; top/htop are rewritten to a one-shot batch snapshot.
+_NO_TTY_HINT = {
+    "vi": "sửa file bằng trang Dự án, hoặc xem bằng `cat`/`sed -n '1,40p'`",
+    "vim": "sửa file bằng trang Dự án, hoặc xem bằng `cat`/`sed -n '1,40p'`",
+    "nano": "sửa file bằng trang Dự án, hoặc xem bằng `cat`",
+    "emacs": "sửa file bằng trang Dự án",
+    "less": "dùng `cat`, hoặc `sed -n '1,100p' <file>`",
+    "more": "dùng `cat`, hoặc `sed -n '1,100p' <file>`",
+    "man": "dùng `<lệnh> --help`",
+    "watch": "bỏ `watch`, chạy thẳng lệnh một lần (trang tự không lặp lại)",
+}
+
+
+def _handle_interactive(command):
+    """Adjust commands that assume a TTY. Returns (note, command).
+
+    * note=None: nothing special, run `command` as given.
+    * note set, command set: run the rewritten `command`, prefix output with note.
+    * note set, command=None: do NOT run — `note` is the message to show.
+
+    Only simple commands are touched; anything with a pipe/redirect/chain runs
+    untouched so the user's own pipelines are never rewritten.
+    """
+    if any(c in command for c in ("|", "&", ";", "<", ">", "`", "\n", "$(")):
+        return None, command
+    parts = command.split()
+    if not parts:
+        return None, command
+    first = parts[0]
+
+    if first in ("top", "htop") and "-b" not in parts:
+        # No TTY → run a single batch iteration that prints and exits. htop has
+        # no batch mode, so fall back to top for it.
+        args = [] if first == "htop" else parts[1:]
+        new = " ".join(["top", "-b", "-n", "1"] + args)
+        return (f"[{first} cần TTY — đang hiển thị ảnh chụp một lần: `{new}`]\n", new)
+
+    if first == "tail" and "-f" in parts:
+        return ("[`tail -f` theo dõi liên tục nên sẽ treo ở terminal này. "
+                "Bỏ `-f` để xem phần cuối file một lần.]\n", None)
+
+    if first in _NO_TTY_HINT:
+        return (f"[`{first}` là chương trình tương tác cần TTY — terminal này là "
+                f"một-lệnh-một-kết-quả nên không hỗ trợ. Gợi ý: "
+                f"{_NO_TTY_HINT[first]}.]\n", None)
+
+    return None, command
+
+
 def run_command(command, cwd, use_gpu=False, on_compute=False,
                 timeout=DEFAULT_TIMEOUT):
     """Run one command and return a dict the JSON endpoint hands to the UI.
@@ -89,6 +140,14 @@ def run_command(command, cwd, use_gpu=False, on_compute=False,
         return {"cwd": cwd, "exit_code": 1, "where": "login",
                 "output": f"cd: {target}: Không có thư mục như vậy\n"}
 
+    # Handle programs that need a TTY. This is a one-shot request/response with
+    # no terminal, so `top`/`htop` would just run forever until the timeout and
+    # show nothing, and editors/pagers can't work at all. We only touch SIMPLE
+    # commands (no pipe/redirect/chain) so real pipelines are never mangled.
+    note, command = _handle_interactive(command)
+    if note and command is None:
+        return {"cwd": cwd, "output": note, "exit_code": 1, "where": "login"}
+
     # Decide where to run. `srun` wants an argv vector, not a shell string, so on
     # a compute node we wrap the command in `bash -lc "<command>"`. _srun_prefix
     # returns [] when SLURM is unavailable/off, so we transparently fall back to
@@ -109,6 +168,8 @@ def run_command(command, cwd, use_gpu=False, on_compute=False,
             timeout=timeout, text=True, encoding="utf-8", errors="replace",
         )
         output, code = proc.stdout or "", proc.returncode
+        if note:
+            output = note + output
     except subprocess.TimeoutExpired as exc:
         partial = exc.output or ""
         if isinstance(partial, bytes):
@@ -121,3 +182,48 @@ def run_command(command, cwd, use_gpu=False, on_compute=False,
         output, code = f"[Lỗi khi chạy lệnh: {exc}]\n", 1
 
     return {"cwd": cwd, "output": _clip(output), "exit_code": code, "where": where}
+
+
+# Cap how many completion candidates we return, so a huge directory can't flood
+# the response / the console.
+MAX_COMPLETIONS = 200
+
+
+def complete(text, cwd):
+    """Filesystem tab-completion for the LAST token of `text`, relative to cwd.
+
+    Returns {"matches": [...], "token": "<last token>"}. Each match is a ready
+    drop-in replacement for the token — it keeps whatever directory prefix the
+    user already typed (including `~/` or an absolute path) and appends a `/` to
+    directories so the user can keep tabbing into them.
+    """
+    if not cwd or not os.path.isdir(cwd):
+        cwd = initial_cwd()
+    # Last whitespace-separated token (the thing being completed).
+    token = re.split(r"\s+", text)[-1] if text else ""
+
+    # Split the token into the directory part the user typed (kept verbatim) and
+    # the prefix to match against.
+    cut = token.rfind("/")
+    dir_part = token[:cut + 1] if cut >= 0 else ""   # keeps trailing slash
+    prefix = token[cut + 1:]
+
+    search = os.path.expanduser(dir_part) if dir_part else ""
+    base = search if os.path.isabs(search) else os.path.join(cwd, search or ".")
+    try:
+        entries = os.listdir(base)
+    except OSError:
+        return {"matches": [], "token": token}
+
+    matches = []
+    for name in sorted(entries):
+        if not name.startswith(prefix):
+            continue
+        # Hide dotfiles unless the user explicitly started the prefix with a dot.
+        if name.startswith(".") and not prefix.startswith("."):
+            continue
+        suffix = "/" if os.path.isdir(os.path.join(base, name)) else ""
+        matches.append(dir_part + name + suffix)
+        if len(matches) >= MAX_COMPLETIONS:
+            break
+    return {"matches": matches, "token": token}

@@ -58,8 +58,7 @@ def _require_login():
     if session.get("auth_ok"):
         return
     # Don't redirect API/JSON polls into an HTML login page; 401 is clearer.
-    if request.path.startswith(("/status/", "/upload/")) \
-            or request.path == "/terminal/run" \
+    if request.path.startswith(("/status/", "/upload/", "/terminal/")) \
             or request.path.endswith(".json"):
         return jsonify({"error": "unauthenticated"}), 401
     return redirect(url_for("login", next=request.path))
@@ -615,6 +614,13 @@ def terminal_run():
     # Persist the (possibly changed) working directory so `cd` sticks.
     session["term_cwd"] = result["cwd"]
     return jsonify(result)
+
+
+@app.route("/terminal/complete", methods=["POST"])
+def terminal_complete():
+    data = request.get_json(silent=True) or {}
+    cwd = session.get("term_cwd") or shell_service.initial_cwd()
+    return jsonify(shell_service.complete(data.get("text", ""), cwd))
 
 
 # --------------------------------------------------------------------------- #
