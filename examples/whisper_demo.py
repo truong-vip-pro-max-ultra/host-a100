@@ -40,10 +40,13 @@ def preload_cuda_libs():
         import nvidia
     except ImportError:
         return
-    root = os.path.dirname(nvidia.__file__)
-    sos = sorted(glob.glob(os.path.join(root, "*", "lib", "*.so*")))
+    # `nvidia` là namespace package (không có __init__.py) → __file__ là None.
+    # Phải duyệt __path__ (danh sách thư mục), KHÔNG dùng __file__.
+    sos = []
+    for root in list(getattr(nvidia, "__path__", [])):
+        sos += glob.glob(os.path.join(root, "*", "lib", "*.so*"))
     for _ in range(2):  # lặp 2 lượt để lib phụ thuộc nhau vẫn resolve được
-        for so in sos:
+        for so in sorted(sos):
             try:
                 ctypes.CDLL(so, mode=ctypes.RTLD_GLOBAL)
             except OSError:
