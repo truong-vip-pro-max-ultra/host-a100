@@ -276,7 +276,8 @@ def envs_page():
     selected_id = request.args.get("env", type=int)
     # The installed-package list is fetched asynchronously (see packages.json)
     # so opening an env never blocks page render on a slow listing.
-    return render_template("envs.html", envs=envs, selected_id=selected_id)
+    return render_template("envs.html", envs=envs, selected_id=selected_id,
+                           whisper_models=env_service.WHISPER_MODELS)
 
 
 @app.route("/envs/<int:env_id>/packages.json")
@@ -316,6 +317,21 @@ def env_install(env_id):
         flash(str(exc), "danger")
         return redirect(url_for("envs_page", env=env_id))
     flash(f"Đang cài {', '.join(packages)}… (tác vụ {task_id[:8]})", "info")
+    return redirect(url_for("envs_page", env=env_id, task=task_id))
+
+
+@app.route("/envs/<int:env_id>/prefetch-whisper", methods=["POST"])
+def env_prefetch_whisper(env_id):
+    """Download a faster-whisper model on the login node (with internet) so
+    compute-node jobs can load it offline. Streams via the env progress UI."""
+    model = request.form.get("whisper_model", "").strip()
+    task_id = uuid.uuid4().hex
+    try:
+        env_service.prefetch_whisper_model(task_id, env_id, model)
+    except ValueError as exc:
+        flash(str(exc), "danger")
+        return redirect(url_for("envs_page", env=env_id))
+    flash(f"Đang tải model Whisper '{model}'… (tác vụ {task_id[:8]})", "info")
     return redirect(url_for("envs_page", env=env_id, task=task_id))
 
 

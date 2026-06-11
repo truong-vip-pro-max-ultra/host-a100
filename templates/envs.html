@@ -59,6 +59,21 @@
         </div>
         <div class="form-text">Chạy <code>pip install -r requirements.txt</code> trong môi trường này.</div>
       </form>
+      <hr>
+      <form method="post" action="{{ url_for('env_prefetch_whisper', env_id=selected_id) }}">
+        <label class="form-label">Tải sẵn model Whisper (faster-whisper)</label>
+        <div class="input-group">
+          <select class="form-select" name="whisper_model">
+            {% for m in whisper_models %}
+            <option value="{{ m }}" {% if m == 'base' %}selected{% endif %}>{{ m }}</option>
+            {% endfor %}
+          </select>
+          <button class="btn btn-outline-primary"><i class="bi bi-download"></i> Tải về</button>
+        </div>
+        <div class="form-text">Tải trên <strong>node đăng nhập (có mạng)</strong> vào HF cache
+          → job ở compute node (không mạng) đọc offline được. Cần đã cài
+          <code>faster-whisper</code> ở trên. <code>tiny</code>/<code>base</code> nhẹ, hợp test nhanh.</div>
+      </form>
     </div></div>
 
     <div class="card"><div class="card-body">

@@ -337,6 +337,92 @@ def install_requirements_file(task_id, env_id, req_path):
     threading.Thread(target=worker, daemon=True).start()
 
 
+# faster-whisper model sizes offered for one-click prefetch. Validated against
+# this allowlist so the name can't inject anything into the download subprocess.
+WHISPER_MODELS = (
+    "tiny", "tiny.en", "base", "base.en", "small", "small.en",
+    "medium", "medium.en", "large-v2", "large-v3", "large-v3-turbo",
+)
+
+
+def _run_whisper_download(task_id, cmd, model):
+    """Stream a faster-whisper model download into the env progress channel."""
+    progress.update("env", task_id, status="running", progress=5,
+                    step=f"đang tải model {model} (trên node đăng nhập có mạng)…",
+                    append_log=f"$ tải faster-whisper model: {model}\n")
+    # huggingface_hub emits download progress sparsely when stdout isn't a TTY,
+    # so creep the bar in the background and bump it whenever an aggregate
+    # "Fetching N files: X%" line shows up.
+    env = _pip_env()
+    env["HF_HUB_OFFLINE"] = "0"          # we ARE online here (login node)
+    env["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    stop = threading.Event()
+    ticker = threading.Thread(target=_creep, args=(task_id, stop, 5, 92),
+                              daemon=True)
+    ticker.start()
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, encoding="utf-8", errors="replace", env=env,
+        )
+        for line in proc.stdout:
+            progress.update("env", task_id, append_log=line)
+            m = re.search(r"Fetching\s+\d+\s+files:\s*(\d+)%", line)
+            if m:
+                progress.update("env", task_id,
+                                progress=max(5, min(95, 10 + int(0.85 * int(m.group(1))))))
+        code = proc.wait()
+    finally:
+        stop.set()
+        ticker.join(timeout=1)
+    if code == 0:
+        progress.update("env", task_id, progress=100, status="done",
+                        step=f"đã tải xong model {model}",
+                        append_log=f"\nĐã tải model '{model}' vào HF cache. "
+                                   "Job trên compute node giờ đọc offline được.\n")
+    else:
+        progress.update("env", task_id, status="error", step="tải model thất bại",
+                        append_log=f"\nTiến trình kết thúc với mã {code}.\n")
+
+
+def prefetch_whisper_model(task_id, env_id, model):
+    """Download a faster-whisper model into the HF cache, on THIS (login) node.
+
+    Runs as a LOCAL subprocess (never srun): only the login node has internet,
+    and the model lands in the shared-FS HF cache so compute-node jobs read it
+    offline. Reuses the "env" progress channel so the existing progress bar/poll
+    UI shows it. The env must already have faster-whisper installed.
+    """
+    if model not in WHISPER_MODELS:
+        raise ValueError(f"Model Whisper không hợp lệ: {model!r}")
+    env = get_env(env_id)
+    if not env:
+        raise ValueError("Không tìm thấy môi trường.")
+    py = _python_path(env["path"])
+    if not os.path.exists(py):
+        raise ValueError("Thiếu trình thông dịch của môi trường trên đĩa.")
+    progress.init("env", task_id, step=f"chuẩn bị tải model {model}")
+    # model passed as argv (not interpolated) so it can never break out of -c.
+    script = (
+        "import sys\n"
+        "try:\n"
+        "    from faster_whisper.utils import download_model\n"
+        "except Exception:\n"
+        "    from faster_whisper import download_model\n"
+        "print('CACHED ' + download_model(sys.argv[1]))\n"
+    )
+    cmd = [py, "-c", script, model]
+
+    def worker():
+        try:
+            _run_whisper_download(task_id, cmd, model)
+        except Exception as exc:  # noqa: BLE001
+            progress.update("env", task_id, status="error", step="failed",
+                            append_log=f"ERROR: {exc}\n")
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 # List installed distributions via stdlib importlib.metadata instead of
 # `pip freeze`. It avoids importing the whole pip package (hundreds of files to
 # stat on a network FS), so it returns noticeably faster when viewing an env.
