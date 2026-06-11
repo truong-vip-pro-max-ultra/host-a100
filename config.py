@@ -139,6 +139,14 @@ APP_PASSWORD = os.environ.get("HOSTA100_PASSWORD", DEFAULT_PASSWORD)
 AUTH_ENABLED = bool(APP_PASSWORD)
 
 
+# --------------------------------------------------------------------------- #
+# Terminal tab: names cosmetically hidden from `ls` output and Tab-completion.
+# This is NOT a security boundary — typing the full path still works. It just
+# declutters listings. Add more names to taste.
+# --------------------------------------------------------------------------- #
+TERMINAL_HIDDEN_NAMES = {"ollama"}
+
+
 def ensure_dirs():
     """Create all required data directories. Safe to call repeatedly."""
     print(f"[host-a100] Using data directory: {DATA_DIR}")

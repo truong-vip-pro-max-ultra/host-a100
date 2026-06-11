@@ -81,6 +81,33 @@ _NO_TTY_HINT = {
 }
 
 
+def _hidden_names():
+    return getattr(config, "TERMINAL_HIDDEN_NAMES", set())
+
+
+def _filter_ls_output(command, output):
+    """Drop cosmetically-hidden entries (e.g. `ollama`) from `ls` output.
+
+    Only touches a simple `ls`/`dir` listing. Our subprocess has no TTY, so ls
+    prints one entry per line, which makes line-based filtering reliable for
+    `ls`, `ls -l` and `ls -la` alike. Purely cosmetic — full paths still work.
+    """
+    hidden = _hidden_names()
+    if not hidden or any(c in command for c in ("|", "&", ";", "<", ">")):
+        return output
+    parts = command.split()
+    if not parts or os.path.basename(parts[0]) not in ("ls", "dir"):
+        return output
+    kept = []
+    for line in output.splitlines(keepends=True):
+        stripped = line.strip()
+        last = stripped.split()[-1] if stripped else ""
+        if os.path.basename(last) in hidden:
+            continue
+        kept.append(line)
+    return "".join(kept)
+
+
 def _handle_interactive(command):
     """Adjust commands that assume a TTY. Returns (note, command).
 
@@ -168,6 +195,7 @@ def run_command(command, cwd, use_gpu=False, on_compute=False,
             timeout=timeout, text=True, encoding="utf-8", errors="replace",
         )
         output, code = proc.stdout or "", proc.returncode
+        output = _filter_ls_output(command, output)
         if note:
             output = note + output
     except subprocess.TimeoutExpired as exc:
@@ -215,12 +243,16 @@ def complete(text, cwd):
     except OSError:
         return {"matches": [], "token": token}
 
+    hidden = _hidden_names()
     matches = []
     for name in sorted(entries):
         if not name.startswith(prefix):
             continue
         # Hide dotfiles unless the user explicitly started the prefix with a dot.
         if name.startswith(".") and not prefix.startswith("."):
+            continue
+        # Cosmetically-hidden names (e.g. ollama) never appear as suggestions.
+        if name in hidden:
             continue
         suffix = "/" if os.path.isdir(os.path.join(base, name)) else ""
         matches.append(dir_part + name + suffix)
