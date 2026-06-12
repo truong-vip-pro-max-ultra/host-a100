@@ -175,11 +175,12 @@ ls() {{
         else operands+=("$a"); fi
     done
     if [ "${{#operands[@]}}" -gt 0 ]; then target="${{operands[-1]}}"; fi
-    local rp; rp=$(cd -- "$target" 2>/dev/null && pwd -P)
+    # `builtin cd` so this never re-enters the guarded `cd` defined below.
+    local rp; rp=$(builtin cd -- "$target" 2>/dev/null && pwd -P)
     if [ -n "$rp" ] && [ "$rp" = "$__HA_APP_DIR" ]; then
         [ -z "$__HA_VISIBLE" ] && return 0          # nothing to reveal here
         # -d so the data dir shows up as an entry instead of being descended into.
-        ( cd -- "$__HA_APP_DIR" 2>/dev/null && command ls -d "${{flags[@]}}" -- $__HA_VISIBLE )
+        ( builtin cd -- "$__HA_APP_DIR" 2>/dev/null && command ls -d "${{flags[@]}}" -- $__HA_VISIBLE )
         return $?
     fi
     command ls "$@"
@@ -205,12 +206,23 @@ pkill()   {{ if __ha_is_blocked "$@"; then __ha_deny pkill;   else command pkill
 killall() {{ if __ha_is_blocked "$@"; then __ha_deny killall; else command killall "$@"; fi; }}
 
 # 5) Reading/editing: refuse the platform's own source files (everything under
-# the app dir EXCEPT the data subtree). Path operands are resolved (incl. `..`
-# and symlinks via realpath) so `cat ../app.py` / `cat $(pwd)/app.py` are caught.
+# the app dir EXCEPT the data subtree). Paths are resolved with pure bash
+# builtins (cd + `pwd -P`, resolving `..` and symlinks) — NOT `realpath`, which
+# may be missing or lack `-m` on the host and would make the guard fail open.
+__ha_resolve() {{
+    local f="$1" dir bn rp
+    case "$f" in /*) ;; *) f="$PWD/$f";; esac
+    # `builtin cd` (never the guarded cd below) in a subshell for physical
+    # resolution. If the whole path is a directory, resolve it directly — this
+    # collapses a trailing `.`/`..` (e.g. `cd ..`); otherwise resolve the parent
+    # and re-attach the basename (for files like `cat ../app.py`).
+    rp=$(builtin cd -- "$f" 2>/dev/null && pwd -P) && {{ printf '%s' "$rp"; return; }}
+    dir="${{f%/*}}"; bn="${{f##*/}}"; [ -z "$dir" ] && dir=/
+    rp=$(builtin cd -- "$dir" 2>/dev/null && pwd -P) && {{ printf '%s/%s' "$rp" "$bn"; return; }}
+    printf '%s' "$f"
+}}
 __ha_is_source() {{
-    local f="$1" rp
-    case "$f" in /*) rp="$f";; *) rp="$PWD/$f";; esac
-    rp=$(realpath -m -- "$rp" 2>/dev/null) || return 1
+    local rp; rp=$(__ha_resolve "$1")
     [ -z "$rp" ] && return 1
     case "$rp/" in
         "$__HA_DATA_DIR"/*) return 1;;          # data subtree is always allowed
@@ -233,8 +245,7 @@ __ha_guard_read() {{
 {read_defs}
 
 # 6) cd: refuse to enter the app's own source tree (anything under the app dir
-# except the data subtree) and filter those names out of `cd` tab-completion, so
-# the source dirs are neither reachable nor suggested.
+# except the data subtree).
 cd() {{
     local a d=""
     for a in "$@"; do case "$a" in -*) ;; *) d="$a";; esac; done
@@ -244,25 +255,32 @@ cd() {{
     fi
     builtin cd "$@"
 }}
-_ha_cd_complete() {{
+
+# 7) Tab-completion: hide the source tree from `cd` AND from every read/edit
+# command, so the names are neither suggested nor reachable by completion.
+# `$1` = "dir" to offer only directories (cd), anything else = files + dirs.
+__ha_complete() {{
     COMPREPLY=()
-    local cur="${{COMP_WORDS[COMP_CWORD]}}" dirpart base searchexp d name rp
+    local mode="$1" cur="${{COMP_WORDS[COMP_CWORD]}}" dirpart base searchexp e name
     case "$cur" in
         */*) dirpart="${{cur%/*}}/"; base="${{cur##*/}}";;
         *)   dirpart="";            base="$cur";;
     esac
     eval "searchexp=${{dirpart:-./}}" 2>/dev/null || searchexp="${{dirpart:-./}}"
     shopt -s nullglob
-    for d in "$searchexp"*/; do
-        name="${{d%/}}"; name="${{name##*/}}"
+    for e in "$searchexp"*; do
+        name="${{e##*/}}"
         case "$name" in "$base"*) ;; *) continue;; esac
-        rp=$(realpath -m -- "$d" 2>/dev/null)
-        __ha_is_source "$rp" && continue
-        COMPREPLY+=( "${{dirpart}}${{name}}/" )
+        __ha_is_source "$e" && continue
+        if [ -d "$e" ]; then COMPREPLY+=( "${{dirpart}}${{name}}/" )
+        elif [ "$mode" != "dir" ]; then COMPREPLY+=( "${{dirpart}}${{name}}" ); fi
     done
     shopt -u nullglob
 }}
-complete -F _ha_cd_complete -o nospace cd
+_ha_cd_complete()   {{ __ha_complete dir;  }}
+_ha_read_complete() {{ __ha_complete file; }}
+complete -F _ha_cd_complete   -o nospace cd
+complete -F _ha_read_complete -o nospace -o filenames {read_tools}
 """
 
 
