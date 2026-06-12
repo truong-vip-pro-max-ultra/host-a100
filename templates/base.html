@@ -244,15 +244,19 @@
   </main>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-<script>
+<script data-base src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script data-base>
 // ====================================================================
-//  Global UX layer: top loading bar + AJAX delete (no full-page reload)
+//  Global UX layer: top loading bar + AJAX delete + SPA navigation.
 //  Pure progressive enhancement — if anything here fails the plain
-//  HTML form/link behaviour still works.
+//  HTML form/link behaviour still works (navigate() falls back to a
+//  full page load on any error, so a broken swap is never left on screen).
 // ====================================================================
 (function(){
   "use strict";
+  // Native timer kept for our own infra (Loader/removeRow) so the SPA teardown,
+  // which clears page-script timers, never kills it.
+  var nativeST = window.setTimeout.bind(window);
 
   // ---- top progress bar -------------------------------------------------
   var bar = document.getElementById('nprog');
@@ -273,7 +277,7 @@
       if (!bar) return;
       bar.style.transition = 'width .3s ease, opacity .4s ease';
       bar.style.width = '100%';
-      setTimeout(function(){
+      nativeST(function(){
         bar.classList.remove('on');
         bar.style.transition = 'none'; bar.style.width = '0';
       }, 380);
@@ -307,7 +311,7 @@
     el.style.transition = 'opacity .25s ease, transform .25s ease';
     el.style.opacity = '0';
     el.style.transform = 'translateX(10px)';
-    setTimeout(function(){ el.remove(); Loader.done(); }, 250);
+    nativeST(function(){ el.remove(); Loader.done(); }, 250);
   }
 
   // ---- AJAX delete ------------------------------------------------------
@@ -366,6 +370,144 @@
     spin(form.querySelector('[type=submit], button:not([type=button]):not([type=reset])'));
     Loader.start();
   }, false);
+
+  // ====================================================================
+  //  SPA navigation — swap <main.content> without a full page reload.
+  //  Only the known page routes below are intercepted; everything else
+  //  (file downloads, the Terminal page, external links) navigates fully.
+  // ====================================================================
+  var PJAX = ['/', '/upload', '/models', '/envs', '/projects', '/jobs'];  // NOT /terminal (xterm + WebSocket → full load)
+  var timers = new Set();      // page-script timers, cleared on navigation
+  var tracked = [];            // page-script document/window listeners, removed on navigation
+  var loadedExternals = new Set();
+  document.querySelectorAll('script[src]').forEach(function(s){ loadedExternals.add(s.src); });
+
+  function pjaxable(path){ return PJAX.indexOf(path) !== -1; }
+
+  function teardown(){
+    timers.forEach(function(id){ clearTimeout(id); clearInterval(id); }); timers.clear();
+    tracked.forEach(function(l){ try{ l.t.removeEventListener(l.type, l.fn, l.opts); }catch(_){} });
+    tracked.length = 0;
+  }
+
+  function setActiveNav(path){
+    document.querySelectorAll('.side-link').forEach(function(el){
+      var href = el.getAttribute('href');
+      var p = null; try{ p = href ? new URL(href, location.href).pathname : null; }catch(_){}
+      el.classList.toggle('active', p === path);
+    });
+  }
+
+  // Add page-specific <link>/<style> from the fetched <head> that the base page
+  // doesn't already have (e.g. CodeMirror CSS). Tagged so the previous page's
+  // extras are pulled when we move on.
+  function syncHead(doc){
+    document.head.querySelectorAll('[data-pjax-head]').forEach(function(n){ n.remove(); });
+    var have = {};
+    document.head.querySelectorAll('link[href],style').forEach(function(n){
+      have[n.tagName + (n.getAttribute('href') || n.textContent)] = 1;
+    });
+    doc.head.querySelectorAll('link[rel="stylesheet"],style').forEach(function(n){
+      var sig = n.tagName + (n.getAttribute('href') || n.textContent);
+      if (!have[sig]){ var c = n.cloneNode(true); c.setAttribute('data-pjax-head',''); document.head.appendChild(c); }
+    });
+  }
+
+  function loadScript(src){
+    return new Promise(function(res){
+      var s = document.createElement('script'); s.src = src;
+      s.onload = res; s.onerror = res; document.body.appendChild(s);
+    });
+  }
+
+  // Run the fetched page's scripts. External libs load (once) in order; then all
+  // of the page's inline blocks run TOGETHER inside one IIFE — that keeps their
+  // cross-references working while making top-level const/let function-scoped, so
+  // re-running on a later visit can't throw "already declared". (Functions an
+  // inline onclick needs, e.g. watch(), are exposed via window in the page.)
+  async function runScripts(doc){
+    var nodes = [].slice.call(doc.querySelectorAll('body > script:not([data-base])'));
+    for (var i = 0; i < nodes.length; i++){
+      var src = nodes[i].src;
+      if (!src) continue;
+      if (loadedExternals.has(src)) continue;
+      loadedExternals.add(src);
+      await loadScript(src);
+    }
+    var code = nodes.filter(function(n){ return !n.src; })
+                    .map(function(n){ return n.textContent; }).join('\n;\n');
+    if (code.trim()){
+      var s = document.createElement('script');
+      s.textContent = '(function(){\n"use strict";\n' + code + '\n})();';
+      document.body.appendChild(s); s.remove();
+    }
+  }
+
+  var navToken = 0;
+  function navigate(url, push){
+    var my = ++navToken;
+    Loader.start();
+    fetch(url, { headers: { 'X-Requested-With': 'pjax' } })
+      .then(function(res){
+        if (res.redirected && /\/login(\?|$)/.test(res.url)){ location.href = res.url; throw 'redir'; }
+        return res.text().then(function(html){ return { html: html, url: res.url || url }; });
+      })
+      .then(function(d){
+        if (my !== navToken) return;                       // a newer navigation superseded us
+        var doc = new DOMParser().parseFromString(d.html, 'text/html');
+        var fresh = doc.querySelector('main.content');
+        var cur = document.querySelector('main.content');
+        if (!fresh || !cur) throw new Error('no content node');
+        teardown();
+        cur.innerHTML = fresh.innerHTML;
+        document.title = doc.title || document.title;
+        syncHead(doc);
+        setActiveNav(new URL(d.url, location.href).pathname);
+        if (push) history.pushState({ pjax: 1 }, '', d.url);
+        window.scrollTo(0, 0);
+        document.body.classList.remove('nav-open');
+        cur.style.animation = 'none'; void cur.offsetWidth; cur.style.animation = '';  // replay fade-in
+        return runScripts(doc).then(function(){ Loader.done(); });
+      })
+      .catch(function(err){
+        if (err === 'redir') return;
+        Loader.done();
+        location.href = url;                                // never leave a half-swapped page
+      });
+  }
+
+  // Intercept clicks on internal links to the known page routes.
+  document.addEventListener('click', function(e){
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    var a = e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a || a.target === '_blank' || a.hasAttribute('download') || a.hasAttribute('data-no-pjax')) return;
+    var url; try{ url = new URL(a.getAttribute('href'), location.href); }catch(_){ return; }
+    if (url.origin !== location.origin) return;
+    if (a.getAttribute('href').charAt(0) === '#') return;
+    if (!pjaxable(url.pathname) || !pjaxable(location.pathname)) return;   // downloads / terminal / etc.
+    if (url.href === location.href){ e.preventDefault(); return; }
+    e.preventDefault();
+    navigate(url.href, true);
+  }, false);
+
+  window.addEventListener('popstate', function(){
+    if (!pjaxable(location.pathname)){ location.reload(); return; }
+    navigate(location.href, false);
+  });
+
+  // Install trackers LAST so the base layer's own listeners (registered above)
+  // are never torn down — only listeners/timers created by page scripts are.
+  (function installTrackers(){
+    var oSI = window.setInterval, oST = window.setTimeout;
+    window.setInterval = function(){ var id = oSI.apply(window, arguments); timers.add(id); return id; };
+    window.setTimeout  = function(){ var id = oST.apply(window, arguments); timers.add(id); return id; };
+    [document, window].forEach(function(t){
+      var orig = t.addEventListener;
+      t.addEventListener = function(type, fn, opts){ tracked.push({ t: t, type: type, fn: fn, opts: opts }); return orig.call(t, type, fn, opts); };
+    });
+  })();
+
+  window.__spa = { timers: timers, tracked: tracked, externals: loadedExternals, navigate: navigate };
 })();
 </script>
 {% block scripts %}{% endblock %}

@@ -227,6 +227,7 @@ applyGpuUi();
 
 // ---- job watching + outputs --------------------------------------------
 let watching = null;
+window.watch = watch;   // referenced by inline onclick="watch(..)"; must stay global under SPA
 function watch(id) {
   watching = id;
   document.getElementById('watchCard').classList.remove('d-none');
