@@ -542,6 +542,9 @@ def job_submit():
     use_gpu = request.form.get("use_gpu") is not None
     # Optional GPU-model pin (e.g. "a100"); "" = any GPU of the configured kind.
     gpu_model = request.form.get("gpu_model", "").strip()
+    # Checkbox: run on the login node (has internet, no SLURM) instead of a
+    # compute node. Lets jobs that fetch at runtime (requests/HF download) work.
+    run_local = request.form.get("run_local") is not None
 
     if not env_id:
         flash("Hãy chọn một môi trường.", "danger")
@@ -557,7 +560,7 @@ def job_submit():
         job_id = job_service.submit_job(
             model_id, env_id, job_name, params_json,
             run_mode=run_mode, project_id=project_id, main_file=main_file,
-            use_gpu=use_gpu, gpu_model=gpu_model,
+            use_gpu=use_gpu, gpu_model=gpu_model, run_local=run_local,
         )
     except ValueError as exc:
         flash(str(exc), "danger")

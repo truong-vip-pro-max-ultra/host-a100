@@ -81,6 +81,20 @@
             AI) — job sẽ không chiếm GPU và được cấp nhanh hơn.</div>
         </div>
 
+        {% if slurm_active %}
+        <div class="form-check form-switch mb-2">
+          <input class="form-check-input" type="checkbox" role="switch"
+                 name="run_local" id="runLocal">
+          <label class="form-check-label" for="runLocal">
+            Chạy trên node đăng nhập (có internet)</label>
+          <div class="form-text mb-0">Bật nếu code cần mạng lúc chạy
+            (<code>requests</code>, tải HuggingFace…). Job chạy thẳng trên node
+            đăng nhập, <strong>không qua SLURM</strong> — node tính toán không có
+            internet. Lưu ý: node này <strong>không có GPU</strong> và job sẽ
+            không sống sót khi khởi động lại app.</div>
+        </div>
+        {% endif %}
+
         <div class="mb-3" id="gpuModelWrap">
           <label class="form-label" for="gpuModel">Loại GPU</label>
           <select class="form-select" name="gpu_model" id="gpuModel">
@@ -195,6 +209,20 @@ projectSelect.addEventListener('change', () => {
     });
 });
 applyMode();
+
+// ---- login-node toggle disables the (irrelevant) GPU options -----------
+const runLocal = document.getElementById('runLocal');
+const useGpu = document.getElementById('useGpu');
+const gpuModel = document.getElementById('gpuModel');
+const gpuModelWrap = document.getElementById('gpuModelWrap');
+function applyRunLocal() {
+  if (!runLocal) return;
+  const on = runLocal.checked;
+  useGpu.disabled = on;
+  gpuModel.disabled = on;
+  gpuModelWrap.classList.toggle('text-muted', on);
+}
+if (runLocal) { runLocal.addEventListener('change', applyRunLocal); applyRunLocal(); }
 
 // ---- job watching + outputs --------------------------------------------
 let watching = null;

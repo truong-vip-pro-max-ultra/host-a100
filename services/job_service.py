@@ -96,7 +96,7 @@ def read_log(job_id):
 
 def submit_job(model_id, env_id, job_name, params_json,
                run_mode="runner", project_id=None, main_file=None,
-               use_gpu=True, gpu_model=""):
+               use_gpu=True, gpu_model="", run_local=False):
     """
     Validate inputs, create the DB row + job dirs, and launch the run thread.
 
@@ -194,7 +194,7 @@ def submit_job(model_id, env_id, job_name, params_json,
     # sbatch path when SLURM+sbatch are available, else runs the command locally.
     _launch(job_id, cmd, cwd, job_dir, output_dir, params_file,
             model_path=model["path"] if model else "",
-            use_gpu=use_gpu, gpu_model=gpu_model)
+            use_gpu=use_gpu, gpu_model=gpu_model, run_local=run_local)
     return job_id
 
 
@@ -311,7 +311,7 @@ def _set_status(job_id, status=None, prog=None):
 
 
 def _launch(job_id, cmd, cwd, job_dir, output_dir, params_file, model_path="",
-            use_gpu=True, gpu_model=""):
+            use_gpu=True, gpu_model="", run_local=False):
     log_file = os.path.join(job_dir, "job.log")
 
     # Environment for the child process. User code reads these to find the model,
@@ -332,7 +332,12 @@ def _launch(job_id, cmd, cwd, job_dir, output_dir, params_file, model_path="",
     if model_path:
         env_vars["MODEL_PATH"] = model_path
 
-    if slurm_active() and _SBATCH:
+    # run_local=True forces the job to run right here on the login node (a local
+    # subprocess) instead of being dispatched to a compute node via SLURM. The
+    # login node is the ONLY node with internet, so this is the way to run code
+    # that fetches at runtime (requests/HuggingFace download/etc.). There is no
+    # GPU on the login node, so use_gpu/gpu_model are irrelevant in this mode.
+    if slurm_active() and _SBATCH and not run_local:
         target = lambda: _run_via_sbatch(job_id, cmd, cwd, job_dir, log_file,
                                          env_vars, use_gpu, gpu_model)
     else:
