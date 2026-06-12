@@ -707,8 +707,10 @@ def status_job(job_id):
             snap["status"] = job.get("status") or snap.get("status")
             if not snap.get("progress"):
                 snap["progress"] = job.get("progress") or 0
-            if not snap.get("step"):
-                snap["step"] = job.get("status") or ""
+            # "unknown" is the registry's placeholder step — drop it so the popup
+            # doesn't show a literal "unknown" for a finished historical job.
+            if not snap.get("step") or snap.get("step") == "unknown":
+                snap["step"] = ""
     return jsonify(snap)
 
 

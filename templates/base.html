@@ -70,8 +70,12 @@
       transform:translateY(-50%); width:4px; height:22px; border-radius:0 4px 4px 0;
       background:#fff; box-shadow:0 0 10px rgba(255,255,255,.6); }
     .content{ margin-left:248px; flex:1; padding:26px 30px 60px; min-width:0;
-      animation:contentIn .4s ease both; }
-    @keyframes contentIn{ from{ opacity:0; transform:translateY(8px); } to{ opacity:1; transform:none; } }
+      animation:contentIn .35s ease both; }
+    /* opacity-only: a transform here (even identity) would leave .content with a
+       lingering matrix → a stacking context that traps position:fixed children
+       (Bootstrap modals) BEHIND the body-level .modal-backdrop, darkening the
+       screen and swallowing clicks. Keep it transform-free. */
+    @keyframes contentIn{ from{ opacity:0; } to{ opacity:1; } }
     .topbar{ display:flex; align-items:center; justify-content:space-between;
       margin-bottom:22px; gap:12px; }
     .page-title{ font-weight:800; font-size:1.5rem; letter-spacing:-.02em; margin:0;
@@ -282,6 +286,36 @@
   </div>
 </div>
 <div class="toast-host" id="toastHost"></div>
+
+<!-- Job detail / log popup (opened by clicking a row in the dashboard's "Tác vụ
+     gần đây"). Lives here at <body> level so the .modal-backdrop never paints
+     over it; the dashboard page wires up its behaviour. -->
+<div class="modal fade" id="jobModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Tác vụ <span id="jmId"></span>
+          <span class="pill pill-unknown ms-1" id="jmStatus"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Đóng"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex justify-content-between small text-muted mb-1">
+          <span id="jmName"></span><span id="jmStep"></span>
+        </div>
+        <div class="progress progress-wrap mb-3" style="height:18px;border-radius:9px;background:#eef2f7">
+          <div class="progress-bar" id="jmBar" style="width:0%;background:linear-gradient(90deg,#6366f1,#8b5cf6)"></div>
+          <span class="progress-val" id="jmBarVal">0%</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <strong class="small"><i class="bi bi-terminal"></i> Log</strong>
+          <a class="btn btn-sm btn-outline-secondary" id="jmOpen" href="#">
+            <i class="bi bi-box-arrow-up-right"></i> Mở ở trang Tác vụ</a>
+        </div>
+        <pre class="logbox mb-0" id="jmLog" style="max-height:360px">Đang tải…</pre>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script data-base src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script data-base>

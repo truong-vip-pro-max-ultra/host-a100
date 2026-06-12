@@ -10,34 +10,9 @@
 <div id="liveContent">
 {% include "_dashboard_live.html" %}
 </div>
-
-<!-- Job detail / log popup (opened by clicking a row in "Tác vụ gần đây") -->
-<div class="modal fade" id="jobModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered modal-lg">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">Tác vụ <span id="jmId"></span>
-          <span class="pill pill-unknown ms-1" id="jmStatus"></span></h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Đóng"></button>
-      </div>
-      <div class="modal-body">
-        <div class="d-flex justify-content-between small text-muted mb-1">
-          <span id="jmName"></span><span id="jmStep"></span>
-        </div>
-        <div class="progress progress-wrap mb-3" style="height:18px;border-radius:9px;background:#eef2f7">
-          <div class="progress-bar" id="jmBar" style="width:0%;background:linear-gradient(90deg,#6366f1,#8b5cf6)"></div>
-          <span class="progress-val" id="jmBarVal">0%</span>
-        </div>
-        <div class="d-flex justify-content-between align-items-center mb-1">
-          <strong class="small"><i class="bi bi-terminal"></i> Log</strong>
-          <a class="btn btn-sm btn-outline-secondary" id="jmOpen" href="#">
-            <i class="bi bi-box-arrow-up-right"></i> Mở ở trang Tác vụ</a>
-        </div>
-        <pre class="logbox mb-0" id="jmLog" style="max-height:360px">Đang tải…</pre>
-      </div>
-    </div>
-  </div>
-</div>
+{# The job-log popup (#jobModal) lives in base.html at <body> level so the
+   .modal-backdrop can't paint over it (a fixed modal nested under main.content
+   ends up behind the body-level backdrop). #}
 {% endblock %}
 
 {% block scripts %}
