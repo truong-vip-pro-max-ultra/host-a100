@@ -15,6 +15,11 @@ try:
 except Exception:  # noqa: BLE001 - psutil is optional
     psutil = None
 
+try:
+    import pwd  # Linux only — resolve a process owner's uid to a username
+except Exception:  # noqa: BLE001
+    pwd = None
+
 
 def _cpu_name():
     """Best-effort human-readable CPU model name."""
@@ -107,25 +112,34 @@ _PROC_CPU = {}   # pid -> (proc_jiffies, wall_time) from the previous /proc samp
 
 
 def _psutil_processes():
+    """Every process on the host (all users — like `top`), not just ours."""
     out = []
     ncpu = psutil.cpu_count() or 1            # normalise %CPU to the whole host
-    for p in psutil.process_iter(["pid", "name", "memory_info", "memory_percent"]):
+    for p in psutil.process_iter(["pid", "name", "username",
+                                  "memory_info", "memory_percent"]):
         try:
             info = p.info
             if info["pid"] == 0:               # "System Idle Process" — skip
                 continue
-            # cpu_percent is per-core (0..ncpu*100); divide so it's a share of
-            # the whole machine like the CPU% bar above (sum of procs ≈ total).
-            cpu = p.cpu_percent(None) / ncpu
+            # Don't let one inaccessible field (another user's process) drop the
+            # whole row — keep it with whatever we could read.
+            try:
+                cpu = p.cpu_percent(None) / ncpu   # per-core → share of whole host
+            except Exception:  # noqa: BLE001
+                cpu = 0.0
             mi = info.get("memory_info")
+            user = (info.get("username") or "")
             out.append({
                 "pid": info["pid"],
                 "name": (info.get("name") or "?")[:40],
+                "user": user.split("\\")[-1][:18],   # drop DOMAIN\ prefix on Windows
                 "cpu": round(cpu, 1),
                 "mem_pct": round(info.get("memory_percent") or 0.0, 1),
                 "mem_bytes": mi.rss if mi else 0,
             })
-        except Exception:  # noqa: BLE001 - process vanished / access denied
+        except psutil.NoSuchProcess:
+            continue
+        except Exception:  # noqa: BLE001
             continue
     return out
 
@@ -158,6 +172,11 @@ def _proc_processes():
             tj = int(f[11]) + int(f[12])               # utime + stime
             with open(f"/proc/{pid}/statm", encoding="utf-8") as fh:
                 rss = int(fh.read().split()[1]) * page
+            try:                                       # owner = uid of /proc/<pid>
+                uid = os.stat(f"/proc/{pid}").st_uid
+                user = pwd.getpwuid(uid).pw_name if pwd else str(uid)
+            except (OSError, KeyError):
+                user = ""
             cpu, prev = 0.0, _PROC_CPU.get(pid)
             if prev:
                 dt = now - prev[1]
@@ -165,7 +184,7 @@ def _proc_processes():
                     cpu = 100.0 * (tj - prev[0]) / _HZ / dt / ncpu
             seen[pid] = (tj, now)
             out.append({
-                "pid": int(pid), "name": name[:40],
+                "pid": int(pid), "name": name[:40], "user": user[:18],
                 "cpu": round(max(0.0, cpu), 1),
                 "mem_pct": round(rss * 100 / total_mem, 1) if total_mem else 0.0,
                 "mem_bytes": rss,

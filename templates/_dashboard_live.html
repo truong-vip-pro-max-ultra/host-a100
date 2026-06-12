@@ -156,7 +156,8 @@
             {% for p in processes.cpu %}
               <tr>
                 <td class="text-muted">{{ p.pid }}</td>
-                <td class="text-truncate" style="max-width:150px" title="{{ p.name }}">{{ p.name }}</td>
+                <td class="text-truncate" style="max-width:150px" title="{{ p.name }}{% if p.user %} · {{ p.user }}{% endif %}">
+                  {{ p.name }}{% if p.user %}<div class="text-muted" style="font-size:.72rem"><i class="bi bi-person"></i> {{ p.user }}</div>{% endif %}</td>
                 <td class="text-end fw-semibold">{{ p.cpu }}%</td>
                 <td class="text-end text-muted">{{ p.mem_pct }}%</td>
               </tr>
@@ -164,7 +165,7 @@
             </tbody>
           </table>
         </div>
-        <div class="form-text mt-1">%CPU tính trên tổng toàn máy ({{ cpu.cores }} nhân), trung bình từ lần làm mới trước — nên tổng các tiến trình xấp xỉ % CPU tổng ở trên.</div>
+        <div class="form-text mt-1">Toàn bộ tiến trình trên server (mọi người dùng). %CPU tính trên tổng toàn máy ({{ cpu.cores }} nhân), trung bình từ lần làm mới trước — nên tổng các tiến trình xấp xỉ % CPU tổng ở trên.</div>
       </details>
       {% endif %}
     </div></div>
@@ -191,7 +192,8 @@
             {% for p in processes.mem %}
               <tr>
                 <td class="text-muted">{{ p.pid }}</td>
-                <td class="text-truncate" style="max-width:150px" title="{{ p.name }}">{{ p.name }}</td>
+                <td class="text-truncate" style="max-width:150px" title="{{ p.name }}{% if p.user %} · {{ p.user }}{% endif %}">
+                  {{ p.name }}{% if p.user %}<div class="text-muted" style="font-size:.72rem"><i class="bi bi-person"></i> {{ p.user }}</div>{% endif %}</td>
                 <td class="text-end fw-semibold">{{ p.mem_pct }}%</td>
                 <td class="text-end text-muted">{{ p.mem_bytes|hsize }}</td>
               </tr>
