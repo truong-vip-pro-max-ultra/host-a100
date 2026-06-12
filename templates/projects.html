@@ -36,7 +36,7 @@
             <div class="small">{{ p.file_count }} file · {{ p.size|hsize }}</div>
           </a>
           <form method="post" action="{{ url_for('project_delete', project_id=p.id) }}"
-                onsubmit="return confirm('Xoá dự án \'{{ p.name }}\'?');">
+                data-confirm="Xoá dự án '{{ p.name }}'?">
             <button class="btn btn-sm btn-outline-danger">×</button>
           </form>
         </li>
@@ -73,7 +73,7 @@
                 <span class="text-muted">{{ f.size|hsize }}</span>
                 <form class="d-inline" method="post"
                       action="{{ url_for('project_file_delete', project_id=selected.id) }}"
-                      onsubmit="return confirm('Xoá {{ f.rel }}?');">
+                      data-confirm="Xoá {{ f.rel }}?">
                   <input type="hidden" name="relpath" value="{{ f.rel }}">
                   <button class="btn btn-sm btn-link text-danger p-0">xoá</button>
                 </form>

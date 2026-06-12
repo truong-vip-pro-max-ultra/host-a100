@@ -122,6 +122,24 @@
       box-shadow:0 0 10px rgba(99,102,241,.7);
       transition:width 12s cubic-bezier(.08,.7,.25,1), opacity .35s ease; }
     #nprog.on{ opacity:1; }
+
+    /* confirm modal + toasts (replace native confirm()/alert()) */
+    .modal-content{ border:none; border-radius:18px; box-shadow:0 24px 60px rgba(15,23,42,.25); }
+    .modal-header,.modal-footer{ border-color:var(--line); }
+    .modal-title{ font-weight:700; letter-spacing:-.01em; }
+    .cm-ic{ width:46px; height:46px; border-radius:13px; display:grid; place-items:center;
+      font-size:1.4rem; color:#fff; flex-shrink:0; background:linear-gradient(135deg,#ef4444,#f97316);
+      box-shadow:0 6px 16px rgba(239,68,68,.35); }
+    .toast-host{ position:fixed; right:18px; bottom:18px; z-index:2200; display:flex;
+      flex-direction:column; gap:10px; pointer-events:none; }
+    .app-toast{ display:flex; align-items:center; gap:10px; padding:12px 16px; border-radius:13px;
+      background:#fff; box-shadow:var(--shadow-lg); border:1px solid var(--line); font-size:.9rem;
+      font-weight:500; min-width:220px; max-width:360px; transform:translateY(12px); opacity:0;
+      transition:transform .28s cubic-bezier(.2,.8,.2,1), opacity .28s ease; }
+    .app-toast.show{ transform:none; opacity:1; }
+    .app-toast i{ font-size:1.15rem; }
+    .app-toast.danger i{ color:#dc2626; } .app-toast.danger{ border-left:4px solid #dc2626; }
+    .app-toast.success i{ color:#16a34a; } .app-toast.success{ border-left:4px solid #16a34a; }
     .form-control,.form-select{ border-radius:11px; border-color:var(--line);
       font-size:.92rem; }
     .form-control:focus,.form-select:focus{ border-color:var(--accent);
@@ -244,6 +262,27 @@
   </main>
 </div>
 
+<!-- Reusable confirm dialog + toast host (outside .content so SPA swaps never remove them) -->
+<div class="modal fade" id="confirmModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Xác nhận xoá</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Đóng"></button>
+      </div>
+      <div class="modal-body d-flex gap-3 align-items-start">
+        <span class="cm-ic"><i class="bi bi-trash3-fill"></i></span>
+        <div class="cm-body pt-1"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-light" data-bs-dismiss="modal">Huỷ</button>
+        <button type="button" class="btn btn-danger cm-ok">Xoá</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="toast-host" id="toastHost"></div>
+
 <script data-base src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script data-base>
 // ====================================================================
@@ -299,6 +338,47 @@
     });
   });
 
+  // ---- confirm dialog + toasts (styled, replace native confirm()/alert()) ----
+  function toast(msg, type){
+    var host = document.getElementById('toastHost');
+    if (!host){ return; }
+    var el = document.createElement('div');
+    el.className = 'app-toast ' + (type || 'danger');
+    var ic = document.createElement('i');
+    ic.className = 'bi bi-' + (type === 'success' ? 'check-circle-fill' : 'exclamation-triangle-fill');
+    var sp = document.createElement('span'); sp.textContent = msg;
+    el.appendChild(ic); el.appendChild(sp); host.appendChild(el);
+    requestAnimationFrame(function(){ el.classList.add('show'); });
+    nativeST(function(){ el.classList.remove('show'); nativeST(function(){ el.remove(); }, 320); }, 3600);
+  }
+
+  function confirmModal(message){
+    var el = document.getElementById('confirmModal');
+    // Fallback to the native dialog if the modal/bootstrap isn't available.
+    if (!el || !window.bootstrap || !bootstrap.Modal){
+      return Promise.resolve(window.confirm(message));
+    }
+    return new Promise(function(resolve){
+      el.querySelector('.cm-body').textContent = message;
+      var okBtn = el.querySelector('.cm-ok');
+      var modal = bootstrap.Modal.getOrCreateInstance(el);
+      var done = false;
+      function settle(v){
+        if (done) return; done = true;
+        okBtn.removeEventListener('click', onOk);
+        el.removeEventListener('hidden.bs.modal', onHide);
+        modal.hide(); resolve(v);
+      }
+      function onOk(){ settle(true); }
+      function onHide(){ settle(false); }   // X / Huỷ / backdrop / Esc
+      okBtn.addEventListener('click', onOk);
+      el.addEventListener('hidden.bs.modal', onHide);
+      modal.show();
+      nativeST(function(){ okBtn.focus(); }, 200);
+    });
+  }
+  window.confirmModal = confirmModal; window.toast = toast;
+
   // ---- helpers ----------------------------------------------------------
   function spin(btn){
     if (!btn || btn.disabled) return;
@@ -337,12 +417,13 @@
         if (id) new URLSearchParams(location.search).forEach(function(v){ if (v === id) selected = true; });
         document.dispatchEvent(new CustomEvent('rowdeleted', { detail: { id: id, action: action } }));
         if (selected){ location.assign(location.pathname); return; }
-        if (row){ removeRow(row); } else { Loader.done(); location.reload(); }
+        if (row){ removeRow(row); toast('Đã xoá.', 'success'); }
+        else { Loader.done(); location.reload(); }
       })
       .catch(function(err){
         Loader.done();
         if (btn){ btn.disabled = false; btn.innerHTML = orig; }
-        alert('Xoá thất bại: ' + (err && err.message ? err.message : err));
+        toast('Xoá thất bại: ' + (err && err.message ? err.message : err), 'danger');
       });
   }
 
@@ -359,7 +440,9 @@
 
     if (method === 'post' && /delete/i.test(action)){
       e.preventDefault();
-      ajaxDelete(form, action);
+      var msg = form.getAttribute('data-confirm');
+      if (msg){ confirmModal(msg).then(function(ok){ if (ok) ajaxDelete(form, action); }); }
+      else { ajaxDelete(form, action); }
       return;
     }
 

@@ -141,7 +141,7 @@
             <td id="pc-{{ j.id }}">{{ j.progress }}</td>
             <td class="text-end">
               <form class="d-inline" method="post" action="{{ url_for('job_delete', job_id=j.id) }}"
-                    onsubmit="return confirm('Xoá tác vụ #{{ j.id }}?');">
+                    data-confirm="Xoá tác vụ #{{ j.id }}?">
                 <button class="btn btn-sm btn-outline-danger">×</button>
               </form>
             </td>
