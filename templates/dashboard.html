@@ -10,6 +10,34 @@
 <div id="liveContent">
 {% include "_dashboard_live.html" %}
 </div>
+
+<!-- Job detail / log popup (opened by clicking a row in "Tác vụ gần đây") -->
+<div class="modal fade" id="jobModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Tác vụ <span id="jmId"></span>
+          <span class="pill pill-unknown ms-1" id="jmStatus"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Đóng"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex justify-content-between small text-muted mb-1">
+          <span id="jmName"></span><span id="jmStep"></span>
+        </div>
+        <div class="progress progress-wrap mb-3" style="height:18px;border-radius:9px;background:#eef2f7">
+          <div class="progress-bar" id="jmBar" style="width:0%;background:linear-gradient(90deg,#6366f1,#8b5cf6)"></div>
+          <span class="progress-val" id="jmBarVal">0%</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <strong class="small"><i class="bi bi-terminal"></i> Log</strong>
+          <a class="btn btn-sm btn-outline-secondary" id="jmOpen" href="#">
+            <i class="bi bi-box-arrow-up-right"></i> Mở ở trang Tác vụ</a>
+        </div>
+        <pre class="logbox mb-0" id="jmLog" style="max-height:360px">Đang tải…</pre>
+      </div>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -40,6 +68,54 @@
     }
   }
   setTimeout(refresh, POLL_MS);
+})();
+
+// ---- click a recent-job row → show its info + log in a popup -------------
+(function(){
+  var modalEl = document.getElementById('jobModal');
+  var live = document.getElementById('liveContent');
+  if (!modalEl || !live || !window.bootstrap) return;
+  var modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+  var STATUS = {queued:'đang chờ', running:'đang chạy', done:'hoàn tất', error:'lỗi', unknown:'không rõ'};
+  var openId = null, timer = null;
+
+  function poll(){
+    if (openId === null) return;
+    var id = openId;
+    fetch('/status/job/' + id).then(function(r){ return r.json(); }).then(function(s){
+      if (openId !== id) return;
+      var pct = s.progress || 0;
+      document.getElementById('jmBar').style.width = pct + '%';
+      document.getElementById('jmBarVal').textContent = pct + '%';
+      document.getElementById('jmStep').textContent = s.step || '';
+      var st = document.getElementById('jmStatus');
+      st.className = 'pill pill-' + (s.status || 'unknown');
+      st.textContent = STATUS[s.status] || s.status || '';
+      var log = document.getElementById('jmLog');
+      var atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+      log.textContent = s.log || '(chưa có log)';
+      if (atBottom) log.scrollTop = log.scrollHeight;
+      if (s.status === 'running' || s.status === 'queued'){ timer = setTimeout(poll, 1500); }
+    }).catch(function(){ if (openId === id) timer = setTimeout(poll, 2500); });
+  }
+  function openJob(id, name){
+    openId = id;
+    document.getElementById('jmId').textContent = '#' + id;
+    document.getElementById('jmName').textContent = name || '';
+    document.getElementById('jmStep').textContent = '';
+    document.getElementById('jmLog').textContent = 'Đang tải…';
+    document.getElementById('jmOpen').href = '{{ url_for("jobs_page") }}';
+    modal.show();
+    clearTimeout(timer); poll();
+  }
+  modalEl.addEventListener('hidden.bs.modal', function(){ openId = null; clearTimeout(timer); });
+  // Delegated so it keeps working after the 10s fragment swap recreates the rows.
+  live.addEventListener('click', function(e){
+    var tr = e.target.closest('tr[data-job-id]');
+    if (!tr) return;
+    var nameEl = tr.querySelector('td strong');
+    openJob(tr.getAttribute('data-job-id'), nameEl ? nameEl.textContent : '');
+  });
 })();
 </script>
 {% endblock %}

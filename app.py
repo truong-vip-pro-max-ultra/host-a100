@@ -152,6 +152,7 @@ def _dashboard_context():
               "pct": int(used * 100 / total) if total else 0},
         cpu=sysinfo.cpu_info(),
         ram=sysinfo.ram_info(),
+        processes=sysinfo.top_processes(),
         slurm_active=job_service.slurm_active(),
         slurm_gres=config.SLURM_GRES,
         slurm_partition=config.SLURM_PARTITION,
@@ -696,6 +697,18 @@ def status_env(task_id):
 def status_job(job_id):
     snap = progress.get("job", job_id)
     snap["log"] = job_service.read_log(job_id) or snap.get("log", "")
+    # The in-memory registry only has live jobs from the current process; for a
+    # job that finished before the last app restart it is empty, so fall back to
+    # the persisted row (status/progress) — otherwise the dashboard popup would
+    # show "không rõ / 0%" for a job the table lists as done.
+    if not snap.get("status") or snap.get("status") == "unknown":
+        job = job_service.get_job(job_id)
+        if job:
+            snap["status"] = job.get("status") or snap.get("status")
+            if not snap.get("progress"):
+                snap["progress"] = job.get("progress") or 0
+            if not snap.get("step"):
+                snap["step"] = job.get("status") or ""
     return jsonify(snap)
 
 

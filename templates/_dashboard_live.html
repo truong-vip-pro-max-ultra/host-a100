@@ -145,6 +145,28 @@
         <div class="progress-bar" style="width: {{ cpu.pct }}%;background:linear-gradient(90deg,#0ea5e9,#6366f1)"></div>
         <span class="progress-val">{{ cpu.pct }}%</span>
       </div>
+      {% if processes.cpu %}
+      <details class="proc-details mt-3">
+        <summary class="small fw-semibold text-primary" style="cursor:pointer">
+          <i class="bi bi-list-task"></i> Tiến trình ngốn CPU nhất</summary>
+        <div class="table-responsive mt-2">
+          <table class="table table-sm table-borderless mb-0 small align-middle">
+            <thead><tr><th>PID</th><th>Tiến trình</th><th class="text-end">CPU</th><th class="text-end">RAM</th></tr></thead>
+            <tbody>
+            {% for p in processes.cpu %}
+              <tr>
+                <td class="text-muted">{{ p.pid }}</td>
+                <td class="text-truncate" style="max-width:150px" title="{{ p.name }}">{{ p.name }}</td>
+                <td class="text-end fw-semibold">{{ p.cpu }}%</td>
+                <td class="text-end text-muted">{{ p.mem_pct }}%</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="form-text mt-1">%CPU tính trung bình từ lần làm mới trước (có thể >100% nếu chạy nhiều nhân).</div>
+      </details>
+      {% endif %}
     </div></div>
   </div>
   <div class="col-lg-6">
@@ -158,17 +180,39 @@
         <div class="progress-bar" style="width: {{ ram.pct }}%;background:linear-gradient(90deg,#10b981,#0ea5e9)"></div>
         <span class="progress-val">{{ ram.pct }}%</span>
       </div>
+      {% if processes.mem %}
+      <details class="proc-details mt-3">
+        <summary class="small fw-semibold text-primary" style="cursor:pointer">
+          <i class="bi bi-list-task"></i> Tiến trình ngốn RAM nhất</summary>
+        <div class="table-responsive mt-2">
+          <table class="table table-sm table-borderless mb-0 small align-middle">
+            <thead><tr><th>PID</th><th>Tiến trình</th><th class="text-end">RAM</th><th class="text-end">Dung lượng</th></tr></thead>
+            <tbody>
+            {% for p in processes.mem %}
+              <tr>
+                <td class="text-muted">{{ p.pid }}</td>
+                <td class="text-truncate" style="max-width:150px" title="{{ p.name }}">{{ p.name }}</td>
+                <td class="text-end fw-semibold">{{ p.mem_pct }}%</td>
+                <td class="text-end text-muted">{{ p.mem_bytes|hsize }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </details>
+      {% endif %}
     </div></div>
   </div>
 </div>
 
 <div class="card mt-3"><div class="card-body">
-  <h5 class="card-title mb-3"><i class="bi bi-clock-history text-primary"></i> Tác vụ gần đây</h5>
+  <h5 class="card-title mb-3"><i class="bi bi-clock-history text-primary"></i> Tác vụ gần đây
+    <span class="form-text ms-1">— bấm vào một dòng để xem log</span></h5>
   <table class="table table-sm mb-0">
     <thead><tr><th>#</th><th>Tên</th><th>Mô hình</th><th>Môi trường</th><th>Trạng thái</th><th>Tiến độ</th></tr></thead>
     <tbody>
     {% for j in jobs[:8] %}
-      <tr>
+      <tr data-job-id="{{ j.id }}" style="cursor:pointer">
         <td class="text-muted">{{ j.id }}</td><td><strong>{{ j.name }}</strong></td>
         <td>{{ j.model_name or '—' }}</td><td>{{ j.env_name or '—' }}</td>
         <td><span class="pill pill-{{ j.status }}">{{ j.status|vstatus }}</span></td>
