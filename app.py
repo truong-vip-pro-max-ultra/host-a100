@@ -155,7 +155,7 @@ def _dashboard_context():
         slurm_active=job_service.slurm_active(),
         slurm_gres=config.SLURM_GRES,
         slurm_partition=config.SLURM_PARTITION,
-        gpu_models=gpu.slurm_gpu_models(config.SLURM_PARTITION or None),
+        gpu_models=gpu.slurm_gpu_models(config.SLURM_PARTITION or None) or [],
     )
 
 
@@ -525,7 +525,7 @@ def jobs_page():
         projects=project_service.list_projects(),
         slurm_active=job_service.slurm_active(),
         slurm_gres=config.SLURM_GRES,
-        gpu_models=gpu.slurm_gpu_models(config.SLURM_PARTITION or None),
+        gpu_models=gpu.slurm_gpu_models(config.SLURM_PARTITION or None) or [],
     )
 
 
@@ -634,7 +634,7 @@ def terminal_page():
         cwd=cwd,
         slurm_active=job_service.slurm_active(),
         slurm_gres=config.SLURM_GRES,
-        gpu_models=gpu.slurm_gpu_models(config.SLURM_PARTITION or None),
+        gpu_models=gpu.slurm_gpu_models(config.SLURM_PARTITION or None) or [],
         pty_enabled=bool(sock) and pty_service.available(),
     )
 
