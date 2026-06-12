@@ -164,7 +164,7 @@ __HA_VISIBLE={visible}                 # names allowed when listing the app dir
 __HA_PIDS=({pid_list})                 # protected PIDs (app + cloudflare tunnel)
 __HA_NAMES='cloudflared|app\\.py|host-a100'   # protected process-name patterns
 
-unalias ls kill pkill killall {read_tools} 2>/dev/null
+unalias ls cd kill pkill killall {read_tools} 2>/dev/null
 
 # 3) ls: when listing the platform's own directory, reveal only the data dir.
 ls() {{
@@ -231,6 +231,38 @@ __ha_guard_read() {{
     command "$tool" "$@"
 }}
 {read_defs}
+
+# 6) cd: refuse to enter the app's own source tree (anything under the app dir
+# except the data subtree) and filter those names out of `cd` tab-completion, so
+# the source dirs are neither reachable nor suggested.
+cd() {{
+    local a d=""
+    for a in "$@"; do case "$a" in -*) ;; *) d="$a";; esac; done
+    if [ -n "$d" ] && __ha_is_source "$d"; then
+        printf '\\033[31m[host-a100] Bị chặn: không được vào thư mục mã nguồn của ứng dụng (%s).\\033[0m\\n' "$d" >&2
+        return 1
+    fi
+    builtin cd "$@"
+}}
+_ha_cd_complete() {{
+    COMPREPLY=()
+    local cur="${{COMP_WORDS[COMP_CWORD]}}" dirpart base searchexp d name rp
+    case "$cur" in
+        */*) dirpart="${{cur%/*}}/"; base="${{cur##*/}}";;
+        *)   dirpart="";            base="$cur";;
+    esac
+    eval "searchexp=${{dirpart:-./}}" 2>/dev/null || searchexp="${{dirpart:-./}}"
+    shopt -s nullglob
+    for d in "$searchexp"*/; do
+        name="${{d%/}}"; name="${{name##*/}}"
+        case "$name" in "$base"*) ;; *) continue;; esac
+        rp=$(realpath -m -- "$d" 2>/dev/null)
+        __ha_is_source "$rp" && continue
+        COMPREPLY+=( "${{dirpart}}${{name}}/" )
+    done
+    shopt -u nullglob
+}}
+complete -F _ha_cd_complete -o nospace cd
 """
 
 
