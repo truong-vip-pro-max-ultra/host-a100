@@ -108,10 +108,15 @@ _PROC_CPU = {}   # pid -> (proc_jiffies, wall_time) from the previous /proc samp
 
 def _psutil_processes():
     out = []
+    ncpu = psutil.cpu_count() or 1            # normalise %CPU to the whole host
     for p in psutil.process_iter(["pid", "name", "memory_info", "memory_percent"]):
         try:
-            cpu = p.cpu_percent(None)          # since the previous call (cached)
             info = p.info
+            if info["pid"] == 0:               # "System Idle Process" — skip
+                continue
+            # cpu_percent is per-core (0..ncpu*100); divide so it's a share of
+            # the whole machine like the CPU% bar above (sum of procs ≈ total).
+            cpu = p.cpu_percent(None) / ncpu
             mi = info.get("memory_info")
             out.append({
                 "pid": info["pid"],
@@ -138,6 +143,7 @@ def _proc_processes():
     except OSError:
         return out
     page = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+    ncpu = os.cpu_count() or 1                  # normalise %CPU to the whole host
     try:
         pids = [d for d in os.listdir("/proc") if d.isdigit()]
     except OSError:
@@ -156,7 +162,7 @@ def _proc_processes():
             if prev:
                 dt = now - prev[1]
                 if dt > 0:
-                    cpu = 100.0 * (tj - prev[0]) / _HZ / dt
+                    cpu = 100.0 * (tj - prev[0]) / _HZ / dt / ncpu
             seen[pid] = (tj, now)
             out.append({
                 "pid": int(pid), "name": name[:40],
