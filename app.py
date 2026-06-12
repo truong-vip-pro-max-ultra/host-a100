@@ -15,6 +15,7 @@ import hmac
 import os
 import sys
 import tempfile
+import threading
 import uuid
 
 from flask import (Flask, abort, flash, jsonify, redirect, render_template,
@@ -44,6 +45,14 @@ except Exception:  # noqa: BLE001
 UPLOAD_TMP = os.path.join(config.DATA_DIR, ".uploads")
 
 _CHUNK = 8 * 1024 * 1024
+
+# Chunked-upload sessions (in-memory; single process, like the progress
+# registry). Lets the browser send a large model file as many <100MB pieces so
+# it survives a Cloudflare tunnel's 100MB-per-request body cap. The pieces are
+# appended in order into one temp file; the existing background finalize then
+# moves it into the model dir. Maps upload_id -> session dict.
+_chunk_sessions = {}
+_chunk_sessions_lock = threading.Lock()
 
 
 # --------------------------------------------------------------------------- #
@@ -241,6 +250,123 @@ def upload_submit():
     progress.update("upload", upload_id, progress=0, step="received",
                     append_log=f"Đã nhận {file_utils.human_size(received)}.\n")
     model_service.start_upload(upload_id, model_name, temp_path, filename)
+    return jsonify({"ok": True, "upload_id": upload_id})
+
+
+# --------------------------------------------------------------------------- #
+# Chunked upload. The single-shot /upload above sends the whole file in one POST,
+# which a Cloudflare tunnel rejects past 100MB. These three endpoints let the
+# browser slice the file into sub-100MB pieces: init validates the name/ext and
+# opens a temp file, chunk appends pieces IN ORDER, finalize hands the assembled
+# temp file to the same background finalize (model_service.start_upload).
+# --------------------------------------------------------------------------- #
+@app.route("/upload/init", methods=["POST"])
+def upload_init():
+    data = request.get_json(silent=True) or {}
+    model_name = data.get("model_name", "")
+    filename = data.get("filename", "")
+    try:
+        total_chunks = int(data.get("total_chunks", 0))
+    except (TypeError, ValueError):
+        total_chunks = 0
+
+    try:
+        model_name = file_utils.validate_name(model_name)
+    except file_utils.UnsafeName as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    if not filename:
+        return jsonify({"ok": False, "error": "Chưa chọn file."}), 400
+    try:
+        filename = file_utils.safe_filename(filename)
+    except file_utils.UnsafeName as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    ext = os.path.splitext(filename)[1].lower()
+    if ext and ext not in config.ALLOWED_MODEL_EXTENSIONS:
+        return jsonify({"ok": False,
+                        "error": f"Phần mở rộng '{ext}' không được phép."}), 400
+    if model_service.name_taken(model_name):
+        return jsonify({"ok": False,
+                        "error": f"Mô hình '{model_name}' đã tồn tại."}), 400
+    if total_chunks < 1:
+        return jsonify({"ok": False, "error": "Số mảnh không hợp lệ."}), 400
+
+    upload_id = uuid.uuid4().hex
+    os.makedirs(UPLOAD_TMP, exist_ok=True)
+    temp_path = os.path.join(UPLOAD_TMP, f"{upload_id}_{filename}")
+    open(temp_path, "wb").close()   # start the append from an empty file
+    with _chunk_sessions_lock:
+        _chunk_sessions[upload_id] = {
+            "model_name": model_name, "filename": filename,
+            "temp_path": temp_path, "total_chunks": total_chunks,
+            "received": 0,
+        }
+    progress.init("upload", upload_id, step="receiving")
+    return jsonify({"ok": True, "upload_id": upload_id})
+
+
+@app.route("/upload/chunk/<upload_id>", methods=["POST"])
+def upload_chunk(upload_id):
+    with _chunk_sessions_lock:
+        sess = _chunk_sessions.get(upload_id)
+    if not sess:
+        return jsonify({"ok": False, "error": "Phiên tải lên không tồn tại."}), 404
+
+    index = request.args.get("index", type=int)
+    if index is None:
+        return jsonify({"ok": False, "error": "Thiếu chỉ số mảnh."}), 400
+    # Sequential append: the client sends chunks in order, so anything out of
+    # order means a lost/duplicated piece — reject it rather than corrupt the
+    # file. The client can re-send starting from `expected`.
+    if index != sess["received"]:
+        return jsonify({"ok": False, "error": "Mảnh sai thứ tự.",
+                        "expected": sess["received"]}), 409
+
+    # Read the raw request body (octet-stream, no multipart overhead) straight to
+    # disk in small reads so a chunk never sits whole in memory.
+    try:
+        with open(sess["temp_path"], "ab") as out:
+            while True:
+                buf = request.stream.read(_CHUNK)
+                if not buf:
+                    break
+                out.write(buf)
+    except Exception as exc:  # noqa: BLE001
+        progress.update("upload", upload_id, status="error",
+                        step="receive failed", append_log=f"ERROR: {exc}\n")
+        return jsonify({"ok": False, "error": f"Ghi mảnh thất bại: {exc}"}), 500
+
+    with _chunk_sessions_lock:
+        sess["received"] += 1
+        received, total = sess["received"], sess["total_chunks"]
+    # Cap at 99 here; the server-side finalize drives 0->100 afterwards.
+    pct = min(99, int(received * 100 / total)) if total else 0
+    progress.update("upload", upload_id, progress=pct,
+                    step=f"đã nhận mảnh {received}/{total}")
+    return jsonify({"ok": True, "received": received, "total": total})
+
+
+@app.route("/upload/finalize/<upload_id>", methods=["POST"])
+def upload_finalize(upload_id):
+    with _chunk_sessions_lock:
+        sess = _chunk_sessions.pop(upload_id, None)
+    if not sess:
+        return jsonify({"ok": False, "error": "Phiên tải lên không tồn tại."}), 404
+    if sess["received"] != sess["total_chunks"]:
+        with _chunk_sessions_lock:    # keep the session so the client can resume
+            _chunk_sessions[upload_id] = sess
+        return jsonify({
+            "ok": False,
+            "error": f"Thiếu mảnh ({sess['received']}/{sess['total_chunks']}).",
+            "expected": sess["received"],
+        }), 400
+
+    received = os.path.getsize(sess["temp_path"]) \
+        if os.path.exists(sess["temp_path"]) else 0
+    progress.update("upload", upload_id, progress=0, step="received",
+                    append_log=f"Đã nhận {file_utils.human_size(received)}.\n")
+    model_service.start_upload(upload_id, sess["model_name"],
+                               sess["temp_path"], sess["filename"])
     return jsonify({"ok": True, "upload_id": upload_id})
 
 

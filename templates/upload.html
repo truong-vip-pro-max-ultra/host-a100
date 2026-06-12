@@ -49,46 +49,88 @@ function setBar(pct, cls) {
   if (cls) { bar.className = 'progress-bar ' + cls; }
 }
 
-form.addEventListener('submit', (ev) => {
+// Chia file thành các mảnh 50MB — an toàn dưới mức 100MB/request của Cloudflare
+// tunnel, nên upload file lớn (model vài GB) đi qua được tunnel.
+const CHUNK_SIZE = 50 * 1024 * 1024;
+
+function failUpload(msg) {
+  phase.textContent = 'Tải lên thất bại';
+  stepText.textContent = msg;
+  setBar(100, 'progress-bar bg-danger');
+  submitBtn.disabled = false;
+}
+
+async function postJSON(url, body) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { throw new Error(j.error || ('HTTP ' + r.status)); }
+  return j;
+}
+
+form.addEventListener('submit', async (ev) => {
   ev.preventDefault();
-  const fd = new FormData(form);
-  if (!fd.get('file') || !fd.get('file').name) { return; }
+  const file = document.getElementById('file').files[0];
+  const modelName = document.getElementById('model_name').value.trim();
+  if (!file || !modelName) { return; }
 
   area.classList.remove('d-none');
   submitBtn.disabled = true;
-  phase.textContent = 'Đang truyền lên máy chủ…';
+  phase.textContent = 'Đang chuẩn bị…';
+  stepText.textContent = '';
+  logBox.classList.add('d-none');
   setBar(0, 'progress-bar progress-bar-striped progress-bar-animated bg-info');
 
-  const xhr = new XMLHttpRequest();
-  xhr.open('POST', '{{ url_for("upload_submit") }}');
+  const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
 
-  // Phase 1: browser -> server transfer progress.
-  xhr.upload.onprogress = (e) => {
-    if (e.lengthComputable) {
-      const pct = Math.round(e.loaded * 100 / e.total);
-      setBar(pct, 'progress-bar progress-bar-striped progress-bar-animated bg-info');
-    }
-  };
+  // 1) Init: validate name/ext + open the server-side temp file.
+  let uploadId;
+  try {
+    const j = await postJSON('{{ url_for("upload_init") }}', {
+      model_name: modelName, filename: file.name,
+      total_chunks: totalChunks, size: file.size,
+    });
+    uploadId = j.upload_id;
+  } catch (e) { return failUpload(e.message); }
 
-  xhr.onload = () => {
-    let res = {};
-    try { res = JSON.parse(xhr.responseText); } catch (_) {}
-    if (xhr.status === 200 && res.ok) {
-      phase.textContent = 'Đang hoàn tất trên máy chủ…';
-      pollServer(res.upload_id);
-    } else {
-      phase.textContent = 'Tải lên thất bại';
-      stepText.textContent = res.error || ('HTTP ' + xhr.status);
-      setBar(100, 'progress-bar bg-danger');
-      submitBtn.disabled = false;
+  // 2) Send chunks sequentially, each retried a few times so a flaky tunnel
+  // doesn't doom the whole upload on one dropped piece.
+  const chunkUrl = (i) =>
+    '{{ url_for("upload_chunk", upload_id="__ID__") }}'.replace('__ID__', uploadId) + '?index=' + i;
+  phase.textContent = 'Đang truyền lên máy chủ (chia mảnh)…';
+
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, file.size);
+    const blob = file.slice(start, end);
+    let ok = false, lastErr = '';
+    for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+      try {
+        const r = await fetch(chunkUrl(i), {
+          method: 'POST',
+          headers: {'Content-Type': 'application/octet-stream'},
+          body: blob,
+        });
+        const j = await r.json().catch(() => ({}));
+        if (r.ok && j.ok) { ok = true; }
+        else { lastErr = j.error || ('HTTP ' + r.status); }
+      } catch (e) { lastErr = e.message; }
     }
-  };
-  xhr.onerror = () => {
-    phase.textContent = 'Lỗi kết nối mạng';
-    setBar(100, 'progress-bar bg-danger');
-    submitBtn.disabled = false;
-  };
-  xhr.send(fd);
+    if (!ok) { return failUpload('Mảnh ' + (i + 1) + '/' + totalChunks + ' lỗi: ' + lastErr); }
+    setBar(Math.round(end * 100 / file.size),
+           'progress-bar progress-bar-striped progress-bar-animated bg-info');
+    stepText.textContent = 'Đã gửi mảnh ' + (i + 1) + '/' + totalChunks;
+  }
+
+  // 3) Finalize, then poll the server-side finalize (move + DB register).
+  phase.textContent = 'Đang hoàn tất trên máy chủ…';
+  try {
+    await postJSON('{{ url_for("upload_finalize", upload_id="__ID__") }}'.replace('__ID__', uploadId), {});
+    pollServer(uploadId);
+  } catch (e) { failUpload(e.message); }
 });
 
 // Phase 2: poll the server-side finalize progress.
