@@ -446,12 +446,21 @@
       return;
     }
 
-    // Navigating submit (create/save/run/login…): block double-submit, show a
-    // button spinner + the top bar; the browser then navigates as usual.
+    // Navigating submit (create/save/run/install…): block double-submit and
+    // show a button spinner.
     if (form.dataset.submitting){ e.preventDefault(); return; }
     form.dataset.submitting = '1';
     spin(form.querySelector('[type=submit], button:not([type=button]):not([type=reset])'));
-    Loader.start();
+
+    // SPA-submit POST forms on an SPA page: fetch + swap, no full reload. GET
+    // forms and forms on non-SPA pages keep the normal browser navigation
+    // (the top bar starts via beforeunload).
+    if (method === 'post' && pjaxable(location.pathname)){
+      e.preventDefault();
+      submitForm(form);
+    } else {
+      Loader.start();
+    }
   }, false);
 
   // ====================================================================
@@ -526,6 +535,25 @@
     }
   }
 
+  // Swap <main.content> from a fetched page's HTML, re-run its scripts, and
+  // update history/title/nav. Shared by link navigation and form submission.
+  function applyDoc(html, finalUrl, push){
+    var doc = new DOMParser().parseFromString(html, 'text/html');
+    var fresh = doc.querySelector('main.content');
+    var cur = document.querySelector('main.content');
+    if (!fresh || !cur) throw new Error('no content node');
+    teardown();
+    cur.innerHTML = fresh.innerHTML;
+    document.title = doc.title || document.title;
+    syncHead(doc);
+    setActiveNav(new URL(finalUrl, location.href).pathname);
+    if (push) history.pushState({ pjax: 1 }, '', finalUrl);
+    window.scrollTo(0, 0);
+    document.body.classList.remove('nav-open');
+    cur.style.animation = 'none'; void cur.offsetWidth; cur.style.animation = '';  // replay fade-in
+    return runScripts(doc);
+  }
+
   var navToken = 0;
   function navigate(url, push){
     var my = ++navToken;
@@ -537,25 +565,41 @@
       })
       .then(function(d){
         if (my !== navToken) return;                       // a newer navigation superseded us
-        var doc = new DOMParser().parseFromString(d.html, 'text/html');
-        var fresh = doc.querySelector('main.content');
-        var cur = document.querySelector('main.content');
-        if (!fresh || !cur) throw new Error('no content node');
-        teardown();
-        cur.innerHTML = fresh.innerHTML;
-        document.title = doc.title || document.title;
-        syncHead(doc);
-        setActiveNav(new URL(d.url, location.href).pathname);
-        if (push) history.pushState({ pjax: 1 }, '', d.url);
-        window.scrollTo(0, 0);
-        document.body.classList.remove('nav-open');
-        cur.style.animation = 'none'; void cur.offsetWidth; cur.style.animation = '';  // replay fade-in
-        return runScripts(doc).then(function(){ Loader.done(); });
+        return applyDoc(d.html, d.url, push).then(function(){ Loader.done(); });
       })
       .catch(function(err){
         if (err === 'redir') return;
         Loader.done();
         location.href = url;                                // never leave a half-swapped page
+      });
+  }
+
+  // SPA form submission: POST via fetch (which follows the PRG redirect), then
+  // swap to the destination page. If the destination isn't an SPA route (e.g.
+  // logout → /login) we do a normal load of it; on any error we re-submit the
+  // form natively so the action is never silently lost.
+  function submitForm(form){
+    var my = ++navToken;
+    var action = form.getAttribute('action') || location.href;
+    var method = (form.getAttribute('method') || 'post').toUpperCase();
+    Loader.start();
+    fetch(action, { method: method, body: new FormData(form),
+                    headers: { 'X-Requested-With': 'pjax' } })
+      .then(function(res){
+        if (res.redirected && /\/login(\?|$)/.test(res.url)){ location.href = res.url; throw 'redir'; }
+        return res.text().then(function(html){ return { html: html, url: res.url || action }; });
+      })
+      .then(function(d){
+        if (my !== navToken) return;
+        var path = null; try{ path = new URL(d.url, location.href).pathname; }catch(_){}
+        if (!path || !pjaxable(path)){ location.href = d.url; return; }   // non-SPA destination → full load
+        return applyDoc(d.html, d.url, true).then(function(){ Loader.done(); });
+      })
+      .catch(function(err){
+        if (err === 'redir') return;
+        Loader.done();
+        try { HTMLFormElement.prototype.submit.call(form); }              // native re-submit (bypasses this handler)
+        catch(_){ location.href = action; }
       });
   }
 
