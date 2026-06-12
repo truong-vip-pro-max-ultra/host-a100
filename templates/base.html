@@ -112,6 +112,16 @@
     .btn-primary:hover{ filter:brightness(1.06); transform:translateY(-1px);
       box-shadow:0 8px 20px rgba(99,102,241,.40); }
     .btn-sm{ border-radius:9px; }
+
+    /* top navigation/AJAX progress bar (YouTube-style). The width creeps to 90%
+       via a long CSS transition so it still animates even while the browser
+       freezes JS during a real page navigation; done() snaps it to 100%. */
+    #nprog{ position:fixed; top:0; left:0; height:3px; width:0; z-index:2000;
+      border-radius:0 3px 3px 0; pointer-events:none; opacity:0;
+      background:linear-gradient(90deg,var(--accent),var(--accent2),#22d3ee);
+      box-shadow:0 0 10px rgba(99,102,241,.7);
+      transition:width 12s cubic-bezier(.08,.7,.25,1), opacity .35s ease; }
+    #nprog.on{ opacity:1; }
     .form-control,.form-select{ border-radius:11px; border-color:var(--line);
       font-size:.92rem; }
     .form-control:focus,.form-select:focus{ border-color:var(--accent);
@@ -175,6 +185,7 @@
   {% block head %}{% endblock %}
 </head>
 <body>
+<div id="nprog"></div>
 <div class="app">
   <aside class="sidebar">
     <div class="brand">
@@ -234,6 +245,129 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// ====================================================================
+//  Global UX layer: top loading bar + AJAX delete (no full-page reload)
+//  Pure progressive enhancement — if anything here fails the plain
+//  HTML form/link behaviour still works.
+// ====================================================================
+(function(){
+  "use strict";
+
+  // ---- top progress bar -------------------------------------------------
+  var bar = document.getElementById('nprog');
+  var Loader = {
+    start: function(){
+      if (!bar) return;
+      bar.style.transition = 'none'; bar.style.width = '0';
+      bar.classList.add('on');
+      // next frame: re-enable the long transition and let it creep to 90%
+      requestAnimationFrame(function(){
+        requestAnimationFrame(function(){
+          bar.style.transition = '';
+          bar.style.width = '90%';
+        });
+      });
+    },
+    done: function(){
+      if (!bar) return;
+      bar.style.transition = 'width .3s ease, opacity .4s ease';
+      bar.style.width = '100%';
+      setTimeout(function(){
+        bar.classList.remove('on');
+        bar.style.transition = 'none'; bar.style.width = '0';
+      }, 380);
+    }
+  };
+  window.Loader = Loader;
+
+  // Any real navigation (link click or a form POST→redirect) unloads the
+  // page → start the bar. pageshow fires on the freshly loaded page (and on
+  // bfcache restore) → clear the bar + any leftover submit state.
+  window.addEventListener('beforeunload', function(){ Loader.start(); });
+  window.addEventListener('pageshow', function(){
+    Loader.done();
+    document.querySelectorAll('form[data-submitting]').forEach(function(f){
+      delete f.dataset.submitting;
+      f.querySelectorAll('[data-orig]').forEach(function(b){
+        b.innerHTML = b.dataset.orig; delete b.dataset.orig; b.disabled = false;
+      });
+    });
+  });
+
+  // ---- helpers ----------------------------------------------------------
+  function spin(btn){
+    if (!btn || btn.disabled) return;
+    if (btn.dataset.orig === undefined) btn.dataset.orig = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm" ' +
+      'style="vertical-align:-.125em" role="status" aria-hidden="true"></span>' +
+      (btn.textContent.trim() ? ' ' + btn.textContent.trim() : '');
+  }
+  function removeRow(el){
+    el.style.transition = 'opacity .25s ease, transform .25s ease';
+    el.style.opacity = '0';
+    el.style.transform = 'translateX(10px)';
+    setTimeout(function(){ el.remove(); Loader.done(); }, 250);
+  }
+
+  // ---- AJAX delete ------------------------------------------------------
+  function ajaxDelete(form, action){
+    var btn = form.querySelector('button, [type=submit]');
+    var row = form.closest('tr, li.list-group-item');
+    var orig = btn ? btn.innerHTML : '';
+    if (btn){
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>';
+    }
+    Loader.start();
+    fetch(action, { method: 'POST', body: new FormData(form),
+                    headers: { 'X-Requested-With': 'fetch' } })
+      .then(function(res){
+        // Session expired (auth on) → server redirected us to /login.
+        if (res.redirected && /\/login(\?|$)/.test(res.url)){ location.href = res.url; return; }
+        if (res.status >= 400) throw new Error('HTTP ' + res.status);
+        // If the deleted item is the one currently open via ?env=/?project=…,
+        // the detail panel would go stale → navigate to a clean list view.
+        var m = action.match(/\/(\d+)\/delete\/?$/);
+        var id = m ? m[1] : null, selected = false;
+        if (id) new URLSearchParams(location.search).forEach(function(v){ if (v === id) selected = true; });
+        document.dispatchEvent(new CustomEvent('rowdeleted', { detail: { id: id, action: action } }));
+        if (selected){ location.assign(location.pathname); return; }
+        if (row){ removeRow(row); } else { Loader.done(); location.reload(); }
+      })
+      .catch(function(err){
+        Loader.done();
+        if (btn){ btn.disabled = false; btn.innerHTML = orig; }
+        alert('Xoá thất bại: ' + (err && err.message ? err.message : err));
+      });
+  }
+
+  // ---- one delegated submit handler ------------------------------------
+  document.addEventListener('submit', function(e){
+    var form = e.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    // Respect confirm() that returned false and pages that own the submit
+    // (e.g. the AJAX upload form calls preventDefault before this bubbles).
+    if (e.defaultPrevented) return;
+
+    var action = form.getAttribute('action') || '';
+    var method = (form.getAttribute('method') || 'get').toLowerCase();
+
+    if (method === 'post' && /delete/i.test(action)){
+      e.preventDefault();
+      ajaxDelete(form, action);
+      return;
+    }
+
+    // Navigating submit (create/save/run/login…): block double-submit, show a
+    // button spinner + the top bar; the browser then navigates as usual.
+    if (form.dataset.submitting){ e.preventDefault(); return; }
+    form.dataset.submitting = '1';
+    spin(form.querySelector('[type=submit], button:not([type=button]):not([type=reset])'));
+    Loader.start();
+  }, false);
+})();
+</script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

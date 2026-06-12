@@ -271,5 +271,14 @@ function pollJob() {
     .catch(() => { if (watching === id) setTimeout(pollJob, 1500); });
 }
 {% for j in jobs %}{% if j.status in ['running','queued'] %}watch({{ j.id }});{% endif %}{% endfor %}
+
+// When a job row is AJAX-deleted, stop watching it so we don't keep polling a
+// job that no longer exists (the global delete handler fires this event).
+document.addEventListener('rowdeleted', e => {
+  if (watching !== null && String(watching) === String(e.detail.id)) {
+    watching = null;
+    document.getElementById('watchCard').classList.add('d-none');
+  }
+});
 </script>
 {% endblock %}
