@@ -218,10 +218,16 @@ def to_openai_request(a, served_name):
 #     </parameter>
 #     </function>
 #     </tool_call>
-_TOOLCALL_RE = re.compile(r"<tool_call>\s*(.*?)</tool_call>", re.DOTALL)
+# Match a block up to its closing </tool_call> OR, if Qwen left it unclosed
+# (it sometimes emits a bare trailing `<tool_call>` or gets cut mid-call), up to
+# end of string — so a dangling open tag is still consumed instead of leaking
+# into the visible text.
+_TOOLCALL_RE = re.compile(r"<tool_call>\s*(.*?)(?:</tool_call>|\Z)", re.DOTALL)
 _FUNC_NAME_RE = re.compile(r"<function\s*=\s*([^>\n]+?)\s*>", re.DOTALL)
 _PARAM_RE = re.compile(r"<parameter\s*=\s*([^>\n]+?)\s*>(.*?)</parameter>",
                        re.DOTALL)
+# Stray framing tags left over after block removal (e.g. an orphan </tool_call>).
+_ORPHAN_TAG_RE = re.compile(r"</?(?:tool_call|function|parameter)\b[^>]*>")
 
 
 def tool_param_types(tools):
@@ -276,7 +282,7 @@ def parse_qwen_tool_calls(text, types=None):
     """Pull Qwen native <tool_call> blocks out of `text`. Returns
     (clean_text, calls) where calls is [{"name", "input"}] and clean_text is the
     text with the tool-call blocks removed. No blocks → (text, [])."""
-    if not text or "<tool_call>" not in text:
+    if not text or "tool_call" not in text:
         return text, []
     types = types or {}
     calls = []
@@ -297,7 +303,8 @@ def parse_qwen_tool_calls(text, types=None):
                 pval = pval[:-1]
             inp[pname] = _coerce_param(pval, ptypes.get(pname))
         calls.append({"name": name, "input": inp})
-    clean = _TOOLCALL_RE.sub("", text).strip()
+    clean = _TOOLCALL_RE.sub("", text)
+    clean = _ORPHAN_TAG_RE.sub("", clean).strip()
     return clean, calls
 
 
@@ -318,7 +325,7 @@ def openai_response_to_anthropic(o, model, types=None):
     # Engine didn't surface tool_calls but the model wrote Qwen's native
     # <tool_call> as text → recover them so Claude Code sees real tool_use.
     synthesized = []
-    if not native_calls and "<tool_call>" in text:
+    if not native_calls and "tool_call" in text:
         text, synthesized = parse_qwen_tool_calls(text, types)
 
     if text:
