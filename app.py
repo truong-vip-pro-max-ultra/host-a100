@@ -919,6 +919,57 @@ def _api_error(message, status, etype="invalid_request_error"):
     return rv, status
 
 
+# --------------------------------------------------------------------------- #
+# Chat — a ChatGPT-style conversation UI over the ready GPU server. Owner page
+# (session-gated), so the browser talks to this endpoint with the login cookie
+# instead of a Bearer key; we forward to the upstream OpenAI server and relay the
+# token stream. History lives in the browser (localStorage), never the DB.
+# --------------------------------------------------------------------------- #
+@app.route("/chat")
+def chat_page():
+    ready = serve_service.ready_servers()
+    return render_template(
+        "chat.html",
+        servers=[{"served_name": s["served_name"], "name": s["name"]}
+                 for s in ready],
+    )
+
+
+@app.route("/chat/send", methods=["POST"])
+def chat_send():
+    data = request.get_json(silent=True) or {}
+    messages = data.get("messages") or []
+    if not isinstance(messages, list) or not messages:
+        return jsonify({"error": "messages trống."}), 400
+    endpoint = serve_service.resolve_endpoint(data.get("model"))
+    if not endpoint:
+        return jsonify({"error": "Chưa có server nào sẵn sàng. Hãy khởi động "
+                        "một server ở tab API farm."}), 503
+    host, port, served = endpoint
+    payload = {"model": served, "messages": messages, "stream": True}
+    body = json.dumps(payload).encode("utf-8")
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=900)
+        conn.request("POST", "/v1/chat/completions", body=body,
+                     headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"Không kết nối được server GPU "
+                        f"({host}:{port}): {exc}"}), 502
+    if resp.status != 200:
+        detail = resp.read().decode("utf-8", "replace")
+        conn.close()
+        return jsonify({"error": f"Server GPU trả lỗi {resp.status}: {detail}"}), 502
+
+    def generate():
+        try:
+            for line in resp:
+                yield line
+        finally:
+            conn.close()
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+
 # --- Anthropic Messages bridge (so Claude Code can point straight here) ----- #
 # Claude Code speaks the Anthropic /v1/messages API and authenticates with the
 # x-api-key header. We translate its request to OpenAI chat-completions, forward

@@ -1,0 +1,298 @@
+{% extends "base.html" %}
+{% block title %}Chat{% endblock %}
+{% block page_title %}Chat{% endblock %}
+{% block page_sub %}Trò chuyện với model trên GPU — stream trực tiếp, tự format code/markdown{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<style>
+  /* Fill the viewport below the topbar: messages scroll, composer pinned. */
+  .chat-wrap{ display:flex; flex-direction:column; height:calc(100vh - 150px);
+    min-height:420px; }
+  .chat-toolbar{ display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+  .chat-scroll{ flex:1; overflow-y:auto; padding:6px 2px; }
+  .chat-inner{ max-width:840px; margin:0 auto; }
+
+  .msg{ display:flex; gap:12px; margin:18px 0; }
+  .msg .av{ width:34px; height:34px; border-radius:10px; flex-shrink:0; display:grid;
+    place-items:center; color:#fff; font-size:1rem; box-shadow:0 4px 10px rgba(15,23,42,.12); }
+  .msg-user .av{ background:linear-gradient(135deg,#0ea5e9,#3b82f6); }
+  .msg-assistant .av{ background:linear-gradient(135deg,#6366f1,#8b5cf6); }
+  .msg .bubble{ flex:1; min-width:0; padding:2px 2px; line-height:1.6; font-size:.95rem; }
+  .msg .who{ font-weight:700; font-size:.82rem; color:var(--muted); margin-bottom:2px; }
+
+  /* Rendered markdown */
+  .bubble p{ margin:.5em 0; }
+  .bubble h1,.bubble h2,.bubble h3,.bubble h4{ font-weight:700; letter-spacing:-.01em;
+    margin:.9em 0 .4em; line-height:1.3; }
+  .bubble h1{ font-size:1.3rem; } .bubble h2{ font-size:1.15rem; } .bubble h3{ font-size:1.03rem; }
+  .bubble ul,.bubble ol{ margin:.4em 0 .4em; padding-left:1.4em; }
+  .bubble li{ margin:.2em 0; }
+  .bubble a{ color:var(--accent); text-decoration:underline; }
+  .bubble img{ max-width:100%; border-radius:12px; margin:.4em 0; }
+  .bubble blockquote{ border-left:3px solid var(--line); margin:.5em 0; padding:.1em 1em;
+    color:var(--muted); }
+  .bubble table{ border-collapse:collapse; margin:.6em 0; font-size:.9em; display:block;
+    overflow-x:auto; }
+  .bubble th,.bubble td{ border:1px solid var(--line); padding:.4em .7em; }
+  .bubble th{ background:#f8fafc; font-weight:700; }
+  .bubble :not(pre)>code{ color:#7c3aed; background:#f5f3ff; padding:.1em .4em;
+    border-radius:6px; font-size:.86em; }
+  .bubble pre{ position:relative; background:#0b1220; border:1px solid #1e293b;
+    border-radius:14px; padding:14px 16px; overflow:auto; margin:.6em 0; }
+  .bubble pre code{ background:transparent; color:#e2e8f0; font-size:.84rem;
+    line-height:1.55; padding:0; }
+  .code-copy{ position:absolute; top:8px; right:8px; border:none; cursor:pointer;
+    background:rgba(148,163,184,.18); color:#cbd5e1; border-radius:8px; padding:3px 9px;
+    font-size:.72rem; font-weight:600; opacity:0; transition:opacity .15s; }
+  .bubble pre:hover .code-copy{ opacity:1; }
+  .blinker::after{ content:"▋"; color:var(--accent); animation:blink 1s steps(2) infinite; }
+  @keyframes blink{ 50%{ opacity:0; } }
+
+  /* Composer */
+  .composer{ max-width:840px; margin:10px auto 0; width:100%; }
+  .composer .box{ display:flex; align-items:flex-end; gap:8px; background:var(--card);
+    border:1px solid var(--line); border-radius:16px; padding:8px 8px 8px 14px;
+    box-shadow:var(--shadow); }
+  .composer textarea{ flex:1; border:none; outline:none; resize:none; font-size:.95rem;
+    line-height:1.5; max-height:200px; background:transparent; color:var(--ink);
+    font-family:inherit; padding:6px 0; }
+  .composer .send{ width:40px; height:40px; border-radius:11px; border:none; flex-shrink:0;
+    background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff;
+    font-size:1.1rem; cursor:pointer; box-shadow:0 4px 12px rgba(99,102,241,.30); }
+  .composer .send:disabled{ filter:grayscale(.6) opacity(.6); cursor:not-allowed; }
+  .composer .hint{ text-align:center; color:var(--muted); font-size:.74rem; margin-top:6px; }
+
+  .empty{ text-align:center; color:var(--muted); margin-top:8vh; }
+  .empty .big{ font-size:2.4rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="chat-wrap">
+  <div class="chat-toolbar">
+    <select class="form-select form-select-sm" id="modelSel" style="max-width:280px"
+            {% if not servers %}disabled{% endif %}>
+      {% for s in servers %}
+        <option value="{{ s.served_name }}">{{ s.served_name }}</option>
+      {% else %}
+        <option value="">— chưa có server sẵn sàng —</option>
+      {% endfor %}
+    </select>
+    <button class="btn btn-sm btn-outline-secondary ms-auto" id="newChat">
+      <i class="bi bi-plus-lg"></i> Cuộc mới</button>
+  </div>
+
+  <div class="chat-scroll" id="scroll">
+    <div class="chat-inner" id="messages"></div>
+    <div class="empty" id="empty">
+      <div class="big"><i class="bi bi-chat-dots"></i></div>
+      <div>Hỏi gì đó để bắt đầu.</div>
+      {% if not servers %}
+        <div class="text-danger mt-2">Chưa có server nào sẵn sàng — khởi động ở tab
+          <a href="{{ url_for('api_page') }}">API farm</a>.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="composer">
+    <div class="box">
+      <textarea id="input" rows="1" placeholder="Nhắn tin… (Enter gửi, Shift+Enter xuống dòng)"
+                {% if not servers %}disabled{% endif %}></textarea>
+      <button class="send" id="send" {% if not servers %}disabled{% endif %} title="Gửi">
+        <i class="bi bi-arrow-up"></i></button>
+    </div>
+    <div class="hint">Lịch sử chỉ lưu tạm trong trình duyệt — tải lại trang là làm mới.</div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.5/dist/purify.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script>
+const SYSTEM_PROMPT = "Bạn là trợ lý lập trình hữu ích. Trả lời rõ ràng, dùng markdown và code block khi phù hợp.";
+const LS_KEY = "hosta100_chat";
+
+const messagesEl = document.getElementById('messages');
+const scrollEl = document.getElementById('scroll');
+const emptyEl = document.getElementById('empty');
+const inputEl = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const modelSel = document.getElementById('modelSel');
+
+let history = [];           // [{role, content}] — the conversation context
+let busy = false;
+let aborter = null;
+
+marked.setOptions({ breaks: true, gfm: true });
+
+// --- markdown render (sanitized) + code highlight + copy buttons -----------
+function renderMarkdown(text) {
+  return DOMPurify.sanitize(marked.parse(text || ""));
+}
+function highlightAndDecorate(el) {
+  el.querySelectorAll('pre code').forEach(block => {
+    try { hljs.highlightElement(block); } catch (_) {}
+  });
+  el.querySelectorAll('pre').forEach(pre => {
+    if (pre.querySelector('.code-copy')) return;
+    const btn = document.createElement('button');
+    btn.className = 'code-copy'; btn.textContent = 'Copy';
+    btn.onclick = () => {
+      const code = pre.querySelector('code');
+      navigator.clipboard.writeText(code ? code.innerText : pre.innerText)
+        .then(() => { btn.textContent = 'Đã copy'; setTimeout(() => btn.textContent = 'Copy', 1200); });
+    };
+    pre.appendChild(btn);
+  });
+}
+
+function bubbleFor(role) {
+  emptyEl.style.display = 'none';
+  const wrap = document.createElement('div');
+  wrap.className = 'msg msg-' + role;
+  const isUser = role === 'user';
+  wrap.innerHTML =
+    '<div class="av"><i class="bi ' + (isUser ? 'bi-person-fill' : 'bi-robot') + '"></i></div>' +
+    '<div style="flex:1;min-width:0"><div class="who">' + (isUser ? 'Bạn' : 'Trợ lý') +
+    '</div><div class="bubble"></div></div>';
+  messagesEl.appendChild(wrap);
+  return wrap.querySelector('.bubble');
+}
+
+function scrollDown() { scrollEl.scrollTop = scrollEl.scrollHeight; }
+
+function addUserMessage(text) {
+  const b = bubbleFor('user');
+  b.textContent = text;                 // user text shown verbatim (no markdown)
+  scrollDown();
+}
+
+// throttle markdown re-render during streaming to one paint per frame
+let pendingEl = null, pendingText = "", rafId = null;
+function scheduleRender(el, text) {
+  pendingEl = el; pendingText = text;
+  if (rafId) return;
+  rafId = requestAnimationFrame(() => {
+    rafId = null;
+    pendingEl.innerHTML = renderMarkdown(pendingText);
+    pendingEl.classList.add('blinker');
+    scrollDown();
+  });
+}
+
+function save() {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(history)); } catch (_) {}
+}
+
+async function send() {
+  const text = inputEl.value.trim();
+  if (!text || busy) return;
+  const model = modelSel.value;
+  if (!model) { toast('Chưa có server sẵn sàng.', 'danger'); return; }
+
+  addUserMessage(text);
+  history.push({ role: 'user', content: text });
+  inputEl.value = ''; autosize();
+  save();
+
+  const bubble = bubbleFor('assistant');
+  bubble.innerHTML = '<span class="text-muted">…</span>';
+  setBusy(true);
+  let acc = "";
+  aborter = new AbortController();
+
+  try {
+    const res = await fetch('{{ url_for("chat_send") }}', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages: [{ role: 'system', content: SYSTEM_PROMPT }].concat(history) }),
+      signal: aborter.signal,
+    });
+    if (!res.ok) {
+      let msg = 'HTTP ' + res.status;
+      try { msg = (await res.json()).error || msg; } catch (_) {}
+      throw new Error(msg);
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        try {
+          const obj = JSON.parse(payload);
+          const delta = (obj.choices && obj.choices[0] && obj.choices[0].delta &&
+                         obj.choices[0].delta.content) || "";
+          if (delta) { acc += delta; scheduleRender(bubble, acc); }
+        } catch (_) {}
+      }
+    }
+    // final paint: full markdown + highlight + copy buttons
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+    bubble.classList.remove('blinker');
+    bubble.innerHTML = renderMarkdown(acc || "*(không có nội dung)*");
+    highlightAndDecorate(bubble);
+    history.push({ role: 'assistant', content: acc });
+    save();
+  } catch (err) {
+    bubble.classList.remove('blinker');
+    if (err.name === 'AbortError') {
+      bubble.innerHTML = renderMarkdown(acc) + '<div class="text-muted small mt-1">— đã dừng —</div>';
+      highlightAndDecorate(bubble);
+      if (acc) { history.push({ role: 'assistant', content: acc }); save(); }
+    } else {
+      bubble.innerHTML = '<span class="text-danger">Lỗi: ' +
+        (err.message || err) + '</span>';
+    }
+  } finally {
+    setBusy(false); aborter = null; scrollDown();
+  }
+}
+
+function setBusy(b) {
+  busy = b;
+  if (b) {
+    sendBtn.innerHTML = '<i class="bi bi-stop-fill"></i>';
+    sendBtn.title = 'Dừng';
+  } else {
+    sendBtn.innerHTML = '<i class="bi bi-arrow-up"></i>';
+    sendBtn.title = 'Gửi';
+  }
+}
+
+function autosize() {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
+}
+
+function newChat() {
+  if (busy && aborter) aborter.abort();
+  history = [];
+  messagesEl.innerHTML = '';
+  emptyEl.style.display = '';
+  try { localStorage.removeItem(LS_KEY); } catch (_) {}
+}
+
+// Send button doubles as Stop while streaming.
+sendBtn.addEventListener('click', () => { if (busy) { if (aborter) aborter.abort(); } else { send(); } });
+inputEl.addEventListener('input', autosize);
+inputEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!busy) send(); }
+});
+document.getElementById('newChat').addEventListener('click', newChat);
+
+// Fresh on every page load (per spec): clear any stale localStorage, start empty.
+try { localStorage.removeItem(LS_KEY); } catch (_) {}
+inputEl.focus();
+</script>
+{% endblock %}
