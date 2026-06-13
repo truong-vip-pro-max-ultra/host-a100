@@ -73,6 +73,45 @@ def init_db():
                 FOREIGN KEY (env_id) REFERENCES envs(id) ON DELETE SET NULL,
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
             );
+
+            -- API farm: each row is one long-running OpenAI-compatible LLM
+            -- server (llama.cpp) dispatched to a GPU compute node via sbatch.
+            -- The Flask app on the login node reverse-proxies /v1/* to
+            -- http://<node>:<port>, which the server writes into endpoint.json.
+            CREATE TABLE IF NOT EXISTS servers (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                name          TEXT NOT NULL,
+                served_name   TEXT NOT NULL,
+                model_id      INTEGER,
+                env_id        INTEGER,
+                engine        TEXT NOT NULL DEFAULT 'llamacpp',
+                status        TEXT NOT NULL DEFAULT 'queued',
+                slurm_job_id  TEXT,
+                node          TEXT,
+                port          INTEGER,
+                gpu_model     TEXT,
+                n_gpu_layers  INTEGER,
+                n_ctx         INTEGER,
+                chat_format   TEXT,
+                extra_args    TEXT,
+                time_limit    TEXT,
+                auto_resubmit INTEGER NOT NULL DEFAULT 1,
+                logs_path     TEXT,
+                created_at    REAL NOT NULL,
+                stopped_at    REAL,
+                FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE SET NULL,
+                FOREIGN KEY (env_id)   REFERENCES envs(id)   ON DELETE SET NULL
+            );
+
+            -- Bearer API keys that gate the public /v1/* proxy. Independent of
+            -- the session password (clients send Authorization: Bearer <key>).
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                key        TEXT UNIQUE NOT NULL,
+                label      TEXT,
+                created_at REAL NOT NULL,
+                revoked    INTEGER NOT NULL DEFAULT 0
+            );
             """
         )
         _migrate(conn)

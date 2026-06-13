@@ -1,0 +1,311 @@
+{% extends "base.html" %}
+{% block title %}API farm{% endblock %}
+{% block page_title %}API farm{% endblock %}
+{% block page_sub %}Biến GPU HPC thành API LLM (OpenAI-compatible) — hỏi & code từ xa{% endblock %}
+{% block content %}
+
+{% set ST = {
+  'ready':   ('pill-done',    'sẵn sàng'),
+  'loading': ('pill-running', 'đang nạp model'),
+  'queued':  ('pill-queued',  'chờ cấp GPU'),
+  'stopped': ('pill-unknown', 'đã dừng'),
+  'error':   ('pill-error',   'lỗi'),
+} %}
+
+{% if new_key %}
+<div class="alert alert-success d-flex align-items-start gap-2">
+  <i class="bi bi-key-fill mt-1"></i>
+  <div class="flex-grow-1">
+    <strong>API key mới (chỉ hiện một lần — sao chép ngay):</strong>
+    <div class="d-flex gap-2 mt-1">
+      <input class="form-control form-control-sm" id="newKey" readonly value="{{ new_key }}">
+      <button class="btn btn-sm btn-primary" onclick="copyVal('newKey')"><i class="bi bi-clipboard"></i></button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="row g-3">
+  <!-- ---------------------------------------------------------------- -->
+  <div class="col-lg-5">
+    <div class="card"><div class="card-body">
+      <h5 class="card-title"><i class="bi bi-rocket-takeoff"></i> Khởi động server</h5>
+      {% if not slurm_active %}
+        <div class="alert alert-warning py-2 small mb-2">
+          <i class="bi bi-exclamation-triangle"></i> Chưa bật SLURM trên node này —
+          không thể cấp GPU cho server.</div>
+      {% endif %}
+      <form method="post" action="{{ url_for('api_server_start') }}">
+        <div class="mb-2">
+          <label class="form-label">Mô hình (GGUF)</label>
+          <select class="form-select" name="model_id" required>
+            <option value="">— chọn mô hình GGUF —</option>
+            {% for m in models %}<option value="{{ m.id }}">{{ m.name }}</option>{% endfor %}
+          </select>
+          <div class="form-text">llama.cpp cần model định dạng <code>.gguf</code>.</div>
+        </div>
+
+        <div class="mb-2">
+          <label class="form-label">Môi trường (có <code>llama-cpp-python[server]</code>)</label>
+          <select class="form-select" name="env_id" required>
+            <option value="">— chọn môi trường —</option>
+            {% for e in envs %}<option value="{{ e.id }}">{{ e.name }}</option>{% endfor %}
+          </select>
+        </div>
+
+        <div class="row g-2">
+          <div class="col-7 mb-2">
+            <label class="form-label">Tên hiển thị</label>
+            <input class="form-control" name="name" placeholder="qwen-coder-32b">
+          </div>
+          <div class="col-5 mb-2">
+            <label class="form-label">model id (client gọi)</label>
+            <input class="form-control" name="served_name" placeholder="= tên model">
+          </div>
+        </div>
+
+        <div class="mb-2">
+          <label class="form-label">Loại GPU</label>
+          <select class="form-select" name="gpu_model">
+            <option value="">Bất kỳ GPU rảnh (cấp nhanh nhất)</option>
+            {% for m in gpu_models %}
+            <option value="{{ m.model }}">{{ m.model|upper }} — {{ m.free }}/{{ m.total }} trống
+              ({{ m.arch }}, {{ m.nodes }} node)</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="row g-2">
+          <div class="col-6 mb-2">
+            <label class="form-label">n_gpu_layers</label>
+            <input class="form-control" name="n_gpu_layers" value="99">
+            <div class="form-text">99 = nạp hết lên GPU. Nếu OOM thì giảm (offload bớt sang CPU).</div>
+          </div>
+          <div class="col-6 mb-2">
+            <label class="form-label">n_ctx (context)</label>
+            <input class="form-control" name="n_ctx" value="8192">
+            <div class="form-text">Context càng dài càng tốn VRAM (KV-cache).</div>
+          </div>
+        </div>
+
+        <div class="row g-2">
+          <div class="col-6 mb-2">
+            <label class="form-label">chat_format</label>
+            <input class="form-control" name="chat_format" value="chatml">
+            <div class="form-text">Qwen2.5 = <code>chatml</code>. Để trống = tự nhận từ GGUF.</div>
+          </div>
+          <div class="col-6 mb-2">
+            <label class="form-label">Thời lượng tối đa</label>
+            <input class="form-control" name="time_limit" value="24:00:00">
+            <div class="form-text">HH:MM:SS — hết giờ SLURM tự kill server.
+              Nếu sbatch báo vượt giới hạn partition thì hạ xuống.</div>
+          </div>
+        </div>
+
+        <div class="form-check form-switch mb-2">
+          <input class="form-check-input" type="checkbox" role="switch"
+                 name="auto_resubmit" id="autoResubmit" checked>
+          <label class="form-check-label" for="autoResubmit">
+            Tự khởi động lại khi hết giờ (auto-resubmit)</label>
+          <div class="form-text mb-0">Hết walltime SLURM kill server → tự
+            <code>sbatch</code> lại để gần như chạy 24/7 (có vài phút gián đoạn +
+            chờ queue). Tự dừng nếu server chết liên tục &lt;60s (lỗi thật, vd OOM).</div>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label">Tham số bổ sung (tuỳ chọn)</label>
+          <input class="form-control" name="extra_args"
+                 placeholder="--n_threads 8 --flash_attn ...">
+          <div class="form-text">Truyền thẳng cho <code>llama_cpp.server</code>.</div>
+        </div>
+
+        <button class="btn btn-primary" {% if not envs or not models %}disabled{% endif %}>
+          <i class="bi bi-play-fill"></i> Khởi động</button>
+        {% if not envs or not models %}
+          <div class="form-text text-danger">Cần ít nhất 1 mô hình GGUF và 1 môi trường.</div>
+        {% endif %}
+      </form>
+    </div></div>
+
+    <!-- API keys -->
+    <div class="card mt-3"><div class="card-body">
+      <h5 class="card-title"><i class="bi bi-key"></i> API keys</h5>
+      <p class="small text-muted mb-2">Client gửi <code>Authorization: Bearer &lt;key&gt;</code>.</p>
+      <table class="table table-sm align-middle mb-2">
+        <tbody>
+        {% for k in keys %}
+          <tr>
+            <td><code>{{ k.masked }}</code></td>
+            <td class="text-muted small">{{ k.label or '' }}</td>
+            <td class="text-end">
+              <form class="d-inline" method="post"
+                    action="{{ url_for('api_key_delete', key_id=k.id) }}"
+                    data-confirm="Xoá API key này? Client đang dùng sẽ mất quyền truy cập.">
+                <button class="btn btn-sm btn-outline-danger">×</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td class="text-muted">Chưa có key nào.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <form method="post" action="{{ url_for('api_key_create') }}" class="d-flex gap-2">
+        <input class="form-control form-control-sm" name="label" placeholder="nhãn (vd: laptop)">
+        <button class="btn btn-sm btn-primary text-nowrap"><i class="bi bi-plus-lg"></i> Tạo key</button>
+      </form>
+    </div></div>
+  </div>
+
+  <!-- ---------------------------------------------------------------- -->
+  <div class="col-lg-7">
+    <div class="card"><div class="card-body">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="card-title mb-0"><i class="bi bi-hdd-stack"></i> Server đang chạy</h5>
+        <span class="small text-muted">tự cập nhật</span>
+      </div>
+      <table class="table table-sm align-middle mb-0">
+        <thead><tr><th>#</th><th>model id</th><th>Mô hình</th><th>Endpoint</th><th>Trạng thái</th><th></th></tr></thead>
+        <tbody id="srvBody">
+        {% for s in servers %}
+          <tr id="srv-{{ s.id }}">
+            <td>{{ s.id }}</td>
+            <td><code>{{ s.served_name }}</code></td>
+            <td class="small">{{ s.model_name or '-' }}<br>
+              <span class="text-muted">{{ s.env_name or '-' }}</span></td>
+            <td class="small" data-ep>{% if s.node %}{{ s.node }}:{{ s.port }}{% else %}—{% endif %}</td>
+            <td>
+              {% set cls, lbl = ST.get(s.status, ('pill-unknown', s.status)) %}
+              <span class="pill {{ cls }}" data-st>{{ lbl }}</span></td>
+            <td class="text-end text-nowrap">
+              <a class="btn btn-sm btn-outline-secondary" href="#"
+                 onclick="showLog({{ s.id }});return false;" title="Log"><i class="bi bi-terminal"></i></a>
+              {% if s.status in ('ready','loading','queued') %}
+              <form class="d-inline" method="post" action="{{ url_for('api_server_stop', server_id=s.id) }}">
+                <button class="btn btn-sm btn-outline-warning" title="Dừng"><i class="bi bi-stop-fill"></i></button>
+              </form>
+              {% endif %}
+              <form class="d-inline" method="post" action="{{ url_for('api_server_delete', server_id=s.id) }}"
+                    data-confirm="Xoá server #{{ s.id }}?">
+                <button class="btn btn-sm btn-outline-danger" title="Xoá">×</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr id="noSrv"><td colspan="6" class="text-muted">Chưa có server nào. Khởi động một cái bên trái.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div></div>
+
+    <!-- Usage -->
+    <div class="card mt-3"><div class="card-body">
+      <h5 class="card-title"><i class="bi bi-plug"></i> Cách dùng</h5>
+      <label class="form-label">Base URL (qua Cloudflare tunnel)</label>
+      <div class="d-flex gap-2 mb-2">
+        <input class="form-control form-control-sm" id="baseUrl" readonly value="{{ base_url }}">
+        <button class="btn btn-sm btn-primary" onclick="copyVal('baseUrl')"><i class="bi bi-clipboard"></i></button>
+      </div>
+      <p class="small text-muted mb-1">OpenAI-compatible: <code>/v1/chat/completions</code>,
+        <code>/v1/models</code> (Cline / Continue / aider / OpenAI SDK) —
+        <strong>và</strong> Anthropic <code>/v1/messages</code> nên
+        <strong>Claude Code</strong> trỏ thẳng vào được.</p>
+
+      <p class="small fw-semibold mb-1"><i class="bi bi-terminal"></i> Claude Code (Anthropic):</p>
+      <pre class="logbox mb-2" style="max-height:170px">export ANTHROPIC_BASE_URL="{{ base_url[:-3] }}"   # bỏ /v1 ở cuối
+export ANTHROPIC_AUTH_TOKEN="&lt;API key ở trên&gt;"
+export ANTHROPIC_MODEL="qwen3-coder-30b"          # = model id của server
+claude</pre>
+
+      <p class="small fw-semibold mb-1"><i class="bi bi-box"></i> OpenAI SDK / Cline / aider:</p>
+      <pre class="logbox mb-0" style="max-height:200px">from openai import OpenAI
+client = OpenAI(base_url="{{ base_url }}", api_key="&lt;API key&gt;")
+r = client.chat.completions.create(
+    model="qwen3-coder-30b",   # = model id của server
+    messages=[{"role": "user", "content": "Viết quicksort bằng Python"}],
+    stream=True,
+)
+for chunk in r:
+    print(chunk.choices[0].delta.content or "", end="")</pre>
+    </div></div>
+  </div>
+</div>
+
+<!-- Log modal -->
+<div class="modal fade" id="logModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Log server <span id="logId"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <pre class="logbox mb-0" id="logBox" style="max-height:60vh">Đang tải…</pre>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const ST = {
+  ready:   ['pill-done',    'sẵn sàng'],
+  loading: ['pill-running', 'đang nạp model'],
+  queued:  ['pill-queued',  'chờ cấp GPU'],
+  stopped: ['pill-unknown', 'đã dừng'],
+  error:   ['pill-error',   'lỗi'],
+};
+
+function copyVal(id) {
+  const el = document.getElementById(id);
+  el.select();
+  navigator.clipboard.writeText(el.value).then(
+    () => toast('Đã sao chép.', 'success'),
+    () => toast('Không sao chép được.', 'danger'));
+}
+
+// Live status: re-poll the server list and patch each row's endpoint + pill, so
+// "chờ cấp GPU → đang nạp → sẵn sàng" updates without a manual reload.
+function pollServers() {
+  fetch('{{ url_for("api_servers_json") }}')
+    .then(r => r.json())
+    .then(d => {
+      d.servers.forEach(s => {
+        const row = document.getElementById('srv-' + s.id);
+        if (!row) return;
+        const ep = row.querySelector('[data-ep]');
+        if (ep) ep.textContent = s.node ? (s.node + ':' + s.port) : '—';
+        const pill = row.querySelector('[data-st]');
+        if (pill) {
+          const m = ST[s.status] || ['pill-unknown', s.status];
+          pill.className = 'pill ' + m[0];
+          pill.textContent = m[1];
+        }
+      });
+    })
+    .finally(() => setTimeout(pollServers, 3000));
+}
+pollServers();
+
+let logTimer = null;
+function showLog(id) {
+  document.getElementById('logId').textContent = '#' + id;
+  const box = document.getElementById('logBox');
+  box.textContent = 'Đang tải…';
+  const modalEl = document.getElementById('logModal');
+  const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+  modal.show();
+  function load() {
+    fetch('{{ url_for("api_server_log", server_id=0) }}'.replace('/0/', '/' + id + '/'))
+      .then(r => r.json())
+      .then(d => { box.textContent = d.log || '(trống)'; box.scrollTop = box.scrollHeight; });
+  }
+  load();
+  if (logTimer) clearInterval(logTimer);
+  logTimer = setInterval(load, 2000);
+  modalEl.addEventListener('hidden.bs.modal', () => { if (logTimer) clearInterval(logTimer); }, { once: true });
+}
+window.showLog = showLog; window.copyVal = copyVal;
+</script>
+{% endblock %}

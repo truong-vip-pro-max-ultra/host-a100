@@ -12,19 +12,22 @@ the Flask request threads stay responsive. Progress is exposed through JSON
 polling endpoints that the Bootstrap UI queries on a timer.
 """
 import hmac
+import http.client
+import json
 import os
 import sys
 import tempfile
 import threading
 import uuid
 
-from flask import (Flask, abort, flash, jsonify, redirect, render_template,
-                   request, send_file, send_from_directory, session, url_for)
+from flask import (Flask, Response, abort, flash, jsonify, redirect,
+                   render_template, request, send_file, send_from_directory,
+                   session, stream_with_context, url_for)
 
 import config
-from services import (env_service, job_service, model_service,
-                      project_service, pty_service, shell_service,
-                      storage_service as db)
+from services import (anthropic_bridge, apikey_service, env_service,
+                      job_service, model_service, project_service, pty_service,
+                      serve_service, shell_service, storage_service as db)
 from utils import file_utils, gpu, progress, sysinfo
 
 app = Flask(__name__)
@@ -69,6 +72,11 @@ def _inject_auth():
 
 @app.before_request
 def _require_login():
+    # The public LLM API (/v1/*) is NOT gated by the session password: external
+    # clients authenticate with a Bearer API key instead, enforced inside the
+    # proxy view itself. Let it through here regardless of AUTH_ENABLED.
+    if request.path == "/v1" or request.path.startswith("/v1/"):
+        return
     if not config.AUTH_ENABLED:
         return  # auth disabled (internal/dev) — a startup warning is printed.
     if request.endpoint in _PUBLIC_ENDPOINTS:
@@ -772,6 +780,298 @@ def job_result(job_id):
 
 
 # --------------------------------------------------------------------------- #
+# API farm — manage long-running LLM servers and the keys that gate the public
+# /v1/* proxy. These management pages stay behind the session login (owner UI);
+# only the /v1/* proxy below is opened to Bearer-key clients.
+# --------------------------------------------------------------------------- #
+def _api_context():
+    # The public base URL is however the browser reached us — through the
+    # Cloudflare tunnel that's the external https host. Strip the trailing slash.
+    base = request.host_url.rstrip("/") + "/v1"
+    return dict(
+        servers=serve_service.list_servers(),
+        models=model_service.list_models(),
+        envs=env_service.list_envs(),
+        keys=[{**k, "masked": apikey_service.mask(k["key"])}
+              for k in apikey_service.list_keys()],
+        gpu_models=gpu.slurm_gpu_models(config.SLURM_PARTITION or None) or [],
+        slurm_active=job_service.slurm_active(),
+        base_url=base,
+        new_key=session.pop("_new_api_key", None),
+    )
+
+
+@app.route("/api")
+def api_page():
+    return render_template("api.html", **_api_context())
+
+
+@app.route("/api/servers/start", methods=["POST"])
+def api_server_start():
+    f = request.form
+    try:
+        serve_service.start_server(
+            name=f.get("name", ""),
+            model_id=f.get("model_id", type=int),
+            env_id=f.get("env_id", type=int),
+            served_name=f.get("served_name", ""),
+            gpu_model=f.get("gpu_model", "").strip(),
+            n_gpu_layers=f.get("n_gpu_layers", "99"),
+            n_ctx=f.get("n_ctx", "8192"),
+            chat_format=f.get("chat_format", "").strip(),
+            extra_args=f.get("extra_args", ""),
+            time_limit=f.get("time_limit", "").strip(),
+            auto_resubmit=f.get("auto_resubmit") is not None,
+        )
+        flash("Đã gửi server tới SLURM, đang chờ cấp GPU…", "success")
+    except ValueError as exc:
+        flash(str(exc), "danger")
+    return redirect(url_for("api_page"))
+
+
+@app.route("/api/servers/<int:server_id>/stop", methods=["POST"])
+def api_server_stop(server_id):
+    if serve_service.stop_server(server_id):
+        flash("Đã dừng server.", "success")
+    else:
+        flash("Không tìm thấy server.", "danger")
+    return redirect(url_for("api_page"))
+
+
+@app.route("/api/servers/<int:server_id>/delete", methods=["POST"])
+def api_server_delete(server_id):
+    if serve_service.delete_server(server_id):
+        flash("Đã xoá server.", "success")
+    else:
+        flash("Không tìm thấy server.", "danger")
+    return redirect(url_for("api_page"))
+
+
+@app.route("/api/servers.json")
+def api_servers_json():
+    out = []
+    for s in serve_service.list_servers():
+        out.append({
+            "id": s["id"], "name": s["name"], "served_name": s["served_name"],
+            "status": s["status"], "node": s.get("node"), "port": s.get("port"),
+            "model_name": s.get("model_name"), "env_name": s.get("env_name"),
+        })
+    return jsonify({"servers": out})
+
+
+@app.route("/api/servers/<int:server_id>/log")
+def api_server_log(server_id):
+    return jsonify({"log": serve_service.read_log(server_id)})
+
+
+@app.route("/api/keys/create", methods=["POST"])
+def api_key_create():
+    token = apikey_service.create_key(request.form.get("label", ""))
+    # Stash the plaintext so the page can show it ONCE after the redirect.
+    session["_new_api_key"] = token
+    flash("Đã tạo API key mới — sao chép ngay, nó chỉ hiện một lần.", "success")
+    return redirect(url_for("api_page"))
+
+
+@app.route("/api/keys/<int:key_id>/delete", methods=["POST"])
+def api_key_delete(key_id):
+    apikey_service.delete_key(key_id)
+    flash("Đã xoá API key.", "success")
+    return redirect(url_for("api_page"))
+
+
+# --------------------------------------------------------------------------- #
+# Public OpenAI-compatible proxy. Forwards /v1/* to whichever GPU server is
+# ready, after checking the Bearer API key. Supports SSE streaming so coding
+# clients (Claude Code, Cline, the OpenAI SDK) get live token output.
+# --------------------------------------------------------------------------- #
+_HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate",
+               "proxy-authorization", "te", "trailers", "transfer-encoding",
+               "upgrade", "content-length", "host", "content-encoding"}
+
+
+def _cors_headers():
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Authorization, Content-Type, x-api-key",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    }
+
+
+def _check_api_key():
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:].strip() if auth.startswith("Bearer ") else auth.strip()
+    if not token:
+        token = request.headers.get("x-api-key", "").strip()
+    return apikey_service.verify(token)
+
+
+def _api_error(message, status, etype="invalid_request_error"):
+    rv = jsonify({"error": {"message": message, "type": etype}})
+    for k, v in _cors_headers().items():
+        rv.headers[k] = v
+    return rv, status
+
+
+# --- Anthropic Messages bridge (so Claude Code can point straight here) ----- #
+# Claude Code speaks the Anthropic /v1/messages API and authenticates with the
+# x-api-key header. We translate its request to OpenAI chat-completions, forward
+# to the ready GPU server, and translate the (streaming or not) reply back to
+# Anthropic's shape. These static routes win over the /v1/<path> catch-all.
+@app.route("/v1/messages", methods=["POST", "OPTIONS"])
+def anthropic_messages():
+    if request.method == "OPTIONS":
+        return ("", 204, _cors_headers())
+    if not _check_api_key():
+        return _api_error("Sai hoặc thiếu API key.", 401)
+    try:
+        a = json.loads(request.get_data() or b"{}")
+    except ValueError:
+        return _api_error("Body không phải JSON hợp lệ.", 400)
+
+    endpoint = serve_service.resolve_endpoint(a.get("model"))
+    if not endpoint:
+        return _api_error("Chưa có server nào sẵn sàng. Hãy khởi động một "
+                          "server ở tab 'API farm'.", 503, "server_error")
+    host, port, served = endpoint
+
+    want_stream = bool(a.get("stream"))
+    oai = anthropic_bridge.to_openai_request(a, served)
+    if want_stream:
+        oai["stream"] = True
+        oai.setdefault("stream_options", {"include_usage": True})
+    body = json.dumps(oai).encode("utf-8")
+    input_est = anthropic_bridge.estimate_tokens(a)
+
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=900)
+        conn.request("POST", "/v1/chat/completions", body=body,
+                     headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+    except Exception as exc:  # noqa: BLE001
+        return _api_error(f"Không kết nối được tới server GPU ({host}:{port}): "
+                          f"{exc}", 502, "server_error")
+
+    if resp.status != 200:
+        detail = resp.read().decode("utf-8", "replace")
+        conn.close()
+        return _api_error(f"Server GPU trả lỗi {resp.status}: {detail}",
+                          resp.status if resp.status >= 400 else 502, "server_error")
+
+    if want_stream:
+        gen = anthropic_bridge.stream(resp, conn, served, input_est)
+        rv = Response(stream_with_context(gen), status=200,
+                      mimetype="text/event-stream")
+        for k, v in _cors_headers().items():
+            rv.headers[k] = v
+        return rv
+
+    data = resp.read()
+    conn.close()
+    try:
+        oai_resp = json.loads(data)
+    except ValueError:
+        return _api_error("Server GPU trả về JSON không hợp lệ.", 502, "server_error")
+    rv = jsonify(anthropic_bridge.openai_response_to_anthropic(oai_resp, served))
+    for k, v in _cors_headers().items():
+        rv.headers[k] = v
+    return rv
+
+
+@app.route("/v1/messages/count_tokens", methods=["POST", "OPTIONS"])
+def anthropic_count_tokens():
+    if request.method == "OPTIONS":
+        return ("", 204, _cors_headers())
+    if not _check_api_key():
+        return _api_error("Sai hoặc thiếu API key.", 401)
+    try:
+        a = json.loads(request.get_data() or b"{}")
+    except ValueError:
+        return _api_error("Body không phải JSON hợp lệ.", 400)
+    rv = jsonify({"input_tokens": anthropic_bridge.estimate_tokens(a)})
+    for k, v in _cors_headers().items():
+        rv.headers[k] = v
+    return rv
+
+
+@app.route("/v1/<path:subpath>", methods=["GET", "POST", "OPTIONS"])
+def api_proxy(subpath):
+    if request.method == "OPTIONS":
+        return ("", 204, _cors_headers())
+    if not _check_api_key():
+        return _api_error("Sai hoặc thiếu API key.", 401)
+
+    # GET /v1/models: aggregate every ready server's served name, so a client can
+    # discover all available models even though each upstream only serves one.
+    if subpath == "models" and request.method == "GET":
+        data = [{"id": s["served_name"], "object": "model", "owned_by": "host-a100"}
+                for s in serve_service.ready_servers()]
+        rv = jsonify({"object": "list", "data": data})
+        for k, v in _cors_headers().items():
+            rv.headers[k] = v
+        return rv
+
+    body = request.get_data()
+    model_name = None
+    if body:
+        try:
+            model_name = (json.loads(body) or {}).get("model")
+        except (ValueError, TypeError):
+            model_name = None
+
+    endpoint = serve_service.resolve_endpoint(model_name)
+    if not endpoint:
+        return _api_error("Chưa có server nào sẵn sàng. Hãy khởi động một "
+                          "server ở tab 'API farm'.", 503, "server_error")
+    host, port, _served = endpoint
+    return _proxy_to(host, port, "/v1/" + subpath, body)
+
+
+def _proxy_to(host, port, path, body):
+    fwd = {}
+    for k, v in request.headers.items():
+        lk = k.lower()
+        # Drop the client's Authorization (upstream llama.cpp has no auth) and
+        # all hop-by-hop headers; forward the rest (Content-Type, Accept, …).
+        if lk in _HOP_BY_HOP or lk == "authorization":
+            continue
+        fwd[k] = v
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=900)
+        conn.request(request.method, path, body=body, headers=fwd)
+        resp = conn.getresponse()
+    except Exception as exc:  # noqa: BLE001
+        return _api_error(f"Không kết nối được tới server GPU ({host}:{port}): "
+                          f"{exc}", 502, "server_error")
+
+    out_headers = {k: v for k, v in resp.getheaders()
+                   if k.lower() not in _HOP_BY_HOP}
+    out_headers.update(_cors_headers())
+    ctype = resp.getheader("Content-Type", "") or ""
+
+    # Streaming completions arrive as Server-Sent Events; relay line-by-line so
+    # tokens reach the client live. Non-streaming responses are read whole.
+    if "text/event-stream" in ctype:
+        def generate():
+            try:
+                for line in resp:
+                    yield line
+            finally:
+                conn.close()
+        rv = Response(stream_with_context(generate()), status=resp.status)
+        for k, v in out_headers.items():
+            rv.headers[k] = v
+        return rv
+
+    data = resp.read()
+    conn.close()
+    rv = Response(data, status=resp.status)
+    for k, v in out_headers.items():
+        rv.headers[k] = v
+    return rv
+
+
+# --------------------------------------------------------------------------- #
 # Terminal (SSH-like command console). Runs real commands on the host for the
 # authenticated owner — see services/shell_service.py for the trust model.
 # --------------------------------------------------------------------------- #
@@ -889,6 +1189,12 @@ def main():
     config.ensure_dirs()
     db.init_db()
     os.makedirs(UPLOAD_TMP, exist_ok=True)
+    # API farm: make sure a Bearer key exists, and re-attach monitors to any
+    # LLM server still alive on SLURM from before this (re)start.
+    new_key = apikey_service.ensure_default_key()
+    if new_key:
+        print(f"[host-a100] API farm key (xem ở tab API farm): {new_key}")
+    serve_service.resume_monitors()
     # ASCII-only console logs: some HPC nodes use a latin-1 locale and would
     # crash on a non-ASCII print at startup.
     if config.AUTH_ENABLED:

@@ -50,6 +50,8 @@ ENVS_DIR = os.path.join(DATA_DIR, "envs")
 JOBS_DIR = os.path.join(DATA_DIR, "jobs")
 RESULTS_DIR = os.path.join(DATA_DIR, "results")
 PROJECTS_DIR = os.path.join(DATA_DIR, "projects")
+# One subdir per API-farm server (sbatch script, slurm.out, endpoint.json, log).
+SERVERS_DIR = os.path.join(DATA_DIR, "servers")
 
 # Shared pip download/wheel cache. Living under DATA_DIR (same filesystem as the
 # envs) means a package is downloaded once and reused across every venv, which
@@ -150,5 +152,5 @@ def ensure_dirs():
     """Create all required data directories. Safe to call repeatedly."""
     print(f"[host-a100] Using data directory: {DATA_DIR}")
     for path in (DATA_DIR, MODELS_DIR, ENVS_DIR, JOBS_DIR, RESULTS_DIR,
-                 PROJECTS_DIR, PIP_CACHE_DIR):
+                 PROJECTS_DIR, PIP_CACHE_DIR, SERVERS_DIR):
         os.makedirs(path, exist_ok=True)
