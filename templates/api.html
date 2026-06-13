@@ -65,6 +65,20 @@
         </div>
 
         <div class="mb-2">
+          <label class="form-label">Engine</label>
+          <select class="form-select" name="engine" id="engineSelect">
+            <option value="llamacpp">llama-cpp-python (mặc định)</option>
+            <option value="llama-server">llama-server (native, --jinja) — tool-calling</option>
+          </select>
+          <div class="form-text">Chọn <code>llama-server (native)</code> nếu dùng
+            cho <b>Claude Code / client gọi tool</b> (ghi/sửa file): nó đọc chat
+            template trong GGUF + có bộ phân tích tool-call gốc nên Qwen3-Coder
+            sinh đúng <code>tool_calls</code>. Cần binary CUDA của ggml-org đặt ở
+            <code>host-a100-data/bin/llama-server</code>. Bản
+            <code>llama-cpp-python</code> không phân tích được tool-call của Qwen.</div>
+        </div>
+
+        <div class="mb-2">
           <label class="form-label">Loại GPU</label>
           <select class="form-select" name="gpu_model">
             <option value="">Bất kỳ GPU rảnh (cấp nhanh nhất)</option>
@@ -89,10 +103,10 @@
         </div>
 
         <div class="row g-2">
-          <div class="col-6 mb-2">
+          <div class="col-6 mb-2" id="chatFormatWrap">
             <label class="form-label">chat_format</label>
-            <input class="form-control" name="chat_format" value="chatml">
-            <div class="form-text">Qwen2.5 = <code>chatml</code>. Để trống = tự nhận từ GGUF.</div>
+            <input class="form-control" name="chat_format" id="chatFormatInput" value="chatml">
+            <div class="form-text" id="chatFormatHint">Qwen2.5 = <code>chatml</code>. Để trống = tự nhận từ GGUF.</div>
           </div>
           <div class="col-6 mb-2">
             <label class="form-label">Thời lượng tối đa</label>
@@ -114,9 +128,9 @@
 
         <div class="mb-3">
           <label class="form-label">Tham số bổ sung (tuỳ chọn)</label>
-          <input class="form-control" name="extra_args"
+          <input class="form-control" name="extra_args" id="extraArgsInput"
                  placeholder="--n_threads 8 --flash_attn ...">
-          <div class="form-text">Truyền thẳng cho <code>llama_cpp.server</code>.</div>
+          <div class="form-text" id="extraArgsHint">Truyền thẳng cho <code>llama_cpp.server</code>.</div>
         </div>
 
         <button class="btn btn-primary" {% if not envs or not models %}disabled{% endif %}>
@@ -315,6 +329,34 @@ for chunk in r:
 (function(){
   var m = document.getElementById('logModal');
   if (m && m.parentElement !== document.body) document.body.appendChild(m);
+})();
+
+// When the native llama-server engine is picked, chat_format is ignored (it
+// reads the GGUF's template via --jinja) and extra_args go to a different
+// binary with different flags — make that visible so nobody is surprised.
+(function () {
+  const sel = document.getElementById('engineSelect');
+  if (!sel) return;
+  const cfWrap = document.getElementById('chatFormatWrap');
+  const cfInput = document.getElementById('chatFormatInput');
+  const cfHint = document.getElementById('chatFormatHint');
+  const eaInput = document.getElementById('extraArgsInput');
+  const eaHint = document.getElementById('extraArgsHint');
+  function sync() {
+    const native = sel.value === 'llama-server';
+    if (cfInput) cfInput.disabled = native;
+    if (cfWrap) cfWrap.style.opacity = native ? 0.5 : 1;
+    if (cfHint) cfHint.innerHTML = native
+      ? 'Không dùng cho engine native (template lấy từ GGUF qua <code>--jinja</code>).'
+      : 'Qwen2.5 = <code>chatml</code>. Để trống = tự nhận từ GGUF.';
+    if (eaInput) eaInput.placeholder = native
+      ? '-fa --threads 8 ...' : '--n_threads 8 --flash_attn ...';
+    if (eaHint) eaHint.innerHTML = native
+      ? 'Truyền thẳng cho binary <code>llama-server</code>.'
+      : 'Truyền thẳng cho <code>llama_cpp.server</code>.';
+  }
+  sel.addEventListener('change', sync);
+  sync();
 })();
 
 const ST = {

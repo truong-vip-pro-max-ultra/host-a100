@@ -821,6 +821,7 @@ def api_server_start():
             model_id=f.get("model_id", type=int),
             env_id=f.get("env_id", type=int),
             served_name=f.get("served_name", ""),
+            engine=f.get("engine", "llamacpp").strip(),
             gpu_model=f.get("gpu_model", "").strip(),
             n_gpu_layers=f.get("n_gpu_layers", "99"),
             n_ctx=f.get("n_ctx", "8192"),
@@ -993,8 +994,17 @@ def anthropic_messages():
     host, port, served = endpoint
 
     want_stream = bool(a.get("stream"))
+    # When the client sends tools (Claude Code always does), the llama.cpp engine
+    # may emit Qwen's native <tool_call> as plain TEXT instead of OpenAI
+    # tool_calls. We can only detect+parse that by reading the WHOLE reply, so we
+    # force a non-streaming upstream call and, if the client wanted a stream,
+    # re-emit a synthesized SSE from the parsed result.
+    has_tools = bool(a.get("tools"))
+    buffer = has_tools or not want_stream
+    tool_types = anthropic_bridge.tool_param_types(a.get("tools"))
+
     oai = anthropic_bridge.to_openai_request(a, served)
-    if want_stream:
+    if not buffer:
         oai["stream"] = True
         oai.setdefault("stream_options", {"include_usage": True})
     body = json.dumps(oai).encode("utf-8")
@@ -1015,7 +1025,7 @@ def anthropic_messages():
         return _api_error(f"Server GPU trả lỗi {resp.status}: {detail}",
                           resp.status if resp.status >= 400 else 502, "server_error")
 
-    if want_stream:
+    if not buffer:
         gen = anthropic_bridge.stream(resp, conn, served, input_est)
         rv = Response(stream_with_context(gen), status=200,
                       mimetype="text/event-stream")
@@ -1029,7 +1039,16 @@ def anthropic_messages():
         oai_resp = json.loads(data)
     except ValueError:
         return _api_error("Server GPU trả về JSON không hợp lệ.", 502, "server_error")
-    rv = jsonify(anthropic_bridge.openai_response_to_anthropic(oai_resp, served))
+    message = anthropic_bridge.openai_response_to_anthropic(oai_resp, served,
+                                                            tool_types)
+    if want_stream:        # buffered to parse tool calls → replay as a stream
+        gen = anthropic_bridge.sse_from_message(message)
+        rv = Response(stream_with_context(gen), status=200,
+                      mimetype="text/event-stream")
+        for k, v in _cors_headers().items():
+            rv.headers[k] = v
+        return rv
+    rv = jsonify(message)
     for k, v in _cors_headers().items():
         rv.headers[k] = v
     return rv

@@ -53,6 +53,15 @@ PROJECTS_DIR = os.path.join(DATA_DIR, "projects")
 # One subdir per API-farm server (sbatch script, slurm.out, endpoint.json, log).
 SERVERS_DIR = os.path.join(DATA_DIR, "servers")
 
+# Native llama.cpp server binary (`llama-server` from ggml-org). Used by the
+# API-farm "llama-server (native, --jinja)" engine, which has a built-in
+# tool-call parser + reads the GGUF's embedded chat template — so models like
+# Qwen3-Coder actually emit OpenAI tool_calls (Claude Code can edit files). The
+# Python `llama_cpp.server` engine does NOT ship this binary. It must live on the
+# shared FS so compute nodes can exec it. Override with HOSTA100_LLAMA_SERVER_BIN.
+LLAMA_SERVER_BIN = os.environ.get(
+    "HOSTA100_LLAMA_SERVER_BIN", os.path.join(DATA_DIR, "bin", "llama-server"))
+
 # Shared pip download/wheel cache. Living under DATA_DIR (same filesystem as the
 # envs) means a package is downloaded once and reused across every venv, which
 # is the single biggest speedup for repeated installs on a slow shared FS.

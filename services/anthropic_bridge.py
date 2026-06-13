@@ -13,6 +13,7 @@ the same single-process app. The app.py route owns the HTTP plumbing; this
 module owns only the format translation.
 """
 import json
+import re
 import secrets
 
 # Claude Code likes to ask for very large max_tokens (tens of thousands). A
@@ -131,19 +132,130 @@ def to_openai_request(a, served_name):
 
 
 # --------------------------------------------------------------------------- #
+# Qwen3-Coder native tool-call parsing
+# --------------------------------------------------------------------------- #
+# The plain `llama_cpp.server` engine does NOT parse Qwen3-Coder's native
+# tool-call format into OpenAI `tool_calls` — the model emits it as raw text in
+# `content` and the OpenAI `tool_calls` field stays empty, so Claude Code only
+# ever sees a text block and never edits a file. We recover the calls here.
+#
+# Qwen3-Coder's format (XML-ish, possibly several blocks for parallel calls):
+#     <tool_call>
+#     <function=Write>
+#     <parameter=file_path>
+#     a.txt
+#     </parameter>
+#     <parameter=content>
+#     hello
+#     </parameter>
+#     </function>
+#     </tool_call>
+_TOOLCALL_RE = re.compile(r"<tool_call>\s*(.*?)</tool_call>", re.DOTALL)
+_FUNC_NAME_RE = re.compile(r"<function\s*=\s*([^>\n]+?)\s*>", re.DOTALL)
+_PARAM_RE = re.compile(r"<parameter\s*=\s*([^>\n]+?)\s*>(.*?)</parameter>",
+                       re.DOTALL)
+
+
+def tool_param_types(tools):
+    """Map {tool_name: {param_name: json_schema_type}} from Anthropic tools, so a
+    parsed parameter value (always raw text from the model) can be coerced to the
+    type the tool actually expects. Returns {} when there are no tools."""
+    out = {}
+    for t in tools or []:
+        name = t.get("name")
+        if not name:
+            continue
+        props = (t.get("input_schema") or {}).get("properties") or {}
+        types = {}
+        for pname, schema in props.items():
+            if isinstance(schema, dict):
+                types[pname] = schema.get("type")
+        out[name] = types
+    return out
+
+
+def _coerce_param(value, ptype):
+    """Coerce a raw <parameter> string to the schema type. A string-typed param
+    (e.g. file content that happens to look like JSON) is kept verbatim; numbers/
+    booleans/objects/arrays are parsed. Unknown type → best-effort JSON, else str."""
+    if ptype == "string":
+        return value
+    s = value.strip()
+    if s == "":
+        return value
+    if ptype in ("number", "integer"):
+        try:
+            return json.loads(s)
+        except (ValueError, TypeError):
+            return value
+    if ptype == "boolean":
+        low = s.lower()
+        return True if low == "true" else False if low == "false" else value
+    if ptype in ("object", "array"):
+        try:
+            return json.loads(s)
+        except (ValueError, TypeError):
+            return value
+    # Unknown/absent schema type: accept JSON only if it's NOT a bare string.
+    try:
+        parsed = json.loads(s)
+    except (ValueError, TypeError):
+        return value
+    return value if isinstance(parsed, str) else parsed
+
+
+def parse_qwen_tool_calls(text, types=None):
+    """Pull Qwen native <tool_call> blocks out of `text`. Returns
+    (clean_text, calls) where calls is [{"name", "input"}] and clean_text is the
+    text with the tool-call blocks removed. No blocks → (text, [])."""
+    if not text or "<tool_call>" not in text:
+        return text, []
+    types = types or {}
+    calls = []
+    for block in _TOOLCALL_RE.findall(text):
+        m = _FUNC_NAME_RE.search(block)
+        if not m:
+            continue
+        name = m.group(1).strip()
+        ptypes = types.get(name, {})
+        inp = {}
+        for pname, pval in _PARAM_RE.findall(block):
+            pname = pname.strip()
+            # Strip only the single framing newline the template adds on each
+            # side, so real leading indentation / blank lines survive.
+            if pval.startswith("\n"):
+                pval = pval[1:]
+            if pval.endswith("\n"):
+                pval = pval[:-1]
+            inp[pname] = _coerce_param(pval, ptypes.get(pname))
+        calls.append({"name": name, "input": inp})
+    clean = _TOOLCALL_RE.sub("", text).strip()
+    return clean, calls
+
+
+# --------------------------------------------------------------------------- #
 # Non-streaming response: OpenAI -> Anthropic
 # --------------------------------------------------------------------------- #
 _STOP_MAP = {"stop": "end_turn", "length": "max_tokens",
              "tool_calls": "tool_use", "content_filter": "end_turn"}
 
 
-def openai_response_to_anthropic(o, model):
+def openai_response_to_anthropic(o, model, types=None):
     choice = (o.get("choices") or [{}])[0]
     msg = choice.get("message", {}) or {}
     blocks = []
-    if msg.get("content"):
-        blocks.append({"type": "text", "text": msg["content"]})
-    for tc in msg.get("tool_calls") or []:
+    native_calls = msg.get("tool_calls") or []
+    text = msg.get("content") or ""
+
+    # Engine didn't surface tool_calls but the model wrote Qwen's native
+    # <tool_call> as text → recover them so Claude Code sees real tool_use.
+    synthesized = []
+    if not native_calls and "<tool_call>" in text:
+        text, synthesized = parse_qwen_tool_calls(text, types)
+
+    if text:
+        blocks.append({"type": "text", "text": text})
+    for tc in native_calls:
         fn = tc.get("function", {}) or {}
         try:
             inp = json.loads(fn.get("arguments") or "{}")
@@ -151,8 +263,16 @@ def openai_response_to_anthropic(o, model):
             inp = {}
         blocks.append({"type": "tool_use", "id": tc.get("id") or _id("toolu"),
                        "name": fn.get("name"), "input": inp})
+    for c in synthesized:
+        blocks.append({"type": "tool_use", "id": _id("toolu"),
+                       "name": c["name"], "input": c["input"]})
     if not blocks:
         blocks.append({"type": "text", "text": ""})
+
+    if synthesized:
+        stop_reason = "tool_use"
+    else:
+        stop_reason = _STOP_MAP.get(choice.get("finish_reason"), "end_turn")
 
     usage = o.get("usage", {}) or {}
     return {
@@ -161,7 +281,7 @@ def openai_response_to_anthropic(o, model):
         "role": "assistant",
         "model": model,
         "content": blocks,
-        "stop_reason": _STOP_MAP.get(choice.get("finish_reason"), "end_turn"),
+        "stop_reason": stop_reason,
         "stop_sequence": None,
         "usage": {"input_tokens": usage.get("prompt_tokens", 0),
                   "output_tokens": usage.get("completion_tokens", 0)},
@@ -301,6 +421,57 @@ def stream(resp, conn, model, input_tokens):
             conn.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+def sse_from_message(message):
+    """Replay a COMPLETE Anthropic message dict (the output of
+    openai_response_to_anthropic) as the Anthropic SSE event sequence.
+
+    Used when the client asked for stream=true but we had to read the whole
+    upstream reply first to parse Qwen's text tool-calls — we still hand the
+    client a well-formed stream (message_start → per-block events → message_stop),
+    just not token-by-token. For an agentic client, a correct tool_use block
+    matters far more than live tokens.
+    """
+    usage = message.get("usage") or {}
+    start_msg = {"id": message.get("id") or _id("msg"), "type": "message",
+                 "role": "assistant", "model": message.get("model"),
+                 "content": [], "stop_reason": None, "stop_sequence": None,
+                 "usage": {"input_tokens": usage.get("input_tokens", 0),
+                           "output_tokens": 0}}
+    yield _sse("message_start", {"type": "message_start", "message": start_msg})
+    yield _sse("ping", {"type": "ping"})
+
+    for i, blk in enumerate(message.get("content") or []):
+        if blk.get("type") == "tool_use":
+            yield _sse("content_block_start",
+                       {"type": "content_block_start", "index": i,
+                        "content_block": {"type": "tool_use",
+                                          "id": blk.get("id") or _id("toolu"),
+                                          "name": blk.get("name") or "",
+                                          "input": {}}})
+            partial = json.dumps(blk.get("input") or {}, ensure_ascii=False)
+            yield _sse("content_block_delta",
+                       {"type": "content_block_delta", "index": i,
+                        "delta": {"type": "input_json_delta",
+                                  "partial_json": partial}})
+        else:
+            yield _sse("content_block_start",
+                       {"type": "content_block_start", "index": i,
+                        "content_block": {"type": "text", "text": ""}})
+            yield _sse("content_block_delta",
+                       {"type": "content_block_delta", "index": i,
+                        "delta": {"type": "text_delta",
+                                  "text": blk.get("text", "")}})
+        yield _sse("content_block_stop",
+                   {"type": "content_block_stop", "index": i})
+
+    yield _sse("message_delta",
+               {"type": "message_delta",
+                "delta": {"stop_reason": message.get("stop_reason") or "end_turn",
+                          "stop_sequence": None},
+                "usage": {"output_tokens": usage.get("output_tokens", 0)}})
+    yield _sse("message_stop", {"type": "message_stop"})
 
 
 # --------------------------------------------------------------------------- #

@@ -140,12 +140,28 @@ def _resolve_gguf(model):
                      "llama.cpp cần model định dạng GGUF.")
 
 
+_ENGINES = ("llamacpp", "llama-server")
+
+
 def start_server(name, model_id, env_id, served_name="", gpu_model="",
                  n_gpu_layers=99, n_ctx=8192, chat_format="", extra_args="",
-                 time_limit="", auto_resubmit=True):
+                 time_limit="", auto_resubmit=True, engine="llamacpp"):
     """Validate, create the DB row + server dir, and start the run-loop thread.
     Returns the new server_id. Raises ValueError on bad input.
     """
+    engine = (engine or "llamacpp").strip()
+    if engine not in _ENGINES:
+        raise ValueError("Engine không hợp lệ.")
+    # Fail fast (before creating the row/thread) if the native engine is picked
+    # but its binary isn't on the shared FS yet — clearer than a server that
+    # errors only once SLURM grants it a GPU.
+    if engine == "llama-server" and not os.path.isfile(config.LLAMA_SERVER_BIN):
+        raise ValueError(
+            f"Engine 'llama-server (native)' cần binary tại "
+            f"{config.LLAMA_SERVER_BIN} — tải bản CUDA của ggml-org/llama.cpp "
+            "về đường dẫn đó (hoặc đặt biến môi trường "
+            "HOSTA100_LLAMA_SERVER_BIN). Hiện chưa có.")
+
     env = env_service.get_env(env_id)
     if not env:
         raise ValueError("Môi trường đã chọn không tồn tại.")
@@ -184,9 +200,9 @@ def start_server(name, model_id, env_id, served_name="", gpu_model="",
         "INSERT INTO servers (name, served_name, model_id, env_id, engine, "
         "status, gpu_model, n_gpu_layers, n_ctx, chat_format, extra_args, "
         "time_limit, auto_resubmit, created_at) "
-        "VALUES (?,?,?,?, 'llamacpp', 'queued', ?,?,?,?,?,?,?,?)",
-        (name, served_name, model_id, env_id, gpu_model, n_gpu_layers, n_ctx,
-         chat_format, extra_args, time_limit, 1 if auto_resubmit else 0,
+        "VALUES (?,?,?,?, ?, 'queued', ?,?,?,?,?,?,?,?)",
+        (name, served_name, model_id, env_id, engine, gpu_model, n_gpu_layers,
+         n_ctx, chat_format, extra_args, time_limit, 1 if auto_resubmit else 0,
          db.now()),
         commit=True,
     )
@@ -201,9 +217,16 @@ def start_server(name, model_id, env_id, served_name="", gpu_model="",
 
 
 def _build_cmd(server):
-    """Rebuild the llama.cpp server command from a server DB row. Used on the
-    first submit AND on every auto-resubmit / restart-resume, so the source of
-    truth is the row, not a value captured once in memory."""
+    """Rebuild the server command from a server DB row. Used on the first submit
+    AND on every auto-resubmit / restart-resume, so the source of truth is the
+    row, not a value captured once in memory.
+
+    Returns (py, cmd, extra_lib_dirs). `py` is the env's interpreter (the batch
+    script uses it to pick a free port and to locate the env's nvidia CUDA
+    wheels). `extra_lib_dirs` is prepended to LD_LIBRARY_PATH — the native
+    llama-server binary dlopen's its sibling .so files (libllama/libggml/cudart)
+    from its own directory, so that directory must be on the path.
+    """
     env = env_service.get_env(server["env_id"])
     if not env:
         raise ValueError("Môi trường của server không còn tồn tại.")
@@ -214,17 +237,41 @@ def _build_cmd(server):
     if not model:
         raise ValueError("Mô hình của server không còn tồn tại.")
     gguf = _resolve_gguf(model)
+    n_gpu_layers = str(server["n_gpu_layers"] or 99)
+    n_ctx = str(server["n_ctx"] or 8192)
+
+    if (server.get("engine") or "llamacpp") == "llama-server":
+        binpath = config.LLAMA_SERVER_BIN
+        if not os.path.isfile(binpath):
+            raise ValueError(
+                f"Không tìm thấy binary llama-server tại {binpath}. Tải bản "
+                "CUDA của ggml-org/llama.cpp về đó (hoặc đặt "
+                "HOSTA100_LLAMA_SERVER_BIN).")
+        # Native ggml-org server: --jinja makes it use the GGUF's embedded chat
+        # template + its built-in tool-call parser (Qwen3-Coder → real
+        # tool_calls). Flag names differ from the Python server (-ngl/-c).
+        cmd = [binpath,
+               "--model", gguf,
+               "--alias", server["served_name"],
+               "--host", "0.0.0.0",
+               "-ngl", n_gpu_layers,
+               "-c", n_ctx,
+               "--jinja"]
+        if server.get("extra_args"):
+            cmd += shlex.split(server["extra_args"])
+        return py, cmd, [os.path.dirname(os.path.abspath(binpath))]
+
     cmd = [py, "-m", "llama_cpp.server",
            "--model", gguf,
            "--model_alias", server["served_name"],
            "--host", "0.0.0.0",
-           "--n_gpu_layers", str(server["n_gpu_layers"] or 99),
-           "--n_ctx", str(server["n_ctx"] or 8192)]
+           "--n_gpu_layers", n_gpu_layers,
+           "--n_ctx", n_ctx]
     if server.get("chat_format"):
         cmd += ["--chat_format", server["chat_format"]]
     if server.get("extra_args"):
         cmd += shlex.split(server["extra_args"])
-    return py, cmd
+    return py, cmd, []
 
 
 def _append_log(server_dir, text):
@@ -256,15 +303,15 @@ def _cuda_lib_dirs(py):
     return [d.strip() for d in out.splitlines() if d.strip()]
 
 
-def _write_batch_script(server_dir, py, cmd):
+def _write_batch_script(server_dir, py, cmd, extra_lib_dirs=()):
     """The run.sh that sbatch executes on the compute node: make the env's bundled
-    CUDA libs findable, pick a free port, advertise <node>:<port> in
-    endpoint.json, then exec the llama.cpp server."""
+    CUDA libs (and any engine-specific lib dirs) findable, pick a free port,
+    advertise <node>:<port> in endpoint.json, then exec the server."""
     script = os.path.join(server_dir, "run.sh")
     endpoint = os.path.join(server_dir, _ENDPOINT_FILE)
     quoted = " ".join(shlex.quote(c) for c in cmd)
     ld_line = ""
-    cuda_dirs = _cuda_lib_dirs(py)
+    cuda_dirs = list(extra_lib_dirs) + _cuda_lib_dirs(py)
     if cuda_dirs:
         joined = shlex.quote(":".join(cuda_dirs))
         ld_line = (f"export LD_LIBRARY_PATH={joined}"
@@ -344,12 +391,12 @@ def _run_loop(server_id, existing_slurm_id=None):
                 slurm_id = existing_slurm_id
             else:
                 try:
-                    py, cmd = _build_cmd(server)
+                    py, cmd, lib_dirs = _build_cmd(server)
                 except ValueError as exc:
                     _set_status(server_id, "error")
                     _append_log(server_dir, f"\n{exc}\n")
                     return
-                slurm_id = _submit_once(server_id, server_dir, py, cmd,
+                slurm_id = _submit_once(server_id, server_dir, py, cmd, lib_dirs,
                                         server["gpu_model"], server["time_limit"])
                 if not slurm_id:
                     _set_status(server_id, "error")
@@ -390,7 +437,7 @@ def _run_loop(server_id, existing_slurm_id=None):
             _monitors.discard(server_id)
 
 
-def _submit_once(server_id, server_dir, py, cmd, gpu_model, time_limit):
+def _submit_once(server_id, server_dir, py, cmd, lib_dirs, gpu_model, time_limit):
     """Write the batch script and sbatch it. Returns the SLURM job id, or None on
     failure (the caller marks the server errored)."""
     slurm_out = os.path.join(server_dir, "slurm.out")
@@ -401,7 +448,7 @@ def _submit_once(server_id, server_dir, py, cmd, gpu_model, time_limit):
         pass
     _set_status(server_id, "queued")
 
-    script = _write_batch_script(server_dir, py, cmd)
+    script = _write_batch_script(server_dir, py, cmd, lib_dirs)
     submit = ([job_service._SBATCH, "--parsable"]
               + _sbatch_flags(server_id, server_dir, slurm_out, gpu_model,
                               time_limit)
