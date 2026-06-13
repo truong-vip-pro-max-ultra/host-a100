@@ -15,6 +15,7 @@ module owns only the format translation.
 import json
 import re
 import secrets
+import time
 
 # Claude Code likes to ask for very large max_tokens (tens of thousands). This
 # clamps only the *generation* budget (OUTPUT tokens) for one turn — it is NOT
@@ -534,7 +535,15 @@ def sse_from_message(message):
                            "output_tokens": 0}}
     yield _sse("message_start", {"type": "message_start", "message": start_msg})
     yield _sse("ping", {"type": "ping"})
+    for ev in _message_body_events(message):
+        yield ev
 
+
+def _message_body_events(message):
+    """The Anthropic SSE events AFTER message_start/ping: the indexed content
+    blocks, then message_delta + message_stop. Shared by sse_from_message and
+    buffered_stream (which sends its own message_start up front)."""
+    usage = message.get("usage") or {}
     for i, blk in enumerate(message.get("content") or []):
         if blk.get("type") == "tool_use":
             yield _sse("content_block_start",
@@ -571,6 +580,93 @@ def sse_from_message(message):
                           "stop_sequence": None},
                 "usage": {"output_tokens": usage.get("output_tokens", 0)}})
     yield _sse("message_stop", {"type": "message_stop"})
+
+
+# Heartbeat cadence while buffering a tool-bearing reply. Claude Code's request
+# rides a Cloudflare tunnel with a ~120s read timeout (Error 524): if no bytes
+# reach the client for that long, the tunnel kills the connection. A long file
+# write can generate for minutes, so we emit a `ping` at least this often.
+_PING_INTERVAL = 15  # seconds
+
+
+def buffered_stream(resp, conn, model, input_tokens, types=None):
+    """Client wants a stream AND sent tools, so we must read the WHOLE upstream
+    reply to parse Qwen's text `<tool_call>` before we can emit correct tool_use
+    blocks (we can't forward text live — it might turn out to be a tool call).
+
+    Reading silently can take well over 120s on a big file write, which trips the
+    Cloudflare tunnel's read timeout → Error 524. So instead of a blocking
+    `resp.read()`, we stream the upstream and: (1) flush `message_start` + a ping
+    immediately so bytes start flowing at t=0, (2) emit a `ping` at least every
+    `_PING_INTERVAL`s while accumulating, keeping the tunnel alive; then once the
+    reply is complete we parse it and replay the real blocks. `resp` must be a
+    STREAMING OpenAI response (stream=true). Closes `conn` when exhausted."""
+    start_msg = {"id": _id("msg"), "type": "message", "role": "assistant",
+                 "model": model, "content": [], "stop_reason": None,
+                 "stop_sequence": None,
+                 "usage": {"input_tokens": input_tokens, "output_tokens": 0}}
+    yield _sse("message_start", {"type": "message_start", "message": start_msg})
+    yield _sse("ping", {"type": "ping"})
+
+    content_parts = []
+    tool_calls = {}          # index -> {"id", "name", "args": [fragment, ...]}
+    finish_reason = None
+    usage = {}
+    last_ping = time.monotonic()
+    try:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                obj = json.loads(payload)
+            except ValueError:
+                continue
+            choice = (obj.get("choices") or [{}])[0]
+            delta = choice.get("delta") or {}
+            piece = delta.get("content")
+            if piece:
+                content_parts.append(piece)
+            for tc in delta.get("tool_calls") or []:
+                slot = tool_calls.setdefault(tc.get("index", 0),
+                                             {"id": None, "name": None, "args": []})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["name"] = fn["name"]
+                if fn.get("arguments"):
+                    slot["args"].append(fn["arguments"])
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+            if obj.get("usage"):
+                usage = obj["usage"]
+            now = time.monotonic()
+            if now - last_ping >= _PING_INTERVAL:
+                last_ping = now
+                yield _sse("ping", {"type": "ping"})
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    msg = {"role": "assistant", "content": "".join(content_parts) or None}
+    if tool_calls:
+        msg["tool_calls"] = [
+            {"id": slot["id"], "type": "function",
+             "function": {"name": slot["name"],
+                          "arguments": "".join(slot["args"])}}
+            for _, slot in sorted(tool_calls.items())
+        ]
+    oai_resp = {"id": start_msg["id"], "usage": usage,
+                "choices": [{"message": msg, "finish_reason": finish_reason}]}
+    message = openai_response_to_anthropic(oai_resp, model, types)
+    for ev in _message_body_events(message):
+        yield ev
 
 
 # --------------------------------------------------------------------------- #

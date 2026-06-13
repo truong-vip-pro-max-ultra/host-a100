@@ -996,15 +996,19 @@ def anthropic_messages():
     want_stream = bool(a.get("stream"))
     # When the client sends tools (Claude Code always does), the llama.cpp engine
     # may emit Qwen's native <tool_call> as plain TEXT instead of OpenAI
-    # tool_calls. We can only detect+parse that by reading the WHOLE reply, so we
-    # force a non-streaming upstream call and, if the client wanted a stream,
-    # re-emit a synthesized SSE from the parsed result.
+    # tool_calls. We can only detect+parse that by reading the WHOLE reply, so a
+    # tool-bearing request can't be forwarded token-by-token. We still STREAM the
+    # upstream though (whenever the client wants a stream) so the bridge can emit
+    # heartbeat pings while it buffers — a blocking read would go silent for the
+    # whole (possibly multi-minute) generation and trip the Cloudflare tunnel's
+    # ~120s read timeout (Error 524). Only a non-streaming CLIENT gets a blocking
+    # read + JSON reply.
     has_tools = bool(a.get("tools"))
     buffer = has_tools or not want_stream
     tool_types = anthropic_bridge.tool_param_types(a.get("tools"))
 
     oai = anthropic_bridge.to_openai_request(a, served)
-    if not buffer:
+    if want_stream:
         oai["stream"] = True
         oai.setdefault("stream_options", {"include_usage": True})
     body = json.dumps(oai).encode("utf-8")
@@ -1025,14 +1029,21 @@ def anthropic_messages():
         return _api_error(f"Server GPU trả lỗi {resp.status}: {detail}",
                           resp.status if resp.status >= 400 else 502, "server_error")
 
-    if not buffer:
-        gen = anthropic_bridge.stream(resp, conn, served, input_est)
+    if want_stream:
+        # Live token stream when there are no tools; otherwise buffer the reply
+        # to parse tool calls but emit heartbeat pings so the tunnel stays alive.
+        if buffer:
+            gen = anthropic_bridge.buffered_stream(resp, conn, served, input_est,
+                                                   tool_types)
+        else:
+            gen = anthropic_bridge.stream(resp, conn, served, input_est)
         rv = Response(stream_with_context(gen), status=200,
                       mimetype="text/event-stream")
         for k, v in _cors_headers().items():
             rv.headers[k] = v
         return rv
 
+    # Non-streaming client → blocking read + one JSON reply (upstream non-stream).
     data = resp.read()
     conn.close()
     try:
@@ -1041,13 +1052,6 @@ def anthropic_messages():
         return _api_error("Server GPU trả về JSON không hợp lệ.", 502, "server_error")
     message = anthropic_bridge.openai_response_to_anthropic(oai_resp, served,
                                                             tool_types)
-    if want_stream:        # buffered to parse tool calls → replay as a stream
-        gen = anthropic_bridge.sse_from_message(message)
-        rv = Response(stream_with_context(gen), status=200,
-                      mimetype="text/event-stream")
-        for k, v in _cors_headers().items():
-            rv.headers[k] = v
-        return rv
     rv = jsonify(message)
     for k, v in _cors_headers().items():
         rv.headers[k] = v
