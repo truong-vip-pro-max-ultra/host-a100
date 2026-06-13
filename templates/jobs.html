@@ -271,7 +271,15 @@ function pollJob() {
     })
     .catch(() => { if (watching === id) setTimeout(pollJob, 1500); });
 }
-{% for j in jobs %}{% if j.status in ['running','queued'] %}watch({{ j.id }});{% endif %}{% endfor %}
+// Auto-watch on load: live-follow any running/queued job; if there are none,
+// open the most recent job (list is newest-first) so a FINISHED job's result
+// files load automatically — no need to click the row to reveal the downloads.
+const JOBS = [{% for j in jobs %}{id:{{ j.id }},status:'{{ j.status }}'}{% if not loop.last %},{% endif %}{% endfor %}];
+(function initWatch(){
+  const active = JOBS.filter(j => j.status === 'running' || j.status === 'queued');
+  if (active.length) { active.forEach(j => watch(j.id)); }
+  else if (JOBS.length) { watch(JOBS[0].id); }
+})();
 
 // When a job row is AJAX-deleted, stop watching it so we don't keep polling a
 // job that no longer exists (the global delete handler fires this event).
