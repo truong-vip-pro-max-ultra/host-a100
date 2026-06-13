@@ -20,10 +20,12 @@ import secrets
 # clamps only the *generation* budget (OUTPUT tokens) for one turn — it is NOT
 # the context window (that's the server's n_ctx, input+output). The cap exists so
 # a huge requested max_tokens can't, alone, overflow a small-n_ctx server. Our
-# live server runs n_ctx=32768, so 16384 lets a single reply write a large file
-# while still leaving ~16k for the input prompt+history. Raise toward n_ctx if
-# you bump n_ctx; lower it if a server has a small context window.
-_MAX_TOKENS_CEILING = 16384
+# live server runs n_ctx=32768, so 24576 lets a single reply write a fairly large
+# file in one turn while still leaving ~8k for the input prompt+history. Raise
+# toward n_ctx if you bump n_ctx (L40/L40S 48GB can take 64k easily); lower it if
+# a server has a small context window. Bumped 16384→24576 on 2026-06-14 because
+# large file writes were truncating mid-<tool_call> → "Error writing file".
+_MAX_TOKENS_CEILING = 24576
 
 # When we buffer a reply and replay it as a synthesized SSE (sse_from_message),
 # emit the text in slices this many CHARACTERS wide instead of one huge delta —
@@ -224,8 +226,14 @@ def to_openai_request(a, served_name):
 # into the visible text.
 _TOOLCALL_RE = re.compile(r"<tool_call>\s*(.*?)(?:</tool_call>|\Z)", re.DOTALL)
 _FUNC_NAME_RE = re.compile(r"<function\s*=\s*([^>\n]+?)\s*>", re.DOTALL)
-_PARAM_RE = re.compile(r"<parameter\s*=\s*([^>\n]+?)\s*>(.*?)</parameter>",
-                       re.DOTALL)
+# Close a <parameter> on its own </parameter>, OR on the start of the next
+# <parameter>/</function>, OR at end-of-string. The last two let us still recover
+# a param whose closing tag was lost because generation was TRUNCATED mid-content
+# (hit the output-token ceiling while writing a big file) or the model simply
+# forgot to close it. Non-greedy, so a complete param still closes on its own tag.
+_PARAM_RE = re.compile(
+    r"<parameter\s*=\s*([^>\n]+?)\s*>(.*?)(?:</parameter>|(?=<parameter\b)|(?=</function\b)|\Z)",
+    re.DOTALL)
 # Stray framing tags left over after block removal (e.g. an orphan </tool_call>).
 _ORPHAN_TAG_RE = re.compile(r"</?(?:tool_call|function|parameter)\b[^>]*>")
 
@@ -327,6 +335,15 @@ def openai_response_to_anthropic(o, model, types=None):
     synthesized = []
     if not native_calls and "tool_call" in text:
         text, synthesized = parse_qwen_tool_calls(text, types)
+
+    # A tool call recovered from a TRUNCATED reply (model ran into the output
+    # ceiling mid-<parameter=content>) is incomplete — emitting it would make
+    # Claude Code write a corrupt/partial file ("Error writing file" loop). Drop
+    # it and report max_tokens instead, so the client knows the turn was cut and
+    # continues rather than running a broken Write.
+    truncated = choice.get("finish_reason") == "length"
+    if truncated and synthesized:
+        synthesized = []
 
     if text:
         blocks.append({"type": "text", "text": text})
