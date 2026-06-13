@@ -13,13 +13,16 @@
   .chat-scroll{ flex:1; overflow-y:auto; padding:6px 2px; }
   .chat-inner{ max-width:840px; margin:0 auto; }
 
-  .msg{ display:flex; gap:12px; margin:18px 0; }
-  .msg .av{ width:34px; height:34px; border-radius:10px; flex-shrink:0; display:grid;
-    place-items:center; color:#fff; font-size:1rem; box-shadow:0 4px 10px rgba(15,23,42,.12); }
-  .msg-user .av{ background:linear-gradient(135deg,#0ea5e9,#3b82f6); }
-  .msg-assistant .av{ background:linear-gradient(135deg,#6366f1,#8b5cf6); }
-  .msg .bubble{ flex:1; min-width:0; padding:2px 2px; line-height:1.6; font-size:.95rem; }
-  .msg .who{ font-weight:700; font-size:.82rem; color:var(--muted); margin-bottom:2px; }
+  /* ChatGPT-style: user bubble on the RIGHT, assistant full-width on the LEFT. */
+  .msg{ display:flex; margin:14px 0; }
+  .msg-user{ justify-content:flex-end; }
+  .msg-user .bubble{ max-width:80%; background:linear-gradient(135deg,#6366f1,#8b5cf6);
+    color:#fff; padding:10px 15px; border-radius:18px 18px 5px 18px;
+    white-space:pre-wrap; word-wrap:break-word; overflow-wrap:anywhere;
+    line-height:1.55; font-size:.95rem; box-shadow:0 4px 12px rgba(99,102,241,.25); }
+  .msg-assistant{ justify-content:flex-start; }
+  .msg-assistant .bubble{ max-width:100%; min-width:0; line-height:1.6; font-size:.95rem;
+    padding:2px 0; }
 
   /* Rendered markdown */
   .bubble p{ margin:.5em 0; }
@@ -153,13 +156,11 @@ function bubbleFor(role) {
   emptyEl.style.display = 'none';
   const wrap = document.createElement('div');
   wrap.className = 'msg msg-' + role;
-  const isUser = role === 'user';
-  wrap.innerHTML =
-    '<div class="av"><i class="bi ' + (isUser ? 'bi-person-fill' : 'bi-robot') + '"></i></div>' +
-    '<div style="flex:1;min-width:0"><div class="who">' + (isUser ? 'Bạn' : 'Trợ lý') +
-    '</div><div class="bubble"></div></div>';
+  const inner = document.createElement('div');
+  inner.className = 'bubble';
+  wrap.appendChild(inner);
   messagesEl.appendChild(wrap);
-  return wrap.querySelector('.bubble');
+  return inner;
 }
 
 function scrollDown() { scrollEl.scrollTop = scrollEl.scrollHeight; }
@@ -193,9 +194,9 @@ async function send() {
   const model = modelSel.value;
   if (!model) { toast('Chưa có server sẵn sàng.', 'danger'); return; }
 
+  inputEl.value = ''; autosize();        // clear immediately, before any IME re-fill
   addUserMessage(text);
   history.push({ role: 'user', content: text });
-  inputEl.value = ''; autosize();
   save();
 
   const bubble = bubbleFor('assistant');
@@ -287,7 +288,14 @@ function newChat() {
 sendBtn.addEventListener('click', () => { if (busy) { if (aborter) aborter.abort(); } else { send(); } });
 inputEl.addEventListener('input', autosize);
 inputEl.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!busy) send(); }
+  // Ignore the Enter that COMMITS a Vietnamese IME composition (isComposing /
+  // keyCode 229). Otherwise we'd send mid-compose and the IME re-inserts its
+  // buffered text into the box right after we cleared it (the "text chưa clear
+  // hết" bug). Only a clean Enter (no IME, no Shift) sends.
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+    e.preventDefault();
+    if (!busy) send();
+  }
 });
 document.getElementById('newChat').addEventListener('click', newChat);
 
