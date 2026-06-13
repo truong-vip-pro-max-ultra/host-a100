@@ -236,15 +236,42 @@ def _append_log(server_dir, text):
         pass
 
 
+def _cuda_lib_dirs(py):
+    """nvidia-*-cu12 wheel lib dirs inside the env (libcudart / libcublas / …).
+
+    The prebuilt CUDA build of llama.cpp dlopen's libcudart.so.12 etc. at load
+    time; on an HPC compute node those aren't on the default library path. If the
+    user pip-installed the matching `nvidia-*-cu12` runtime wheels into the env,
+    this finds them so the batch script can put them on LD_LIBRARY_PATH — no
+    `module load cuda` needed (libcuda.so.1, the driver, is already on GPU nodes).
+    Returns [] when no such wheels are present (e.g. a CPU-only build)."""
+    code = ("import sysconfig, glob, os;"
+            "p = sysconfig.get_paths()['purelib'];"
+            "print(chr(10).join(glob.glob(os.path.join(p, 'nvidia', '*', 'lib'))))")
+    try:
+        out = subprocess.run([py, "-c", code], stdout=subprocess.PIPE,
+                             text=True, timeout=30).stdout
+    except Exception:  # noqa: BLE001
+        return []
+    return [d.strip() for d in out.splitlines() if d.strip()]
+
+
 def _write_batch_script(server_dir, py, cmd):
-    """The run.sh that sbatch executes on the compute node: pick a free port,
-    advertise <node>:<port> in endpoint.json, then exec the llama.cpp server."""
+    """The run.sh that sbatch executes on the compute node: make the env's bundled
+    CUDA libs findable, pick a free port, advertise <node>:<port> in
+    endpoint.json, then exec the llama.cpp server."""
     script = os.path.join(server_dir, "run.sh")
     endpoint = os.path.join(server_dir, _ENDPOINT_FILE)
     quoted = " ".join(shlex.quote(c) for c in cmd)
+    ld_line = ""
+    cuda_dirs = _cuda_lib_dirs(py)
+    if cuda_dirs:
+        joined = shlex.quote(":".join(cuda_dirs))
+        ld_line = (f"export LD_LIBRARY_PATH={joined}"
+                   f'"${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"\n')
     body = f"""#!/bin/bash
 set -e
-PORT=$({shlex.quote(py)} -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));p=s.getsockname()[1];s.close();print(p)')
+{ld_line}PORT=$({shlex.quote(py)} -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));p=s.getsockname()[1];s.close();print(p)')
 HOST=${{SLURMD_NODENAME:-$(hostname -s)}}
 cat > {shlex.quote(endpoint)} <<EOF
 {{"host":"$HOST","port":$PORT}}
