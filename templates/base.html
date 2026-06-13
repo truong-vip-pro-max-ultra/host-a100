@@ -197,11 +197,16 @@
     @media (max-width: 991px){
       .sidebar{ transform:translateX(-100%); }
       body.nav-open .sidebar{ transform:translateX(0); }
-      .content{ margin-left:0; padding:18px; }
+      .content{ margin-left:0; padding:18px; overflow-x:hidden; }
       .hamburger{ display:inline-flex; }
       .scrim{ display:none; position:fixed; inset:0; background:rgba(2,6,23,.5);
         z-index:1035; }
       body.nav-open .scrim{ display:block; }
+      /* mobile: nothing should push past the viewport edge. Wide tables get a
+         horizontal scroll of their own; long words/URLs wrap instead of bleed. */
+      .table-responsive{ -webkit-overflow-scrolling:touch; }
+      .card-body{ overflow-wrap:anywhere; }
+      pre, code{ overflow-wrap:anywhere; }
     }
   </style>
   {% block head %}{% endblock %}

@@ -19,7 +19,7 @@
     <strong>API key mới (chỉ hiện một lần — sao chép ngay):</strong>
     <div class="d-flex gap-2 mt-1">
       <input class="form-control form-control-sm" id="newKey" readonly value="{{ new_key }}">
-      <button class="btn btn-sm btn-primary" onclick="copyVal('newKey')"><i class="bi bi-clipboard"></i></button>
+      <button class="btn btn-sm btn-primary flex-shrink-0" onclick="copyVal('newKey')"><i class="bi bi-clipboard"></i></button>
     </div>
   </div>
 </div>
@@ -131,6 +131,7 @@
     <div class="card mt-3"><div class="card-body">
       <h5 class="card-title"><i class="bi bi-key"></i> API keys</h5>
       <p class="small text-muted mb-2">Client gửi <code>Authorization: Bearer &lt;key&gt;</code>.</p>
+      <div class="table-responsive">
       <table class="table table-sm align-middle mb-2">
         <tbody>
         {% for k in keys %}
@@ -150,6 +151,7 @@
         {% endfor %}
         </tbody>
       </table>
+      </div>
       <form method="post" action="{{ url_for('api_key_create') }}" class="d-flex gap-2">
         <input class="form-control form-control-sm" name="label" placeholder="nhãn (vd: laptop)">
         <button class="btn btn-sm btn-primary text-nowrap"><i class="bi bi-plus-lg"></i> Tạo key</button>
@@ -164,6 +166,7 @@
         <h5 class="card-title mb-0"><i class="bi bi-hdd-stack"></i> Server đang chạy</h5>
         <span class="small text-muted">tự cập nhật</span>
       </div>
+      <div class="table-responsive">
       <table class="table table-sm align-middle mb-0">
         <thead><tr><th>#</th><th>model id</th><th>Mô hình</th><th>Endpoint</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody id="srvBody">
@@ -196,6 +199,7 @@
         {% endfor %}
         </tbody>
       </table>
+      </div>
     </div></div>
 
     <!-- Usage -->
@@ -204,18 +208,74 @@
       <label class="form-label">Base URL (qua Cloudflare tunnel)</label>
       <div class="d-flex gap-2 mb-2">
         <input class="form-control form-control-sm" id="baseUrl" readonly value="{{ base_url }}">
-        <button class="btn btn-sm btn-primary" onclick="copyVal('baseUrl')"><i class="bi bi-clipboard"></i></button>
+        <button class="btn btn-sm btn-primary flex-shrink-0" onclick="copyVal('baseUrl')"><i class="bi bi-clipboard"></i></button>
       </div>
-      <p class="small text-muted mb-1">OpenAI-compatible: <code>/v1/chat/completions</code>,
+      <p class="small text-muted mb-2">OpenAI-compatible: <code>/v1/chat/completions</code>,
         <code>/v1/models</code> (Cline / Continue / aider / OpenAI SDK) —
         <strong>và</strong> Anthropic <code>/v1/messages</code> nên
         <strong>Claude Code</strong> trỏ thẳng vào được.</p>
 
-      <p class="small fw-semibold mb-1"><i class="bi bi-terminal"></i> Claude Code (Anthropic):</p>
-      <pre class="logbox mb-2" style="max-height:170px">export ANTHROPIC_BASE_URL="{{ base_url[:-3] }}"   # bỏ /v1 ở cuối
+      <!-- ── Claude Code: trỏ vào server này ───────────────────────── -->
+      <p class="small fw-semibold mb-1"><i class="bi bi-terminal"></i>
+        Claude Code → trỏ vào server này:</p>
+
+      <div class="small fw-semibold text-muted mb-1">macOS / Linux (bash · zsh):</div>
+      <pre class="logbox mb-2" style="max-height:160px">export ANTHROPIC_BASE_URL="{{ base_url[:-3] }}"   # bỏ /v1 ở cuối
 export ANTHROPIC_AUTH_TOKEN="&lt;API key ở trên&gt;"
 export ANTHROPIC_MODEL="qwen3-coder-30b"          # = model id của server
 claude</pre>
+
+      <div class="small fw-semibold text-muted mb-1">Windows — PowerShell:</div>
+      <pre class="logbox mb-2" style="max-height:150px">$env:ANTHROPIC_BASE_URL  = "{{ base_url[:-3] }}"   # bỏ /v1 ở cuối
+$env:ANTHROPIC_AUTH_TOKEN = "&lt;API key ở trên&gt;"
+$env:ANTHROPIC_MODEL      = "qwen3-coder-30b"
+claude</pre>
+
+      <div class="small fw-semibold text-muted mb-1">Windows — CMD (cmd.exe):</div>
+      <pre class="logbox mb-2" style="max-height:150px">set ANTHROPIC_BASE_URL={{ base_url[:-3] }}
+set ANTHROPIC_AUTH_TOKEN=&lt;API key ở trên&gt;
+set ANTHROPIC_MODEL=qwen3-coder-30b
+claude</pre>
+
+      <details class="small mb-2">
+        <summary class="text-muted" style="cursor:pointer">Đặt vĩnh viễn (khỏi gõ lại mỗi lần mở terminal)</summary>
+        <div class="mt-1">Thêm khối <code>env</code> vào file cấu hình của Claude Code
+          — <code>~/.claude/settings.json</code> (Windows:
+          <code>C:\Users\&lt;tên&gt;\.claude\settings.json</code>):
+        <pre class="logbox mb-1" style="max-height:170px">{
+  "env": {
+    "ANTHROPIC_BASE_URL": "{{ base_url[:-3] }}",
+    "ANTHROPIC_AUTH_TOKEN": "&lt;API key ở trên&gt;",
+    "ANTHROPIC_MODEL": "qwen3-coder-30b"
+  }
+}</pre>
+        Cách này áp dụng cho mọi terminal, không phụ thuộc OS.</div>
+      </details>
+
+      <!-- ── Khôi phục Claude Code về mặc định (Anthropic) ─────────── -->
+      <p class="small fw-semibold mb-1"><i class="bi bi-arrow-counterclockwise"></i>
+        Khôi phục Claude Code về mặc định (Anthropic):</p>
+      <p class="small text-muted mb-1">Xoá 3 biến ở trên để Claude Code quay về dùng
+        <code>api.anthropic.com</code> với tài khoản của bạn.</p>
+
+      <div class="small fw-semibold text-muted mb-1">macOS / Linux:</div>
+      <pre class="logbox mb-2" style="max-height:120px">unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL
+claude            # rồi /login để đăng nhập lại tài khoản Anthropic</pre>
+
+      <div class="small fw-semibold text-muted mb-1">Windows — PowerShell:</div>
+      <pre class="logbox mb-2" style="max-height:130px">Remove-Item Env:ANTHROPIC_BASE_URL,Env:ANTHROPIC_AUTH_TOKEN,Env:ANTHROPIC_MODEL
+claude            # rồi /login</pre>
+
+      <div class="small fw-semibold text-muted mb-1">Windows — CMD:</div>
+      <pre class="logbox mb-2" style="max-height:130px">set ANTHROPIC_BASE_URL=
+set ANTHROPIC_AUTH_TOKEN=
+set ANTHROPIC_MODEL=
+claude            :: rồi /login</pre>
+
+      <p class="small text-muted mb-3">Nếu đã đặt vĩnh viễn: xoá khối <code>env</code>
+        trong <code>~/.claude/settings.json</code> (hoặc xoá luôn file).
+        Lệnh <code>set …=</code> / <code>unset</code> chỉ tác dụng trong cửa sổ
+        terminal hiện tại — mở cửa sổ mới là đã sạch.</p>
 
       <p class="small fw-semibold mb-1"><i class="bi bi-box"></i> OpenAI SDK / Cline / aider:</p>
       <pre class="logbox mb-0" style="max-height:200px">from openai import OpenAI
