@@ -785,9 +785,15 @@ def job_result(job_id):
 # only the /v1/* proxy below is opened to Bearer-key clients.
 # --------------------------------------------------------------------------- #
 def _api_context():
-    # The public base URL is however the browser reached us — through the
-    # Cloudflare tunnel that's the external https host. Strip the trailing slash.
-    base = request.host_url.rstrip("/") + "/v1"
+    # Build the PUBLIC base URL the way an external client must use it. We sit
+    # behind the Cloudflare tunnel, which terminates HTTPS and calls the app over
+    # plain http — so request.host_url/request.scheme say "http" even though the
+    # public URL is https. Honour the tunnel's X-Forwarded-Proto/Host headers so
+    # the copy-paste base_url shows https (a http base_url triggers a 301 that
+    # downgrades the client's POST to GET upstream -> 405).
+    proto = request.headers.get("X-Forwarded-Proto", request.scheme)
+    host = request.headers.get("X-Forwarded-Host", request.host)
+    base = f"{proto}://{host}/v1"
     return dict(
         servers=serve_service.list_servers(),
         models=model_service.list_models(),
