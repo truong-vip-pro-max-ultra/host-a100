@@ -373,6 +373,15 @@ def open_session(ws, on_compute=False, use_gpu=False, gpu_model=""):
 
     stop = threading.Event()
 
+    # All ws.send() calls go through this lock: the reader thread and the
+    # heartbeat thread can both send, and simple-websocket's send is not
+    # thread-safe, so concurrent sends could interleave/corrupt frames.
+    send_lock = threading.Lock()
+
+    def safe_send(data):
+        with send_lock:
+            ws.send(data)
+
     def reader():
         """PTY -> browser. Ends on EOF (shell exit) or a closed socket."""
         try:
@@ -382,7 +391,7 @@ def open_session(ws, on_compute=False, use_gpu=False, gpu_model=""):
                     data = os.read(master, 65536)
                     if not data:
                         break
-                    ws.send(data)
+                    safe_send(data)
         except Exception:  # noqa: BLE001 - socket/pty gone
             pass
         finally:
@@ -392,8 +401,24 @@ def open_session(ws, on_compute=False, use_gpu=False, gpu_model=""):
             except Exception:  # noqa: BLE001
                 pass
 
+    def heartbeat():
+        """Keep the WebSocket from idling out. A long, quiet foreground command
+        (e.g. unzipping a multi-GB model) produces no PTY output for minutes; the
+        Cloudflare tunnel then closes the idle connection, the socket dies, and
+        the cleanup below kills the shell's whole process group — leaving the
+        command half-finished. Sending an empty frame every 20s keeps traffic on
+        the wire so the tunnel never idles the connection out. Empty frames write
+        nothing to xterm.js, so the terminal is unaffected."""
+        while not stop.wait(20):
+            try:
+                safe_send(b"")
+            except Exception:  # noqa: BLE001 - socket gone; reader will stop us
+                break
+
     t = threading.Thread(target=reader, daemon=True)
     t.start()
+    hb = threading.Thread(target=heartbeat, daemon=True)
+    hb.start()
     try:
         while not stop.is_set():
             msg = ws.receive(timeout=0.5)
@@ -431,4 +456,5 @@ def open_session(ws, on_compute=False, use_gpu=False, gpu_model=""):
         except OSError:
             pass
         t.join(timeout=1)
+        hb.join(timeout=1)
         _cleanup_rcfile()
