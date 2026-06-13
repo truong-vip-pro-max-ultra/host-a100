@@ -25,6 +25,11 @@ import secrets
 # you bump n_ctx; lower it if a server has a small context window.
 _MAX_TOKENS_CEILING = 16384
 
+# When we buffer a reply and replay it as a synthesized SSE (sse_from_message),
+# emit the text in slices this many CHARACTERS wide instead of one huge delta —
+# a single giant text_delta makes Claude Code's TUI duplicate/mis-paint the text.
+_TEXT_CHUNK = 24
+
 
 def _id(prefix):
     return f"{prefix}_{secrets.token_hex(12)}"
@@ -184,8 +189,13 @@ def to_openai_request(a, served_name):
         o["temperature"] = a["temperature"]
     if a.get("top_p") is not None:
         o["top_p"] = a["top_p"]
-    if a.get("stop_sequences"):
-        o["stop"] = a["stop_sequences"]
+    # Always stop at the chatml turn boundary. The chatml engine *should* stop on
+    # <|im_end|>, but if it ever fails to, the model rolls into a fresh
+    # <|im_start|>assistant turn and repeats its whole answer — pin it here.
+    stop = list(a.get("stop_sequences") or [])
+    if "<|im_end|>" not in stop:
+        stop.append("<|im_end|>")
+    o["stop"] = stop
     return o
 
 
@@ -517,10 +527,16 @@ def sse_from_message(message):
             yield _sse("content_block_start",
                        {"type": "content_block_start", "index": i,
                         "content_block": {"type": "text", "text": ""}})
-            yield _sse("content_block_delta",
-                       {"type": "content_block_delta", "index": i,
-                        "delta": {"type": "text_delta",
-                                  "text": blk.get("text", "")}})
+            # Emit the text in small slices, not one giant text_delta. The real
+            # Anthropic stream sends many tiny deltas; Claude Code's TUI renderer
+            # mis-paints (duplicates) a single huge delta. Slicing by code point
+            # (not bytes) keeps UTF-8 / Vietnamese diacritics intact.
+            text = blk.get("text", "")
+            for j in range(0, len(text), _TEXT_CHUNK):
+                yield _sse("content_block_delta",
+                           {"type": "content_block_delta", "index": i,
+                            "delta": {"type": "text_delta",
+                                      "text": text[j:j + _TEXT_CHUNK]}})
         yield _sse("content_block_stop",
                    {"type": "content_block_stop", "index": i})
 
