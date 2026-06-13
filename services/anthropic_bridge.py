@@ -19,13 +19,14 @@ import secrets
 # Claude Code likes to ask for very large max_tokens (tens of thousands). This
 # clamps only the *generation* budget (OUTPUT tokens) for one turn — it is NOT
 # the context window (that's the server's n_ctx, input+output). The cap exists so
-# a huge requested max_tokens can't, alone, overflow a small-n_ctx server. Our
-# live server runs n_ctx=32768, so 24576 lets a single reply write a fairly large
-# file in one turn while still leaving ~8k for the input prompt+history. Raise
-# toward n_ctx if you bump n_ctx (L40/L40S 48GB can take 64k easily); lower it if
-# a server has a small context window. Bumped 16384→24576 on 2026-06-14 because
-# large file writes were truncating mid-<tool_call> → "Error writing file".
-_MAX_TOKENS_CEILING = 24576
+# a huge requested max_tokens can't, alone, overflow a small-n_ctx server. The
+# live server runs n_ctx=65536 (L40S 48GB; Qwen3-Coder's tiny GQA KV cache makes
+# 64k ≈ 6 GiB), so 32768 lets a single reply write a large file in one turn while
+# still leaving ~32k for the input prompt+history. Raise toward n_ctx if you bump
+# n_ctx; lower it if a server has a small context window. History: 8192 → 16384 →
+# 24576 → 32768 (2026-06-14, paired with the n_ctx 32768→65536 bump) because large
+# file writes were truncating mid-<tool_call> → "Error writing file".
+_MAX_TOKENS_CEILING = 32768
 
 # When we buffer a reply and replay it as a synthesized SSE (sse_from_message),
 # emit the text in slices this many CHARACTERS wide instead of one huge delta —
