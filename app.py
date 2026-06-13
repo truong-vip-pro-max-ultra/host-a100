@@ -267,8 +267,10 @@ def upload_init():
     filename = data.get("filename", "")
     try:
         total_chunks = int(data.get("total_chunks", 0))
+        chunk_size = int(data.get("chunk_size", 0))
+        size = int(data.get("size", 0))
     except (TypeError, ValueError):
-        total_chunks = 0
+        total_chunks = chunk_size = size = 0
 
     try:
         model_name = file_utils.validate_name(model_name)
@@ -288,18 +290,22 @@ def upload_init():
     if model_service.name_taken(model_name):
         return jsonify({"ok": False,
                         "error": f"Mô hình '{model_name}' đã tồn tại."}), 400
-    if total_chunks < 1:
-        return jsonify({"ok": False, "error": "Số mảnh không hợp lệ."}), 400
+    if total_chunks < 1 or chunk_size < 1 or size < 1:
+        return jsonify({"ok": False, "error": "Tham số mảnh không hợp lệ."}), 400
 
     upload_id = uuid.uuid4().hex
     os.makedirs(UPLOAD_TMP, exist_ok=True)
     temp_path = os.path.join(UPLOAD_TMP, f"{upload_id}_{filename}")
-    open(temp_path, "wb").close()   # start the append from an empty file
+    open(temp_path, "wb").close()   # create the target; chunks seek+write by offset
     with _chunk_sessions_lock:
         _chunk_sessions[upload_id] = {
             "model_name": model_name, "filename": filename,
             "temp_path": temp_path, "total_chunks": total_chunks,
-            "received": 0,
+            "chunk_size": chunk_size, "size": size,
+            # Set of fully-written chunk indices. Idempotent: re-sending a chunk
+            # overwrites the same byte range, so a retried/duplicated piece can
+            # never corrupt the file or double-count.
+            "received": set(),
         }
     progress.init("upload", upload_id, step="receiving")
     return jsonify({"ok": True, "upload_id": upload_id})
@@ -313,32 +319,41 @@ def upload_chunk(upload_id):
         return jsonify({"ok": False, "error": "Phiên tải lên không tồn tại."}), 404
 
     index = request.args.get("index", type=int)
-    if index is None:
-        return jsonify({"ok": False, "error": "Thiếu chỉ số mảnh."}), 400
-    # Sequential append: the client sends chunks in order, so anything out of
-    # order means a lost/duplicated piece — reject it rather than corrupt the
-    # file. The client can re-send starting from `expected`.
-    if index != sess["received"]:
-        return jsonify({"ok": False, "error": "Mảnh sai thứ tự.",
-                        "expected": sess["received"]}), 409
+    total = sess["total_chunks"]
+    if index is None or index < 0 or index >= total:
+        return jsonify({"ok": False, "error": "Chỉ số mảnh không hợp lệ."}), 400
 
-    # Read the raw request body (octet-stream, no multipart overhead) straight to
-    # disk in small reads so a chunk never sits whole in memory.
+    # Each chunk owns a fixed byte range [offset, offset+expected_len). We seek
+    # to its offset and write there, so chunks may arrive in ANY order and a
+    # retried chunk simply overwrites the same bytes — no corruption, no need
+    # for strict sequencing. The raw octet-stream body is read in small reads so
+    # a chunk never sits whole in memory.
+    chunk_size = sess["chunk_size"]
+    offset = index * chunk_size
+    expected_len = min(chunk_size, sess["size"] - offset)
+    written = 0
     try:
-        with open(sess["temp_path"], "ab") as out:
+        with open(sess["temp_path"], "r+b") as out:
+            out.seek(offset)
             while True:
                 buf = request.stream.read(_CHUNK)
                 if not buf:
                     break
                 out.write(buf)
+                written += len(buf)
     except Exception as exc:  # noqa: BLE001
-        progress.update("upload", upload_id, status="error",
-                        step="receive failed", append_log=f"ERROR: {exc}\n")
         return jsonify({"ok": False, "error": f"Ghi mảnh thất bại: {exc}"}), 500
 
+    # Truncated body (tunnel dropped mid-transfer): do NOT mark received, so the
+    # client's retry re-sends the full chunk over the same range.
+    if written != expected_len:
+        return jsonify({"ok": False,
+                        "error": f"Mảnh {index} thiếu byte "
+                                 f"({written}/{expected_len}), sẽ gửi lại."}), 422
+
     with _chunk_sessions_lock:
-        sess["received"] += 1
-        received, total = sess["received"], sess["total_chunks"]
+        sess["received"].add(index)
+        received = len(sess["received"])
     # Cap at 99 here; the server-side finalize drives 0->100 afterwards.
     pct = min(99, int(received * 100 / total)) if total else 0
     progress.update("upload", upload_id, progress=pct,
@@ -352,17 +367,28 @@ def upload_finalize(upload_id):
         sess = _chunk_sessions.pop(upload_id, None)
     if not sess:
         return jsonify({"ok": False, "error": "Phiên tải lên không tồn tại."}), 404
-    if sess["received"] != sess["total_chunks"]:
+    got, total = len(sess["received"]), sess["total_chunks"]
+    if got != total:
         with _chunk_sessions_lock:    # keep the session so the client can resume
             _chunk_sessions[upload_id] = sess
+        # Tell the client exactly which indices are still missing so it resends
+        # only those, instead of restarting the whole upload.
+        missing = sorted(set(range(total)) - sess["received"])
         return jsonify({
             "ok": False,
-            "error": f"Thiếu mảnh ({sess['received']}/{sess['total_chunks']}).",
-            "expected": sess["received"],
+            "error": f"Thiếu mảnh ({got}/{total}).",
+            "missing": missing[:50],
         }), 400
 
     received = os.path.getsize(sess["temp_path"]) \
         if os.path.exists(sess["temp_path"]) else 0
+    if received != sess["size"]:
+        with _chunk_sessions_lock:
+            _chunk_sessions[upload_id] = sess
+        return jsonify({
+            "ok": False,
+            "error": f"Kích thước sai ({received}/{sess['size']} byte).",
+        }), 400
     progress.update("upload", upload_id, progress=0, step="received",
                     append_log=f"Đã nhận {file_utils.human_size(received)}.\n")
     model_service.start_upload(upload_id, sess["model_name"],
