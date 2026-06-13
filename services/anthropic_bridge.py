@@ -16,11 +16,14 @@ import json
 import re
 import secrets
 
-# Claude Code likes to ask for very large max_tokens (tens of thousands). A
-# llama.cpp server with a modest n_ctx would reject/clip that awkwardly, so we
-# clamp the *generation* budget to something sane for a chat/coding turn. Raise
-# this if you run a server with a big context window.
-_MAX_TOKENS_CEILING = 8192
+# Claude Code likes to ask for very large max_tokens (tens of thousands). This
+# clamps only the *generation* budget (OUTPUT tokens) for one turn — it is NOT
+# the context window (that's the server's n_ctx, input+output). The cap exists so
+# a huge requested max_tokens can't, alone, overflow a small-n_ctx server. Our
+# live server runs n_ctx=32768, so 16384 lets a single reply write a large file
+# while still leaving ~16k for the input prompt+history. Raise toward n_ctx if
+# you bump n_ctx; lower it if a server has a small context window.
+_MAX_TOKENS_CEILING = 16384
 
 
 def _id(prefix):
@@ -34,16 +37,105 @@ def _sse(event, obj):
 
 
 # --------------------------------------------------------------------------- #
+# Qwen3-Coder native tool-instruction prompt (request side)
+# --------------------------------------------------------------------------- #
+# CRITICAL: the plain `llama_cpp.server --chat_format chatml` engine does NOT
+# inject the OpenAI `tools` array into the prompt. So if we just forward `tools`
+# upstream, Qwen3-Coder never learns the tools exist and improvises pseudo-code
+# (`write_file(...)`, `echo > a.txt`) instead of its native <tool_call> format —
+# and parse_qwen_tool_calls() finds nothing to recover. The native `llama-server`
+# binary's --jinja would render the GGUF's own tool template, but this cluster
+# can't build it (no CUDA toolkit). So we reproduce Qwen3-Coder's OWN tool
+# template here, in pure Python, and fold it into the system prompt. The model
+# then emits real <tool_call> blocks, which the response side already parses.
+#
+# We also render prior assistant tool_use / user tool_result turns BACK into
+# Qwen's text format (<tool_call>… / <tool_response>…), because the chatml engine
+# ignores the OpenAI `tool_calls`/`tool` role too — the conversation history must
+# live entirely in `content`.
+_TOOL_FORMAT_INSTRUCTIONS = (
+    "\n\nIf you choose to call a function ONLY reply in the following format with "
+    "NO suffix:\n\n"
+    "<tool_call>\n<function=example_function_name>\n"
+    "<parameter=example_parameter_1>\nvalue_1\n</parameter>\n"
+    "<parameter=example_parameter_2>\nThis is the value for the second parameter\n"
+    "that can span\nmultiple lines\n</parameter>\n"
+    "</function>\n</tool_call>\n\n"
+    "<IMPORTANT>\nReminder:\n"
+    "- Function calls MUST follow the specified format: an inner "
+    "<function=...></function> block must be nested within <tool_call></tool_call> "
+    "XML tags\n"
+    "- Required parameters MUST be specified\n"
+    "- You may provide optional reasoning before the tool call in plain text\n"
+    "- If there is no function call available, answer the question like normal with "
+    "your current knowledge and do not tell the user about function calls\n"
+    "</IMPORTANT>"
+)
+
+
+def _qwen_tool_param(pname, schema):
+    schema = schema if isinstance(schema, dict) else {}
+    out = [f"\n<parameter>\n<name>{pname}</name>"]
+    if schema.get("type"):
+        out.append(f"\n<type>{schema['type']}</type>")
+    if schema.get("description"):
+        out.append(f"\n<description>{schema['description']}</description>")
+    out.append("\n</parameter>")
+    return "".join(out)
+
+
+def qwen_tools_prompt(tools):
+    """Render Anthropic `tools` into Qwen3-Coder's native tool-instruction block,
+    or "" when there are no tools. Faithful to the model's own chat template so
+    Qwen reliably emits <tool_call> blocks."""
+    funcs = []
+    for t in tools or []:
+        name = t.get("name")
+        if not name:
+            continue
+        props = (t.get("input_schema") or {}).get("properties") or {}
+        params = "".join(_qwen_tool_param(p, s) for p, s in props.items())
+        funcs.append(f"\n<function>\n<name>{name}</name>"
+                     f"\n<description>{t.get('description', '') or ''}</description>"
+                     f"\n<parameters>{params}\n</parameters>\n</function>")
+    if not funcs:
+        return ""
+    return ("# Tools\n\nYou have access to the following functions:\n\n<tools>"
+            + "".join(funcs) + "\n</tools>" + _TOOL_FORMAT_INSTRUCTIONS)
+
+
+def _render_tool_call_text(name, inp):
+    """A single assistant tool call as Qwen native <tool_call> text (for history)."""
+    out = ["<tool_call>", f"<function={name}>"]
+    for k, v in (inp or {}).items():
+        if not isinstance(v, str):
+            v = json.dumps(v, ensure_ascii=False)
+        out.append(f"<parameter={k}>\n{v}\n</parameter>")
+    out.append("</function>")
+    out.append("</tool_call>")
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------- #
 # Request: Anthropic -> OpenAI
 # --------------------------------------------------------------------------- #
 def to_openai_request(a, served_name):
-    """Translate an Anthropic Messages request dict into an OpenAI chat request."""
+    """Translate an Anthropic Messages request dict into an OpenAI chat request.
+
+    Tools are injected into the system prompt in Qwen3-Coder's native format (see
+    qwen_tools_prompt) rather than sent as the OpenAI `tools` array, because the
+    chatml engine ignores that array.
+    """
     msgs = []
 
     system = a.get("system")
     if isinstance(system, list):
         system = "\n".join(b.get("text", "") for b in system
                            if isinstance(b, dict) and b.get("type") == "text")
+    system = system or ""
+    tools_prompt = qwen_tools_prompt(a.get("tools"))
+    if tools_prompt:
+        system = (system + "\n\n" + tools_prompt) if system else tools_prompt
     if system:
         msgs.append({"role": "system", "content": system})
 
@@ -54,7 +146,7 @@ def to_openai_request(a, served_name):
             msgs.append({"role": role, "content": content})
             continue
 
-        text_parts, tool_calls, tool_results = [], [], []
+        text_parts, tool_call_texts, tool_responses = [], [], []
         for blk in content or []:
             if not isinstance(blk, dict):
                 continue
@@ -62,36 +154,26 @@ def to_openai_request(a, served_name):
             if bt == "text":
                 text_parts.append(blk.get("text", ""))
             elif bt == "tool_use":                      # assistant called a tool
-                tool_calls.append({
-                    "id": blk.get("id") or _id("toolu"),
-                    "type": "function",
-                    "function": {"name": blk.get("name"),
-                                 "arguments": json.dumps(blk.get("input", {}),
-                                                         ensure_ascii=False)},
-                })
+                tool_call_texts.append(
+                    _render_tool_call_text(blk.get("name"), blk.get("input")))
             elif bt == "tool_result":                   # user returned tool output
                 tc = blk.get("content")
                 if isinstance(tc, list):
                     tc = "\n".join(x.get("text", "") for x in tc
                                    if isinstance(x, dict) and x.get("type") == "text")
-                tool_results.append({
-                    "role": "tool",
-                    "tool_call_id": blk.get("tool_use_id"),
-                    "content": tc if isinstance(tc, str)
-                    else json.dumps(tc, ensure_ascii=False),
-                })
+                if not isinstance(tc, str):
+                    tc = json.dumps(tc, ensure_ascii=False)
+                tool_responses.append(tc)
             # image / other blocks: skipped (text-only upstream model)
 
         if role == "assistant":
-            asst = {"role": "assistant",
-                    "content": "".join(text_parts) or None}
-            if tool_calls:
-                asst["tool_calls"] = tool_calls
-            msgs.append(asst)
+            body = "\n".join([p for p in text_parts if p] + tool_call_texts)
+            msgs.append({"role": "assistant", "content": body})
         else:                                            # user
-            if text_parts:
-                msgs.append({"role": "user", "content": "".join(text_parts)})
-            msgs.extend(tool_results)
+            pieces = [p for p in text_parts if p]
+            pieces += [f"<tool_response>\n{r}\n</tool_response>"
+                       for r in tool_responses]
+            msgs.append({"role": "user", "content": "\n".join(pieces)})
 
     o = {"model": served_name, "messages": msgs}
 
@@ -104,30 +186,6 @@ def to_openai_request(a, served_name):
         o["top_p"] = a["top_p"]
     if a.get("stop_sequences"):
         o["stop"] = a["stop_sequences"]
-
-    if a.get("tools"):
-        tools = []
-        for t in a["tools"]:
-            if not t.get("name"):
-                continue
-            tools.append({"type": "function", "function": {
-                "name": t["name"],
-                "description": t.get("description", ""),
-                "parameters": t.get("input_schema", {}),
-            }})
-        if tools:
-            o["tools"] = tools
-
-    tc = a.get("tool_choice")
-    if isinstance(tc, dict):
-        ty = tc.get("type")
-        if ty == "auto":
-            o["tool_choice"] = "auto"
-        elif ty == "any":
-            o["tool_choice"] = "required"
-        elif ty == "tool" and tc.get("name"):
-            o["tool_choice"] = {"type": "function",
-                                "function": {"name": tc["name"]}}
     return o
 
 
