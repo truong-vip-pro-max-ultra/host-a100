@@ -249,6 +249,14 @@ for chunk in r:
 
 {% block scripts %}
 <script>
+// Bootstrap appends .modal-backdrop to <body>; a modal nested inside
+// <main.content> ends up painted BEHIND it (just a gray screen, no dialog).
+// Re-parent it to <body> like the shared modals in base.html.
+(function(){
+  var m = document.getElementById('logModal');
+  if (m && m.parentElement !== document.body) document.body.appendChild(m);
+})();
+
 const ST = {
   ready:   ['pill-done',    'sẵn sàng'],
   loading: ['pill-running', 'đang nạp model'],
