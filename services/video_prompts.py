@@ -355,7 +355,7 @@ def llm_visual_prompts(texts, timeout=180, simple=False, on_log=None):
     out = _chat(
         [{"role": "system", "content": instruction},
          {"role": "user", "content": f"{len(texts)} narration lines:\n{numbered}"}],
-        max_tokens=min(1600, 90 * len(texts) + 200), timeout=timeout)
+        max_tokens=min(2400, 110 * len(texts) + 200), timeout=timeout)
     if not out:
         if on_log:
             on_log("    (LLM không phản hồi hoặc rỗng)")
@@ -416,6 +416,12 @@ def llm_visual_prompt(text, seed=-1, timeout=60):
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
+# How many scenes per LLM prompt-rewrite call. One call must comfortably fit its
+# output budget (~90 tok/scene) and stay reliable; a giant 100+-scene request
+# overruns it and the server returns empty. ~24 is a safe, fast group.
+_LLM_PROMPT_BATCH = 24
+
+
 def _stable_seed(text):
     return int(hashlib.sha256((text or "").encode()).hexdigest(), 16) % (2 ** 31)
 
@@ -443,20 +449,30 @@ def build_prompts(chunks, style_preset="cinematic", negative="", use_llm=True,
     use_llm = bool(use_llm) and llm_available()
     visuals = [""] * len(chunks)
     if use_llm:
-        # ONE batched request (the LLM server is --parallel 1, so N parallel calls
-        # just queue → slow). Falls back to rule-based+translate on any failure.
-        _log(f"  ➤ viết prompt ảnh bằng LLM API farm (1 lượt, {len(chunks)} cảnh)…")
-        t0 = time.time()
+        # Rewrite in SUB-BATCHES (the server is --parallel 1, and one giant request
+        # for 100+ scenes overruns the output budget → empty reply). Each group is
+        # one call; a failed/partial group just leaves those scenes "" → translated.
         simple = (style_preset in _STYLE_FIRST_PRESETS
                   or style_preset in _DRAWING_PRESETS)
-        got = llm_visual_prompts(chunks, simple=simple, on_log=on_log)
-        if got:
-            visuals = got
-            _log(f"  ✓ LLM xong {sum(1 for v in visuals if v)}/{len(chunks)} cảnh "
-                 f"({time.time() - t0:.1f}s).")
+        ngrp = (len(chunks) + _LLM_PROMPT_BATCH - 1) // _LLM_PROMPT_BATCH
+        _log(f"  ➤ viết prompt ảnh bằng LLM API farm ({len(chunks)} cảnh, "
+             f"{ngrp} lượt × ≤{_LLM_PROMPT_BATCH})…")
+        t0 = time.time()
+        for s in range(0, len(chunks), _LLM_PROMPT_BATCH):
+            sub = chunks[s:s + _LLM_PROMPT_BATCH]
+            res = llm_visual_prompts(sub, simple=simple, on_log=on_log)
+            for k, v in enumerate(res or []):
+                visuals[s + k] = v
+            n_ok = sum(1 for v in visuals[s:s + len(sub)] if v)
+            _log(f"    cảnh {s + 1}–{s + len(sub)}: LLM viết {n_ok}/{len(sub)} "
+                 "(còn lại tự dịch)")
+        total_ok = sum(1 for v in visuals if v)
+        if total_ok:
+            _log(f"  ✓ LLM xong {total_ok}/{len(chunks)} cảnh "
+                 f"({time.time() - t0:.1f}s); phần còn lại dùng prompt theo luật + dịch.")
         else:
             _log(f"  ! LLM không trả về hợp lệ ({time.time() - t0:.1f}s) — "
-                 "dùng prompt theo luật + dịch.")
+                 "dùng prompt theo luật + dịch cho tất cả.")
     else:
         _log("  ! Không có LLM (API farm chưa chạy) — dùng prompt theo luật + dịch.")
 
