@@ -173,8 +173,8 @@
         <span class="small text-muted">tự cập nhật</span>
       </div>
       <div class="table-responsive">
-      <table class="table table-sm align-middle mb-0">
-        <thead><tr><th>#</th><th>Tên</th><th style="width:34%">Tiến trình</th><th>Trạng thái</th><th></th></tr></thead>
+      <table class="table table-sm align-middle mb-0" style="min-width:560px">
+        <thead><tr><th>#</th><th>Tên</th><th style="min-width:150px">Tiến trình</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody id="jobBody">
         {% for j in jobs %}
           <tr id="vjob-{{ j.id }}">
@@ -233,7 +233,7 @@
       {% endif %}
 
       <div class="table-responsive">
-      <table class="table table-sm align-middle mb-2">
+      <table class="table table-sm align-middle mb-2" style="min-width:560px">
         <thead><tr><th>#</th><th>Tên</th><th>Môi trường</th><th>Endpoint</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody id="srvBody">
         {% for s in servers %}
