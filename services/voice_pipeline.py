@@ -523,7 +523,11 @@ def _run_job(job_id, text, params):
             else:
                 _job_log(job_dir, f"  ! đoạn {i + 1} lỗi: {(r or {}).get('error', 'no audio')}")
         if not voiced:
-            raise RuntimeError("Không tổng hợp được đoạn nào — kiểm tra log server GPU.")
+            raise RuntimeError(
+                "Không tổng hợp được đoạn nào (server trả audio rỗng). Thường do "
+                "nội dung không đọc được — ví dụ lặp ký tự vô nghĩa như “Yyyy "
+                "Yyyy…”; hãy thử văn bản có nghĩa. Nếu văn bản bình thường mà vẫn "
+                "lỗi thì xem log server GPU.")
 
         _set_job(job_id, stage="Đang ghép & xử lý audio (ffmpeg)…", progress=80)
         out_mp3 = os.path.join(job_dir, f"{_slug(job['name'] or 'narration')}.mp3")
