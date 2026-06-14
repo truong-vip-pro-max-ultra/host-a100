@@ -994,17 +994,13 @@ def anthropic_messages():
     host, port, served = endpoint
 
     want_stream = bool(a.get("stream"))
-    # When the client sends tools (Claude Code always does), the llama.cpp engine
-    # may emit Qwen's native <tool_call> as plain TEXT instead of OpenAI
-    # tool_calls. We can only detect+parse that by reading the WHOLE reply, so a
-    # tool-bearing request can't be forwarded token-by-token. We still STREAM the
-    # upstream though (whenever the client wants a stream) so the bridge can emit
-    # heartbeat pings while it buffers — a blocking read would go silent for the
-    # whole (possibly multi-minute) generation and trip the Cloudflare tunnel's
-    # ~120s read timeout (Error 524). Only a non-streaming CLIENT gets a blocking
-    # read + JSON reply.
-    has_tools = bool(a.get("tools"))
-    buffer = has_tools or not want_stream
+    # The native llama-server engine parses Qwen's tool calls into real OpenAI
+    # `tool_calls` (forwarded as proper deltas in stream mode), so a tool-bearing
+    # request streams token-by-token like any other — no need to buffer the whole
+    # reply to recover text `<tool_call>` blocks. Tokens flow live, so the tunnel
+    # never goes silent (no Error 524). Only a non-streaming CLIENT gets a
+    # blocking read + JSON reply. tool_types is still used by the non-stream path
+    # as a fallback for a server that emits Qwen tool calls as text.
     tool_types = anthropic_bridge.tool_param_types(a.get("tools"))
 
     oai = anthropic_bridge.to_openai_request(a, served)
@@ -1030,13 +1026,8 @@ def anthropic_messages():
                           resp.status if resp.status >= 400 else 502, "server_error")
 
     if want_stream:
-        # Live token stream when there are no tools; otherwise buffer the reply
-        # to parse tool calls but emit heartbeat pings so the tunnel stays alive.
-        if buffer:
-            gen = anthropic_bridge.buffered_stream(resp, conn, served, input_est,
-                                                   tool_types)
-        else:
-            gen = anthropic_bridge.stream(resp, conn, served, input_est)
+        # Live token stream; native tool_calls arrive as input_json_delta deltas.
+        gen = anthropic_bridge.stream(resp, conn, served, input_est)
         rv = Response(stream_with_context(gen), status=200,
                       mimetype="text/event-stream")
         for k, v in _cors_headers().items():

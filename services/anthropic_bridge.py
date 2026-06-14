@@ -136,12 +136,60 @@ def _render_tool_call_text(name, inp):
 # --------------------------------------------------------------------------- #
 # Request: Anthropic -> OpenAI
 # --------------------------------------------------------------------------- #
-def to_openai_request(a, served_name):
-    """Translate an Anthropic Messages request dict into an OpenAI chat request.
+def _anthropic_tools_to_openai(tools):
+    """Anthropic `tools` -> OpenAI function tools. The native llama-server
+    (`--jinja`) renders these into the GGUF's own tool template and parses the
+    model's calls back into real `tool_calls`, so we forward them as the OpenAI
+    `tools` array instead of injecting a hand-rolled prompt (qwen_tools_prompt)."""
+    out = []
+    for t in tools or []:
+        name = t.get("name")
+        if not name:
+            continue
+        out.append({"type": "function", "function": {
+            "name": name,
+            "description": t.get("description", "") or "",
+            "parameters": t.get("input_schema") or {"type": "object",
+                                                     "properties": {}}}})
+    return out
 
-    Tools are injected into the system prompt in Qwen3-Coder's native format (see
-    qwen_tools_prompt) rather than sent as the OpenAI `tools` array, because the
-    chatml engine ignores that array.
+
+def _map_tool_choice(tc):
+    """Anthropic tool_choice -> OpenAI tool_choice. None when unset/unknown."""
+    if not isinstance(tc, dict):
+        return None
+    t = tc.get("type")
+    if t == "auto":
+        return "auto"
+    if t == "any":
+        return "required"
+    if t == "none":
+        return "none"
+    if t == "tool" and tc.get("name"):
+        return {"type": "function", "function": {"name": tc["name"]}}
+    return None
+
+
+def _tool_result_text(blk):
+    """Flatten an Anthropic tool_result block's content into a string."""
+    tc = blk.get("content")
+    if isinstance(tc, list):
+        tc = "\n".join(x.get("text", "") for x in tc
+                       if isinstance(x, dict) and x.get("type") == "text")
+    if not isinstance(tc, str):
+        tc = json.dumps(tc, ensure_ascii=False)
+    return tc
+
+
+def to_openai_request(a, served_name):
+    """Translate an Anthropic Messages request into an OpenAI chat request for the
+    native llama-server engine.
+
+    Tools are forwarded as the OpenAI `tools` array (llama-server's `--jinja`
+    renders + parses them natively into real `tool_calls`), and tool history is
+    expressed with `tool_calls` / `tool`-role messages — NOT injected as a Qwen
+    text template or folded into `<tool_call>` text. (The old text-injection path
+    was for the chatml `llamacpp` engine, which ignored the `tools` array.)
     """
     msgs = []
 
@@ -150,9 +198,6 @@ def to_openai_request(a, served_name):
         system = "\n".join(b.get("text", "") for b in system
                            if isinstance(b, dict) and b.get("type") == "text")
     system = system or ""
-    tools_prompt = qwen_tools_prompt(a.get("tools"))
-    if tools_prompt:
-        system = (system + "\n\n" + tools_prompt) if system else tools_prompt
     if system:
         msgs.append({"role": "system", "content": system})
 
@@ -163,36 +208,51 @@ def to_openai_request(a, served_name):
             msgs.append({"role": role, "content": content})
             continue
 
-        text_parts, tool_call_texts, tool_responses = [], [], []
+        text_parts, tool_calls, tool_results = [], [], []
         for blk in content or []:
             if not isinstance(blk, dict):
                 continue
             bt = blk.get("type")
             if bt == "text":
                 text_parts.append(blk.get("text", ""))
-            elif bt == "tool_use":                      # assistant called a tool
-                tool_call_texts.append(
-                    _render_tool_call_text(blk.get("name"), blk.get("input")))
-            elif bt == "tool_result":                   # user returned tool output
-                tc = blk.get("content")
-                if isinstance(tc, list):
-                    tc = "\n".join(x.get("text", "") for x in tc
-                                   if isinstance(x, dict) and x.get("type") == "text")
-                if not isinstance(tc, str):
-                    tc = json.dumps(tc, ensure_ascii=False)
-                tool_responses.append(tc)
+            elif bt == "tool_use":                       # assistant called a tool
+                tool_calls.append({
+                    "id": blk.get("id") or _id("call"),
+                    "type": "function",
+                    "function": {
+                        "name": blk.get("name") or "",
+                        "arguments": json.dumps(blk.get("input") or {},
+                                                ensure_ascii=False)}})
+            elif bt == "tool_result":                    # user returned tool output
+                tool_results.append((blk.get("tool_use_id"),
+                                     _tool_result_text(blk)))
             # image / other blocks: skipped (text-only upstream model)
 
+        text = "\n".join(p for p in text_parts if p)
         if role == "assistant":
-            body = "\n".join([p for p in text_parts if p] + tool_call_texts)
-            msgs.append({"role": "assistant", "content": body})
+            msg = {"role": "assistant", "content": text or None}
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+            msgs.append(msg)
         else:                                            # user
-            pieces = [p for p in text_parts if p]
-            pieces += [f"<tool_response>\n{r}\n</tool_response>"
-                       for r in tool_responses]
-            msgs.append({"role": "user", "content": "\n".join(pieces)})
+            # Tool results become `tool` messages (must follow the assistant
+            # tool_calls turn); any plain user text follows as a user message.
+            for tid, c in tool_results:
+                tm = {"role": "tool", "content": c}
+                if tid:
+                    tm["tool_call_id"] = tid
+                msgs.append(tm)
+            if text:
+                msgs.append({"role": "user", "content": text})
 
     o = {"model": served_name, "messages": msgs}
+
+    tools = _anthropic_tools_to_openai(a.get("tools"))
+    if tools:
+        o["tools"] = tools
+        tc = _map_tool_choice(a.get("tool_choice"))
+        if tc is not None:
+            o["tool_choice"] = tc
 
     mt = a.get("max_tokens")
     if mt:
@@ -201,13 +261,8 @@ def to_openai_request(a, served_name):
         o["temperature"] = a["temperature"]
     if a.get("top_p") is not None:
         o["top_p"] = a["top_p"]
-    # Always stop at the chatml turn boundary. The chatml engine *should* stop on
-    # <|im_end|>, but if it ever fails to, the model rolls into a fresh
-    # <|im_start|>assistant turn and repeats its whole answer — pin it here.
-    stop = list(a.get("stop_sequences") or [])
-    if "<|im_end|>" not in stop:
-        stop.append("<|im_end|>")
-    o["stop"] = stop
+    if a.get("stop_sequences"):
+        o["stop"] = list(a["stop_sequences"])
     return o
 
 
