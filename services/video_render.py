@@ -108,7 +108,12 @@ def _ken_burns_filter(index, frames, w, h, intensity, fps):
     )
 
 
-def _render_scene_clip(scene, index, out, r, work_dir):
+def _render_scene_clip(scene, index, out, r, work_dir, sub_name=None):
+    """Render one scene's clip: still → Ken Burns + fade, and BURN that scene's
+    subtitle here (``sub_name`` = an .ass file in work_dir timed 0..dur). Burning
+    per-clip parallelises the (single-threaded) libass work across all clip
+    workers, so the final pass can stream-COPY the video instead of re-encoding
+    the whole movie just to burn subs — that was the slow 'Ghép hoàn thiện' step."""
     fps = int(r["fps"])
     dur = max(0.8, float(scene.get("duration") or 0.0))
     frames = max(1, int(round(dur * fps)))
@@ -128,7 +133,12 @@ def _render_scene_clip(scene, index, out, r, work_dir):
 
     fd = min(float(r["transition_duration"]), dur / 3.0)
     vf += (f",fade=t=in:st=0:d={fd:.3f},"
-           f"fade=t=out:st={max(0, dur - fd):.3f}:d={fd:.3f},format=yuv420p")
+           f"fade=t=out:st={max(0, dur - fd):.3f}:d={fd:.3f}")
+    # Burn this scene's subtitle (relative name + cwd=work_dir avoids the
+    # subtitles= path-escaping pitfalls). Runs inside the existing per-clip encode.
+    if sub_name:
+        vf += f",subtitles={sub_name}"
+    vf += ",format=yuv420p"
 
     args = ["-i", img, "-filter_complex", f"[0:v]{vf}[v]", "-map", "[v]",
             "-t", f"{dur:.3f}", "-r", str(fps),
@@ -266,9 +276,7 @@ def build_srt(scenes, st, out_path):
     return out_path
 
 
-def build_ass(scenes, st, width, height, out_path):
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+def _ass_header(st, width, height):
     fontsize = max(12, int(round(st["font_size"] * height / _FONT_DIVISOR)))
     bold = -1 if st["bold"] else 0
     style_line = (
@@ -276,7 +284,7 @@ def build_ass(scenes, st, width, height, out_path):
         f"{st['primary_color']},&H000000FF,{st['outline_color']},&H64000000,"
         f"{bold},0,0,0,100,100,0,0,1,{st['outline']},{st['shadow']},2,"
         f"60,60,{st['margin_v']},1")
-    header = (
+    return (
         "[Script Info]\nScriptType: v4.00+\nScaledBorderAndShadow: yes\n"
         f"WrapStyle: 0\nPlayResX: {width}\nPlayResY: {height}\n\n"
         "[V4+ Styles]\n"
@@ -287,11 +295,42 @@ def build_ass(scenes, st, width, height, out_path):
         f"{style_line}\n\n[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
         "Effect, Text\n")
-    lines = [header]
+
+
+def _ass_dialogue(start, end, cue, st):
+    text = _wrap(cue, st["max_chars_per_line"]).replace("{", "(").replace("}", ")")
+    return f"Dialogue: 0,{_fmt_ass(start)},{_fmt_ass(end)},Default,,0,0,0,,{text}\n"
+
+
+def build_ass(scenes, st, width, height, out_path):
+    """Whole-video burned subtitle track (absolute timing). Kept for callers that
+    burn in one pass; the renderer now burns per-clip via build_scene_ass."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [_ass_header(st, width, height)]
     for start, end, cue in _timed_cues(scenes, st):
-        text = _wrap(cue, st["max_chars_per_line"]).replace("{", "(").replace("}", ")")
-        lines.append(f"Dialogue: 0,{_fmt_ass(start)},{_fmt_ass(end)},"
-                     f"Default,,0,0,0,,{text}\n")
+        lines.append(_ass_dialogue(start, end, cue, st))
+    out_path.write_text("".join(lines), encoding="utf-8")
+    return out_path
+
+
+def build_scene_ass(scene, st, width, height, out_path):
+    """ASS for ONE scene, cues timed 0..dur (burned into that scene's clip).
+    Returns the path, or None if the scene has no text."""
+    text = (scene.get("text") or "").strip()
+    if not text:
+        return None
+    dur = max(0.5, float(scene.get("duration") or 0.0))
+    cues = _split_into_cues(text, st["max_chars_per_line"]) or [text]
+    total_chars = sum(len(c) for c in cues) or 1
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [_ass_header(st, width, height)]
+    t = 0.0
+    for cue in cues:
+        end = min(dur, t + max(0.8, dur * (len(cue) / total_chars)))
+        lines.append(_ass_dialogue(t, end, cue, st))
+        t = end
     out_path.write_text("".join(lines), encoding="utf-8")
     return out_path
 
@@ -322,33 +361,46 @@ def render(scenes, work_dir, out_path, render=None, subtitle=None,
     n = len(scenes)
     clip_paths = [work_dir / f"clip_{i:03d}.mp4" for i in range(n)]
 
-    # --- 1. per-scene clips (parallel) ------------------------------------- #
+    # --- 0. subtitles ------------------------------------------------------ #
+    # Build the whole-video .srt sidecar (for download) AND one per-scene .ass
+    # that each clip burns itself. Burning per-clip parallelises libass across the
+    # clip workers so the final pass can stream-COPY the video (no full re-encode).
+    srt_path = None
+    sub_names = [None] * n
+    if st.get("enabled", True):
+        _stage("Đang tạo phụ đề")
+        srt_path = build_srt(scenes, st, Path(out_path).with_suffix(".srt"))
+        for i, scene in enumerate(scenes):
+            name = f"sub_{i:03d}.ass"
+            if build_scene_ass(scene, st, r["width"], r["height"], work_dir / name):
+                sub_names[i] = name
+
+    # --- 1. per-scene clips (parallel, subtitles burned in) ---------------- #
     workers = int(r.get("clip_workers") or 0)
     if workers <= 0:
-        # Each clip's ffmpeg (zoompan + lanczos) is ~single-threaded, so on a
-        # many-core login node run as many as cores (capped) for the fastest
-        # clip phase. The final pass is one ffmpeg with -threads 0 (all cores).
+        # Each clip's ffmpeg (zoompan + lanczos + libass) is ~single-threaded, so
+        # on a many-core login node run as many clips at once as cores (capped).
         workers = min(16, max(2, os.cpu_count() or 4))
     workers = max(1, min(workers, n))
     _stage(f"Đang dựng {n} cảnh ({workers} luồng song song)")
     done = 0
     if workers == 1:
         for i, scene in enumerate(scenes):
-            _render_scene_clip(scene, i, clip_paths[i], r, work_dir)
+            _render_scene_clip(scene, i, clip_paths[i], r, work_dir, sub_names[i])
             done += 1
             if on_progress:
-                on_progress(0.05 + 0.65 * done / n)
+                on_progress(0.05 + 0.80 * done / n)
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futs = {pool.submit(_render_scene_clip, scenes[i], i, clip_paths[i],
-                                r, work_dir): i for i in range(n)}
+                                r, work_dir, sub_names[i]): i for i in range(n)}
             try:
                 for fut in as_completed(futs):
                     fut.result()
                     done += 1
                     _stage(f"Đã dựng {done}/{n} cảnh")
                     if on_progress:
-                        on_progress(0.05 + 0.65 * done / n)
+                        on_progress(0.05 + 0.80 * done / n)
             except BaseException:
                 pool.shutdown(wait=False, cancel_futures=True)
                 raise
@@ -359,19 +411,11 @@ def render(scenes, work_dir, out_path, render=None, subtitle=None,
     concat_file.write_text("".join(f"file '{c.name}'\n" for c in clip_paths),
                            encoding="utf-8")
 
-    # --- 3. subtitles ------------------------------------------------------ #
-    sub_rel = None
-    srt_path = None
-    if st.get("enabled", True):
-        _stage("Đang tạo phụ đề")
-        srt_path = build_srt(scenes, st, Path(out_path).with_suffix(".srt"))
-        ass = work_dir / "subtitles.ass"
-        build_ass(scenes, st, r["width"], r["height"], ass)
-        sub_rel = ass.name
-
-    # --- 4. final assembly ------------------------------------------------- #
-    _stage("Ghép hoàn thiện (phụ đề, nhạc, âm lượng)")
-    total_dur = sum(max(0.8, float(s.get("duration") or 0.0)) for s in scenes)
+    # --- 3. final assembly: COPY video, build audio, mux ------------------- #
+    # Video is stream-copied from the (already subtitled) clips — no re-encode of
+    # the whole movie, which was the slow "Ghép hoàn thiện" step. Only the audio is
+    # (re)built gaplessly from the raw per-scene wavs + loudnorm, then muxed.
+    _stage("Ghép hoàn thiện (ghép audio + nối video)")
     inputs = ["-f", "concat", "-safe", "0", "-fflags", "+genpts", "-i",
               concat_file.name]
     inputs += _audio_inputs(scenes, work_dir)   # inputs 1..n
@@ -379,18 +423,11 @@ def render(scenes, work_dir, out_path, render=None, subtitle=None,
 
     music = r.get("music_path") or ""
     has_music = bool(music) and Path(music).exists()
-    music_idx = None
     if has_music:
         inputs += ["-stream_loop", "-1", "-i", str(music)]
         music_idx = audio_start + n
 
-    filters = []
-    vchain = f"fps={r['fps']}"
-    if sub_rel:
-        vchain += f",subtitles={sub_rel}"
-    filters.append(f"[0:v]{vchain}[v]")
-
-    filters += _voice_concat_filters(scenes, audio_start)
+    filters = list(_voice_concat_filters(scenes, audio_start))
     if has_music:
         filters.append(f"[{music_idx}:a]volume={r['music_volume']}[mus]")
         filters.append("[voc][mus]amix=inputs=2:duration=first:normalize=0[mix]")
@@ -405,11 +442,8 @@ def render(scenes, work_dir, out_path, render=None, subtitle=None,
 
     args = [*inputs, *_FFMPEG_THREADS,
             "-filter_complex_script", filter_script.name,
-            "-map", "[v]", "-map", "[a]", "-r", str(r["fps"]),
-            "-c:v", "libx264", "-preset", r.get("final_preset", "veryfast"),
-            "-crf", str(r["crf"]),
-            "-maxrate", r["video_bitrate"], "-bufsize", "16M",
-            "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
+            "-map", "0:v", "-map", "[a]",
+            "-c:v", "copy",                      # ← no whole-video re-encode
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
             "-movflags", "+faststart", str(out_path.resolve())]
     try:
@@ -421,5 +455,4 @@ def render(scenes, work_dir, out_path, render=None, subtitle=None,
     if on_progress:
         on_progress(1.0)
     _stage("Hoàn tất")
-    _ = total_dur  # (kept for future progress parsing)
     return str(out_path), (str(srt_path) if srt_path else None)

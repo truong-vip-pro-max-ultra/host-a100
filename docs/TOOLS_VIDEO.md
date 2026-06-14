@@ -150,9 +150,14 @@ cầu viết cảnh tối giản cho các style này). Logic ở `services/video
   giọng). Mặc định = `HOSTA100_IMAGE_MAX_BATCH` / `HOSTA100_OMNI_MAX_BATCH`.
 - **TF32 + cudnn.benchmark** bật cho cả image pipe lẫn OmniVoice.
 - **ffmpeg nhanh nhất:** clip mỗi cảnh render **song song = số core** (cap 16), preset
-  `veryfast` cho cả clip trung gian lẫn pass cuối (`-threads 0`), nội dung still +
-  slow-zoom vẫn nét. Đổi qua `render={clip_preset, final_preset, clip_workers}` trong
-  `video_render.DEFAULT_RENDER` nếu muốn ưu tiên chất lượng hơn tốc độ.
+  `veryfast`, nội dung still + slow-zoom vẫn nét. Đổi qua
+  `render={clip_preset, clip_workers}` trong `video_render.DEFAULT_RENDER`.
+- **Pass cuối KHÔNG mã hoá lại video:** phụ đề được **đốt thẳng vào từng clip** (song
+  song, dùng hết core) qua `build_scene_ass` (cue 0..dur mỗi cảnh), nên "Ghép hoàn
+  thiện" chỉ **nối copy video (`-c:v copy`)** + ghép audio gapless + loudnorm + mux →
+  nhanh gần như tức thì thay vì giải mã + đốt sub + mã hoá lại cả phim (khâu này
+  trước đây nghẽn vì libass chạy ~1 luồng). Trước kia: video dài 5–10' → pass cuối
+  vài phút; giờ chỉ còn vài giây.
 
 ## Tham số / env knobs
 
