@@ -310,38 +310,53 @@ def _chat(messages, max_tokens, timeout, on_log=None):
         _diag("không có server LLM nào ready")
         return ""
     host, port, served_name = ep
-    # NOTE: no hardcoded `stop` — a model whose chat template differs from Qwen's
-    # <|im_end|> could stop at token 0 → empty content. Let the server's own
-    # template provide the stop tokens.
-    body = json.dumps({
+    base = {
         "model": served_name or "default",
         "messages": messages,
         "temperature": 0.7,
         "max_tokens": max_tokens,
         "stream": False,
-    }).encode("utf-8")
-    try:
-        conn = http.client.HTTPConnection(host, port, timeout=timeout)
-        conn.request("POST", "/v1/chat/completions", body=body,
-                     headers={"Content-Type": "application/json"})
-        resp = conn.getresponse()
-        raw = resp.read()
-        conn.close()
-    except Exception as exc:  # noqa: BLE001
-        _diag(f"kết nối {host}:{port} lỗi: {type(exc).__name__}: {exc}")
-        return ""
-    if resp.status != 200:
-        _diag(f"HTTP {resp.status} từ {host}:{port}: "
-              f"{raw.decode('utf-8', 'replace')[:200]}")
-        return ""
-    try:
-        data = json.loads(raw or b"{}")
-    except Exception as exc:  # noqa: BLE001
-        _diag(f"JSON lỗi: {exc}; body: {raw.decode('utf-8', 'replace')[:200]}")
-        return ""
-    out = _extract_content(data)
-    if not out:
-        # 200 but nothing usable — show finish_reason + a snippet so we can see why.
+        # NOTE: no hardcoded `stop` — a model whose template differs from Qwen's
+        # <|im_end|> could stop at token 0 → empty content.
+    }
+    # Qwen3.x reasons via a SEPARATE reasoning_content channel that `/no_think`
+    # alone doesn't disable; it burns the whole token budget thinking →
+    # finish_reason='length' with empty content. The native llama-server --jinja
+    # way to turn it off is the template kwarg enable_thinking=false. Try WITH it
+    # first; if an older build rejects the field (non-200), retry WITHOUT.
+    attempts = [
+        {**base, "chat_template_kwargs": {"enable_thinking": False}},
+        base,
+    ]
+    for i, payload in enumerate(attempts):
+        body = json.dumps(payload).encode("utf-8")
+        try:
+            conn = http.client.HTTPConnection(host, port, timeout=timeout)
+            conn.request("POST", "/v1/chat/completions", body=body,
+                         headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            raw = resp.read()
+            conn.close()
+        except Exception as exc:  # noqa: BLE001
+            _diag(f"kết nối {host}:{port} lỗi: {type(exc).__name__}: {exc}")
+            return ""
+        if resp.status != 200:
+            # The enable_thinking attempt may 400 on a build that doesn't know the
+            # field → fall through to the plain retry before giving up.
+            if i == 0:
+                _diag("server từ chối enable_thinking, thử lại không có field…")
+                continue
+            _diag(f"HTTP {resp.status} từ {host}:{port}: "
+                  f"{raw.decode('utf-8', 'replace')[:200]}")
+            return ""
+        try:
+            data = json.loads(raw or b"{}")
+        except Exception as exc:  # noqa: BLE001
+            _diag(f"JSON lỗi: {exc}; body: {raw.decode('utf-8', 'replace')[:200]}")
+            return ""
+        out = _extract_content(data)
+        if out:
+            return out
         fr = ""
         try:
             fr = (data.get("choices") or [{}])[0].get("finish_reason", "")
@@ -349,7 +364,8 @@ def _chat(messages, max_tokens, timeout, on_log=None):
             pass
         _diag(f"200 nhưng content rỗng (finish_reason={fr!r}); "
               f"body: {raw.decode('utf-8', 'replace')[:200]}")
-    return out
+        return out
+    return ""
 
 
 _NUMBERED_RE = re.compile(r"^\s*\[?(\d{1,3})\]?\s*[.):\-]\s*(.+?)\s*$")
@@ -411,7 +427,7 @@ def llm_visual_prompts(texts, timeout=180, simple=False, on_log=None):
     out = _chat(
         [{"role": "system", "content": instruction},
          {"role": "user", "content": f"{len(texts)} narration lines:\n{numbered}"}],
-        max_tokens=min(2400, 110 * len(texts) + 200), timeout=timeout, on_log=on_log)
+        max_tokens=min(3000, 140 * len(texts) + 400), timeout=timeout, on_log=on_log)
     if not out:
         if on_log:
             on_log("    (LLM không phản hồi hoặc rỗng)")
