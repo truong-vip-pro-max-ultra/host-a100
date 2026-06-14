@@ -28,7 +28,7 @@ import config
 from services import (anthropic_bridge, apikey_service, env_service,
                       job_service, model_service, project_service, pty_service,
                       serve_service, shell_service, storage_service as db,
-                      voice_pipeline, voice_service)
+                      video_pipeline, voice_pipeline, voice_service)
 from utils import file_utils, gpu, progress, sysinfo
 
 app = Flask(__name__)
@@ -1019,6 +1019,142 @@ def voice_jobs_bulk_delete():
     flash(f"Đã xoá {deleted} tác vụ." if deleted else "Không có tác vụ nào được xoá.",
           "success" if deleted else "warning")
     return redirect(url_for("tool_clone_voice"))
+
+
+# --------------------------------------------------------------------------- #
+# Tools → Gen video từ kịch bản. Reuses the SAME GPU server as Clone giọng nói
+# (the OmniVoice server now also serves diffusers images), so there's no
+# start-server route here — the page just shows whether a GPU server is ready and
+# links to the voice tab to start one.
+# --------------------------------------------------------------------------- #
+def _video_context():
+    ep = voice_service.resolve_endpoint()
+    return dict(
+        jobs=video_pipeline.list_jobs(),
+        profiles=voice_pipeline.list_profiles(),
+        servers=voice_service.list_servers(),
+        gpu_ready=bool(ep),
+        image_model=config.IMAGE_MODEL_ID,
+        image_max_batch=config.IMAGE_MAX_BATCH,
+        llm_ready=video_pipeline.video_prompts.llm_available(),
+        ffmpeg_ok=config.ffmpeg_available(),
+    )
+
+
+@app.route("/tools/gen-video")
+def tool_gen_video():
+    return render_template("tool_gen_video.html", **_video_context())
+
+
+@app.route("/tools/video/jobs/submit", methods=["POST"])
+def video_job_submit():
+    f = request.form
+    # Submit via fetch → JSON (no full reload, which would re-run the GPU scan).
+    wants_json = (request.headers.get("X-Requested-With") == "fetch"
+                  or "application/json" in request.headers.get("Accept", ""))
+    try:
+        job_id = video_pipeline.start_job(
+            name=f.get("name", ""),
+            script=f.get("script", ""),
+            profile_name=f.get("profile", "").strip(),
+            language=f.get("language", "vi").strip() or "vi",
+            voice_seed=f.get("voice_seed", "0"),
+            num_step=f.get("num_step", "16"),
+            style=f.get("style", "cinematic").strip() or "cinematic",
+            use_llm=f.get("use_llm") is not None,
+            width=f.get("width", "1920"),
+            height=f.get("height", "1080"),
+            fps=f.get("fps", "30"),
+            ken_burns=f.get("ken_burns") is not None,
+            image_steps=f.get("image_steps", "4"),
+            image_batch=f.get("image_batch", ""),
+            voice_batch=f.get("voice_batch", ""),
+        )
+        if wants_json:
+            return jsonify({"ok": True, "id": job_id,
+                            "name": (f.get("name", "").strip() or "video")})
+        flash("Đã bắt đầu dựng video — theo dõi tiến trình bên dưới.", "success")
+    except ValueError as exc:
+        if wants_json:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        flash(str(exc), "danger")
+    return redirect(url_for("tool_gen_video"))
+
+
+@app.route("/tools/video/jobs.json")
+def video_jobs_json():
+    out = []
+    for j in video_pipeline.list_jobs():
+        out.append({
+            "id": j["id"], "name": j["name"], "status": j["status"],
+            "progress": j["progress"], "stage": j.get("stage"),
+            "error": j.get("error"),
+            "has_mp4": bool(j.get("output_path")),
+            "has_srt": bool(j.get("srt_path")),
+        })
+    return jsonify({"jobs": out})
+
+
+def _video_job_file(job_id, kind):
+    job = video_pipeline.get_job(job_id)
+    if not job:
+        abort(404)
+    path = job.get("output_path") if kind == "mp4" else job.get("srt_path")
+    if not path or not file_utils.is_within(config.VIDEO_OUTPUTS_DIR, path) \
+            or not os.path.exists(path):
+        abort(404)
+    # MP4 inline so it can preview in a <video>; SRT as a download.
+    return send_from_directory(os.path.dirname(path), os.path.basename(path),
+                               as_attachment=(kind != "mp4"))
+
+
+@app.route("/tools/video/jobs/<int:job_id>/mp4")
+def video_job_mp4(job_id):
+    return _video_job_file(job_id, "mp4")
+
+
+@app.route("/tools/video/jobs/<int:job_id>/srt")
+def video_job_srt(job_id):
+    return _video_job_file(job_id, "srt")
+
+
+@app.route("/tools/video/jobs/<int:job_id>/log")
+def video_job_log(job_id):
+    job = video_pipeline.get_job(job_id)
+    if not job or not job.get("logs_path"):
+        return jsonify({"log": ""})
+    log_file = os.path.join(job["logs_path"], "job.log")
+    if not os.path.exists(log_file):
+        return jsonify({"log": ""})
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as fh:
+            return jsonify({"log": fh.read()[-20000:]})
+    except OSError:
+        return jsonify({"log": ""})
+
+
+@app.route("/tools/video/jobs/<int:job_id>/delete", methods=["POST"])
+def video_job_delete(job_id):
+    if video_pipeline.delete_job(job_id):
+        flash("Đã xoá tác vụ video.", "success")
+    else:
+        flash("Không tìm thấy tác vụ.", "danger")
+    return redirect(url_for("tool_gen_video"))
+
+
+@app.route("/tools/video/jobs/bulk-delete", methods=["POST"])
+def video_jobs_bulk_delete():
+    wants_json = (request.headers.get("X-Requested-With") == "fetch"
+                  or "application/json" in request.headers.get("Accept", ""))
+    if request.form.get("all") == "1":
+        deleted = video_pipeline.bulk_delete(all_jobs=True)
+    else:
+        deleted = video_pipeline.bulk_delete(ids=request.form.getlist("ids"))
+    if wants_json:
+        return jsonify({"ok": True, "deleted": deleted})
+    flash(f"Đã xoá {deleted} tác vụ." if deleted else "Không có tác vụ nào được xoá.",
+          "success" if deleted else "warning")
+    return redirect(url_for("tool_gen_video"))
 
 
 # --------------------------------------------------------------------------- #

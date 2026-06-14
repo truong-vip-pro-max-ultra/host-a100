@@ -1,0 +1,27 @@
+# Gói BỔ SUNG để bật tool "Gen video từ kịch bản" — cài THÊM vào ĐÚNG môi trường
+# đang chạy server OmniVoice (env-omnivoice). Server đó giờ lo cả ảnh (diffusers
+# SDXL) lẫn giọng, nên chỉ cần thêm diffusers (+ vài gói nhỏ).
+#
+# Cài bằng tab Môi trường → "…hoặc cài từ file requirements.txt" (upload file này).
+# pip ĐỌC ĐƯỢC dòng --index-url trong requirements (ô "cài gói" thì KHÔNG).
+#
+# --- LƯU Ý QUAN TRỌNG ---
+# * KHÔNG cài lại torch/torchaudio — env-omnivoice đã có torch 2.6.0+cu124.
+# * transformers GHIM CỨNG 5.3.0 ở đây để pip KHÔNG tự nâng khi kéo diffusers
+#   (bản transformers mới ref torch.float8_e8m0fnu, cần torch>=2.7 → CRASH lúc
+#   import omnivoice trên torch 2.6). Đây là cùng lý do với requirements-omnivoice.txt.
+# * diffusers là gói thuần Python (không cần CUDA index) — pip dùng torch sẵn có.
+
+--index-url https://pypi.org/simple
+
+diffusers>=0.30.0
+transformers==5.3.0          # GHIM LẠI — đừng để pip nâng (omnivoice cần đúng bản này)
+accelerate>=0.27.0           # thường đã có; để cho chắc
+safetensors>=0.4.0           # đã có; để cho chắc
+Pillow>=10.2.0               # đã có; để cho chắc
+
+# Dịch VN→EN khi KHÔNG có LLM API farm (chạy ở LOGIN node — có internet). Nếu
+# bạn luôn bật prompt-LLM thì gói này không bắt buộc, nhưng nên có để fallback đẹp.
+# deep-translator cần cài vào MÔI TRƯỜNG ĐANG CHẠY app.py (login node), KHÔNG phải
+# env-omnivoice — vì việc dịch chạy trong tiến trình Flask, không trên GPU.
+deep-translator>=1.11.4

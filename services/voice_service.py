@@ -160,6 +160,10 @@ def _build_cmd(server):
     model_id = (server.get("model_id") or config.OMNI_MODEL_ID).strip()
     cmd = [py, "-u", config.OMNI_SERVER_SCRIPT,
            "--model", model_id,
+           # Same GPU process also serves the "Gen video" tool's images (diffusers
+           # SDXL, lazy-loaded). "" disables it. The model must be in the shared
+           # HF cache (compute nodes have no internet).
+           "--image-model", (config.IMAGE_MODEL_ID or "").strip(),
            "--host", "0.0.0.0"]
     return py, cmd
 
@@ -212,6 +216,9 @@ export TRANSFORMERS_OFFLINE=1
 # OMNI_MAX_BATCH utterances per call. Tune via config.OMNI_MAX_BATCH.
 export OMNI_BATCH={shlex.quote(str(config.OMNI_BATCH_ENABLED))}
 export OMNI_MAX_BATCH={shlex.quote(str(config.OMNI_MAX_BATCH))}
+# Diffusers image model for the "Gen video" tool (lazy-loaded on first image
+# request, shares this GPU). "" via --image-model disables it.
+export IMAGE_MODEL={shlex.quote(str(config.IMAGE_MODEL_ID))}
 # Let torch/OpenMP actually use all the CPUs SLURM gave us (the CPU-side cost of
 # diffusion sampling + tokenize), instead of defaulting to 1 thread.
 export OMP_NUM_THREADS=${{SLURM_CPUS_PER_TASK:-8}}

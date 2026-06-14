@@ -84,6 +84,30 @@ OMNI_BATCH_ENABLED = os.environ.get("HOSTA100_OMNI_BATCH", "1")  # "0" = off
 OMNI_SERVER_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "scripts", "omnivoice_server.py")
 
+# --------------------------------------------------------------------------- #
+# Tools → Gen video từ kịch bản. A SECOND tool that reuses the SAME GPU server
+# as Clone giọng nói (the OmniVoice server now ALSO lazy-loads a diffusers SDXL
+# image model — one SLURM job / one GPU serves both TTS and image generation, so
+# we don't burn a second GPU slot). The login node does chunking, prompt writing
+# (rule-based or via the API-farm LLM) and all the ffmpeg video assembly.
+# --------------------------------------------------------------------------- #
+# Per-job working dir: per-scene images + per-scene wavs + clips + final MP4/SRT.
+VIDEO_OUTPUTS_DIR = os.path.join(DATA_DIR, "video-outputs")
+# Default text-to-image model the GPU server lazy-loads on the first image
+# request. SDXL-Turbo: native 1024px, 1-4 steps, guidance=0, ~1-3s/img, ~7GB
+# VRAM — fits comfortably alongside OmniVoice on the A100-40GB / L40S. Must be
+# present in the shared HF cache (OMNI_HF_HOME) — download on the login node
+# first (compute nodes have no internet). Override with HOSTA100_IMAGE_MODEL.
+IMAGE_MODEL_ID = os.environ.get("HOSTA100_IMAGE_MODEL", "stabilityai/sdxl-turbo")
+# How many scene images to ask for in ONE /generate_image_batch HTTP request.
+# The server renders them one-at-a-time (a single 1024px SDXL image already
+# saturates the GPU), but grouping cuts per-request HTTP latency and lets the
+# login node advance the progress bar between groups. Override HOSTA100_IMAGE_MAX_BATCH.
+try:
+    IMAGE_MAX_BATCH = max(1, int(os.environ.get("HOSTA100_IMAGE_MAX_BATCH", "4")))
+except ValueError:
+    IMAGE_MAX_BATCH = 4
+
 # Native llama.cpp server binary (`llama-server` from ggml-org). Used by the
 # API-farm "llama-server (native, --jinja)" engine, which has a built-in
 # tool-call parser + reads the GGUF's embedded chat template — so models like
@@ -201,7 +225,8 @@ def ensure_dirs():
     print(f"[host-a100] Using data directory: {DATA_DIR}")
     for path in (DATA_DIR, MODELS_DIR, ENVS_DIR, JOBS_DIR, RESULTS_DIR,
                  PROJECTS_DIR, PIP_CACHE_DIR, SERVERS_DIR,
-                 VOICE_SERVERS_DIR, VOICE_OUTPUTS_DIR, VOICES_DIR, OMNI_HF_HOME):
+                 VOICE_SERVERS_DIR, VOICE_OUTPUTS_DIR, VOICES_DIR, OMNI_HF_HOME,
+                 VIDEO_OUTPUTS_DIR):
         os.makedirs(path, exist_ok=True)
 
 

@@ -1,0 +1,454 @@
+{% extends "base.html" %}
+{% block title %}Gen video từ kịch bản{% endblock %}
+{% block page_title %}Gen video từ kịch bản{% endblock %}
+{% block page_sub %}Kịch bản → video: ảnh AI (SDXL) + giọng OmniVoice + phụ đề + Ken Burns · dùng chung GPU với Clone giọng nói{% endblock %}
+{% block content %}
+
+{% set JST = {
+  'done':    ('pill-done',    'xong'),
+  'running': ('pill-running', 'đang chạy'),
+  'queued':  ('pill-queued',  'chờ'),
+  'error':   ('pill-error',   'lỗi'),
+} %}
+
+{% if not ffmpeg_ok %}
+<div class="alert alert-warning py-2 small">
+  <i class="bi bi-exclamation-triangle"></i> Không tìm thấy <code>ffmpeg</code> trên
+  node này — không dựng được video. Cài ffmpeg hoặc đặt <code>HOSTA100_FFMPEG</code>.</div>
+{% endif %}
+
+<!-- GPU + LLM status banner -->
+<div class="alert {{ 'alert-success' if gpu_ready else 'alert-warning' }} py-2 small d-flex justify-content-between align-items-center flex-wrap gap-2">
+  <span>
+    <i class="bi bi-gpu-card"></i>
+    Server GPU (dùng chung với Clone giọng nói):
+    <b id="gpuPill">{{ 'sẵn sàng' if gpu_ready else 'chưa có' }}</b>
+    · ảnh: <code>{{ image_model }}</code>
+    · prompt LLM: <b>{{ 'API farm đang chạy' if llm_ready else 'tắt → dùng prompt theo luật' }}</b>
+  </span>
+  {% if not gpu_ready %}
+  <a class="btn btn-sm btn-outline-primary" href="{{ url_for('tool_clone_voice') }}">
+    <i class="bi bi-rocket-takeoff"></i> Khởi động server ở tab Clone giọng nói</a>
+  {% endif %}
+</div>
+
+<div class="row g-3">
+  <!-- ============================ LEFT ============================== -->
+  <div class="col-lg-5">
+    <div class="card"><div class="card-body">
+      <h5 class="card-title"><i class="bi bi-film"></i> Tạo video</h5>
+      <form id="jobForm" method="post" action="{{ url_for('video_job_submit') }}">
+        <div class="mb-2">
+          <label class="form-label">Tên (đặt cho file xuất)</label>
+          <input class="form-control" name="name" placeholder="video-01">
+        </div>
+        <div class="mb-2">
+          <label class="form-label">Kịch bản</label>
+          <textarea class="form-control" name="script" rows="9" required
+            placeholder="Dán kịch bản vào đây. Tự chia cảnh theo câu/mệnh đề tiếng Việt; có thể đánh dấu 'Cảnh 1:', 'Đoạn 2:'…"></textarea>
+        </div>
+
+        <div class="row g-2">
+          <div class="col-7 mb-2">
+            <label class="form-label">Giọng đọc</label>
+            <select class="form-select" name="profile">
+              <option value="">Mặc định (zero-shot, khoá theo seed)</option>
+              {% for p in profiles %}
+              <option value="{{ p.name }}">🎙 {{ p.name }} (clone)</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-5 mb-2">
+            <label class="form-label">Ngôn ngữ</label>
+            <input class="form-control" name="language" value="vi">
+          </div>
+        </div>
+
+        <div class="row g-2">
+          <div class="col-6 mb-2">
+            <label class="form-label">Phong cách ảnh</label>
+            <select class="form-select" name="style">
+              <option value="cinematic" selected>Điện ảnh (cinematic)</option>
+              <option value="realistic">Ảnh thật (photorealistic)</option>
+              <option value="documentary">Tư liệu (documentary)</option>
+              <option value="3d">3D / Pixar</option>
+              <option value="anime">Anime</option>
+              <option value="oil_painting">Sơn dầu</option>
+              <option value="watercolor">Màu nước</option>
+            </select>
+          </div>
+          <div class="col-6 mb-2">
+            <label class="form-label">Tỉ lệ / độ phân giải</label>
+            <select class="form-select" name="resolution">
+              <option value="1920x1080" selected>1080p ngang (16:9)</option>
+              <option value="1280x720">720p ngang (16:9)</option>
+              <option value="1080x1920">Dọc (9:16) — TikTok/Shorts</option>
+            </select>
+          </div>
+        </div>
+        <input type="hidden" name="width" value="1920">
+        <input type="hidden" name="height" value="1080">
+
+        <div class="row g-2">
+          <div class="col-6 mb-2">
+            <label class="form-label">FPS</label>
+            <select class="form-select" name="fps">
+              <option value="24">24</option>
+              <option value="30" selected>30</option>
+            </select>
+          </div>
+          <div class="col-6 mb-2">
+            <label class="form-label">Seed giọng mặc định</label>
+            <input class="form-control" name="voice_seed" value="1234">
+            <div class="form-text">Đổi = đổi chất giọng. -1 = ngẫu nhiên.</div>
+          </div>
+        </div>
+
+        <div class="row g-2">
+          <div class="col-6 mb-2">
+            <label class="form-label">Batch ảnh (GPU)</label>
+            <input type="number" class="form-control" name="image_batch" min="1" max="32"
+                   value="{{ image_max_batch }}">
+            <div class="form-text">Số ảnh gửi GPU mỗi lần. OOM thì giảm.</div>
+          </div>
+          <div class="col-6 mb-2">
+            <label class="form-label">Số bước ảnh</label>
+            <input type="number" class="form-control" name="image_steps" min="1" max="50"
+                   value="4">
+            <div class="form-text">SDXL-Turbo: 1–4 là đủ.</div>
+          </div>
+        </div>
+
+        <div class="form-check form-switch mb-2">
+          <input class="form-check-input" type="checkbox" role="switch"
+                 name="use_llm" id="useLlm" {{ 'checked' if llm_ready else '' }}>
+          <label class="form-check-label" for="useLlm">
+            Viết prompt ảnh bằng LLM (API farm){% if not llm_ready %}
+            <span class="text-muted">— chưa có LLM, sẽ dùng prompt theo luật</span>{% endif %}</label>
+        </div>
+        <div class="form-check form-switch mb-2">
+          <input class="form-check-input" type="checkbox" role="switch"
+                 name="ken_burns" id="kenBurns" checked>
+          <label class="form-check-label" for="kenBurns">Hiệu ứng slow-zoom (Ken Burns)</label>
+        </div>
+
+        <button class="btn btn-primary mt-1" id="jobSubmitBtn">
+          <i class="bi bi-camera-reels"></i> Dựng video</button>
+        <div class="form-text">Cần một server GPU đang <b>sẵn sàng</b> (tab Clone giọng nói).
+          Server đó lo cả ảnh lẫn giọng.</div>
+      </form>
+    </div></div>
+
+    <div class="card mt-3"><div class="card-body small text-muted">
+      <i class="bi bi-info-circle"></i> Lần đầu tạo ảnh, GPU sẽ nạp model SDXL
+      (<code>{{ image_model }}</code>) vào VRAM — cảnh đầu chậm hơn, các cảnh sau nhanh.
+      Cần cài thêm <code>diffusers</code> vào môi trường của server + tải sẵn weights về
+      HF cache. Xem <code>docs/TOOLS_VIDEO.md</code>.
+    </div></div>
+  </div>
+
+  <!-- ============================ RIGHT ============================= -->
+  <div class="col-lg-7">
+    <div class="card"><div class="card-body">
+      <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+        <h5 class="card-title mb-0"><i class="bi bi-collection-play"></i> Tác vụ video</h5>
+        <div class="d-flex align-items-center gap-2">
+          <button type="button" class="btn btn-sm btn-outline-danger" id="delSelBtn"
+                  onclick="bulkDelete(false)" disabled>
+            <i class="bi bi-trash"></i> Xoá đã chọn (<span id="selCount">0</span>)</button>
+          <button type="button" class="btn btn-sm btn-outline-danger" id="delAllBtn"
+                  onclick="bulkDelete(true)">
+            <i class="bi bi-trash3"></i> Xoá tất cả</button>
+        </div>
+      </div>
+      <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0" style="min-width:600px">
+        <thead><tr>
+          <th style="width:1%"><input type="checkbox" class="form-check-input" id="selAll"
+                                      onclick="toggleAll(this)" title="Chọn tất cả"></th>
+          <th>#</th><th>Tên</th><th style="min-width:150px">Tiến trình</th>
+          <th>Trạng thái</th><th></th></tr></thead>
+        <tbody id="jobBody">
+        {% for j in jobs %}
+          <tr id="vjob-{{ j.id }}">
+            <td><input type="checkbox" class="form-check-input job-cb" value="{{ j.id }}"
+                       onclick="updateSel()"></td>
+            <td>{{ j.id }}</td>
+            <td class="small">{{ j.name }}</td>
+            <td>
+              <div class="progress" style="height:6px">
+                <div class="progress-bar" data-bar role="progressbar"
+                     style="width: {{ j.progress }}%"></div>
+              </div>
+              <span class="text-muted small" data-stage>{{ j.stage or '' }}</span>
+            </td>
+            <td>{% set cls, lbl = JST.get(j.status, ('pill-unknown', j.status)) %}
+              <span class="pill {{ cls }}" data-st>{{ lbl }}</span></td>
+            <td class="text-end text-nowrap">
+              <a class="btn btn-sm btn-outline-success {% if not j.output_path %}disabled{% endif %}"
+                 data-play href="#" onclick="playJob({{ j.id }});return false;"
+                 title="Xem thử"><i class="bi bi-play-circle"></i></a>
+              <a class="btn btn-sm btn-outline-secondary" href="#"
+                 onclick="showJobLog({{ j.id }});return false;" title="Log"><i class="bi bi-terminal"></i></a>
+              <a class="btn btn-sm btn-outline-primary {% if not j.output_path %}disabled{% endif %}"
+                 data-mp4 href="{{ url_for('video_job_mp4', job_id=j.id) }}" title="Tải MP4"><i class="bi bi-filetype-mp4"></i></a>
+              <a class="btn btn-sm btn-outline-secondary {% if not j.srt_path %}disabled{% endif %}"
+                 data-srt href="{{ url_for('video_job_srt', job_id=j.id) }}" title="Tải SRT"><i class="bi bi-badge-cc"></i></a>
+              <form class="d-inline" method="post" action="{{ url_for('video_job_delete', job_id=j.id) }}"
+                    data-confirm="Xoá tác vụ #{{ j.id }}?">
+                <button class="btn btn-sm btn-outline-danger" title="Xoá">×</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr id="noJob"><td colspan="6" class="text-muted">Chưa có tác vụ nào.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </div></div>
+  </div>
+</div>
+
+<!-- Video preview modal -->
+<div class="modal fade" id="playerModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-film"></i> Xem thử <span id="playId"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <video id="player" controls class="w-100" preload="auto" style="max-height:70vh"></video>
+        <div class="mt-2 text-end">
+          <a id="playDl" class="btn btn-sm btn-outline-primary" href="#" download>
+            <i class="bi bi-download"></i> Tải MP4</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Log modal -->
+<div class="modal fade" id="logModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Log <span id="logId"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <pre class="logbox mb-0" id="logBox" style="max-height:60vh">Đang tải…</pre>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function(){
+  ['logModal', 'playerModal'].forEach(function(id){
+    var m = document.getElementById(id);
+    if (m && m.parentElement !== document.body) document.body.appendChild(m);
+  });
+})();
+
+const URL_MP4 = '{{ url_for("video_job_mp4", job_id=0) }}';
+const URL_SRT = '{{ url_for("video_job_srt", job_id=0) }}';
+function mp4Url(id){ return URL_MP4.replace('/0/', '/' + id + '/'); }
+function srtUrl(id){ return URL_SRT.replace('/0/', '/' + id + '/'); }
+
+const JST = {
+  done:    ['pill-done',    'xong'],
+  running: ['pill-running', 'đang chạy'],
+  queued:  ['pill-queued',  'chờ'],
+  error:   ['pill-error',   'lỗi'],
+};
+
+// Keep the hidden width/height in sync with the resolution picker.
+const resSel = document.querySelector('[name="resolution"]');
+if (resSel) {
+  const wEl = document.querySelector('[name="width"]');
+  const hEl = document.querySelector('[name="height"]');
+  const sync = () => { const [w, h] = resSel.value.split('x'); wEl.value = w; hEl.value = h; };
+  resSel.addEventListener('change', sync); sync();
+}
+
+function makeJobRow(id, name) {
+  const noJob = document.getElementById('noJob');
+  if (noJob) noJob.remove();
+  const tr = document.createElement('tr');
+  tr.id = 'vjob-' + id;
+  tr.innerHTML =
+    '<td><input type="checkbox" class="form-check-input job-cb" value="' + id + '" onclick="updateSel()"></td>' +
+    '<td>' + id + '</td>' +
+    '<td class="small">' + (name || '') + '</td>' +
+    '<td><div class="progress" style="height:6px">' +
+      '<div class="progress-bar" data-bar role="progressbar" style="width:0%"></div>' +
+      '</div><span class="text-muted small" data-stage>chờ…</span></td>' +
+    '<td><span class="pill pill-queued" data-st>chờ</span></td>' +
+    '<td class="text-end text-nowrap">' +
+      '<a class="btn btn-sm btn-outline-success disabled" data-play href="#" ' +
+        'onclick="playJob(' + id + ');return false;" title="Xem thử"><i class="bi bi-play-circle"></i></a> ' +
+      '<a class="btn btn-sm btn-outline-secondary" href="#" ' +
+        'onclick="showJobLog(' + id + ');return false;" title="Log"><i class="bi bi-terminal"></i></a> ' +
+      '<a class="btn btn-sm btn-outline-primary disabled" data-mp4 href="' + mp4Url(id) + '" title="Tải MP4"><i class="bi bi-filetype-mp4"></i></a> ' +
+      '<a class="btn btn-sm btn-outline-secondary disabled" data-srt href="' + srtUrl(id) + '" title="Tải SRT"><i class="bi bi-badge-cc"></i></a> ' +
+      '<form class="d-inline" method="post" action="/tools/video/jobs/' + id + '/delete" ' +
+        'data-confirm="Xoá tác vụ #' + id + '?"><button class="btn btn-sm btn-outline-danger" title="Xoá">×</button></form>' +
+    '</td>';
+  document.getElementById('jobBody').prepend(tr);
+  updateSel();
+}
+
+// ---- multi-select + bulk delete -----------------------------------------
+function selectedIds() {
+  return Array.from(document.querySelectorAll('.job-cb:checked')).map(c => c.value);
+}
+function updateSel() {
+  const n = selectedIds().length;
+  document.getElementById('selCount').textContent = n;
+  document.getElementById('delSelBtn').disabled = n === 0;
+  const all = document.querySelectorAll('.job-cb');
+  const selAll = document.getElementById('selAll');
+  if (selAll) selAll.checked = all.length > 0 && n === all.length;
+}
+function toggleAll(box) {
+  document.querySelectorAll('.job-cb').forEach(c => { c.checked = box.checked; });
+  updateSel();
+}
+function bulkDelete(all) {
+  const ids = selectedIds();
+  if (!all && ids.length === 0) return;
+  const msg = all ? 'Xoá TẤT CẢ tác vụ video?' : ('Xoá ' + ids.length + ' tác vụ đã chọn?');
+  const ask = window.confirmModal ? confirmModal(msg) : Promise.resolve(window.confirm(msg));
+  ask.then(ok => { if (ok) doBulkDelete(all, ids); });
+}
+function doBulkDelete(all, ids) {
+  const body = new FormData();
+  if (all) body.append('all', '1');
+  else ids.forEach(id => body.append('ids', id));
+  const selBtn = document.getElementById('delSelBtn');
+  const allBtn = document.getElementById('delAllBtn');
+  btnBusy(all ? allBtn : selBtn, 'Đang xoá…');
+  if (window.Loader) Loader.start();
+  fetch('{{ url_for("video_jobs_bulk_delete") }}', {
+    method: 'POST', headers: { 'X-Requested-With': 'fetch' }, body,
+  })
+    .then(r => r.json())
+    .then(d => {
+      const removeIds = all ? Array.from(document.querySelectorAll('.job-cb')).map(c => c.value) : ids;
+      removeIds.forEach(id => {
+        const row = document.getElementById('vjob-' + id);
+        if (row) { row.style.transition = 'opacity .25s ease'; row.style.opacity = '0';
+          setTimeout(() => row.remove(), 250); }
+      });
+      setTimeout(() => {
+        if (!document.querySelector('#jobBody tr')) {
+          document.getElementById('jobBody').innerHTML =
+            '<tr id="noJob"><td colspan="6" class="text-muted">Chưa có tác vụ nào.</td></tr>';
+        }
+        updateSel();
+      }, 270);
+      toast('Đã xoá ' + (d.deleted || 0) + ' tác vụ.', 'success');
+    })
+    .catch(() => toast('Lỗi khi xoá.', 'danger'))
+    .finally(() => { btnReset(selBtn); btnReset(allBtn); if (window.Loader) Loader.done(); });
+}
+window.toggleAll = toggleAll; window.updateSel = updateSel; window.bulkDelete = bulkDelete;
+
+function pollJobs() {
+  fetch('{{ url_for("video_jobs_json") }}')
+    .then(r => r.json())
+    .then(d => d.jobs.forEach(j => {
+      const row = document.getElementById('vjob-' + j.id);
+      if (!row) return;
+      const bar = row.querySelector('[data-bar]');
+      if (bar) bar.style.width = (j.progress || 0) + '%';
+      const stage = row.querySelector('[data-stage]');
+      if (stage) stage.textContent = j.error ? ('Lỗi: ' + j.error) : (j.stage || '');
+      const pill = row.querySelector('[data-st]');
+      if (pill) { const m = JST[j.status] || ['pill-unknown', j.status];
+        pill.className = 'pill ' + m[0]; pill.textContent = m[1]; }
+      const play = row.querySelector('[data-play]');
+      if (play) play.classList.toggle('disabled', !j.has_mp4);
+      const mp4 = row.querySelector('[data-mp4]');
+      if (mp4) mp4.classList.toggle('disabled', !j.has_mp4);
+      const srt = row.querySelector('[data-srt]');
+      if (srt) srt.classList.toggle('disabled', !j.has_srt);
+    }))
+    .finally(() => setTimeout(pollJobs, 2500));
+}
+pollJobs();
+
+function btnBusy(btn, label) {
+  if (!btn) return;
+  if (btn.dataset.orig === undefined) btn.dataset.orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm" '
+    + 'style="vertical-align:-.125em" role="status" aria-hidden="true"></span>'
+    + (label ? ' ' + label : '');
+}
+function btnReset(btn) {
+  if (!btn || btn.dataset.orig === undefined) return;
+  btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; btn.disabled = false;
+}
+
+const jobForm = document.getElementById('jobForm');
+if (jobForm) {
+  jobForm.addEventListener('submit', function (e) {
+    e.preventDefault();
+    const btn = document.getElementById('jobSubmitBtn');
+    btnBusy(btn, 'Đang gửi…');
+    if (window.Loader) Loader.start();
+    fetch(jobForm.action, {
+      method: 'POST', headers: { 'X-Requested-With': 'fetch' },
+      body: new FormData(jobForm),
+    })
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok) {
+          makeJobRow(d.id, d.name);
+          jobForm.querySelector('[name="script"]').value = '';
+          toast('Đã bắt đầu dựng video.', 'success');
+        } else { toast(d.error || 'Không tạo được.', 'danger'); }
+      })
+      .catch(() => toast('Lỗi kết nối.', 'danger'))
+      .finally(() => { btnReset(btn); if (window.Loader) Loader.done(); });
+  });
+}
+
+function playJob(id) {
+  document.getElementById('playId').textContent = '#' + id;
+  const player = document.getElementById('player');
+  player.src = mp4Url(id);
+  document.getElementById('playDl').href = mp4Url(id);
+  const modalEl = document.getElementById('playerModal');
+  bootstrap.Modal.getOrCreateInstance(modalEl).show();
+  player.play().catch(() => {});
+  modalEl.addEventListener('hidden.bs.modal', () => { player.pause(); }, { once: true });
+}
+window.playJob = playJob;
+
+let logTimer = null;
+function showJobLog(id) {
+  document.getElementById('logId').textContent = 'tác vụ #' + id;
+  const box = document.getElementById('logBox');
+  box.textContent = 'Đang tải…';
+  const modalEl = document.getElementById('logModal');
+  bootstrap.Modal.getOrCreateInstance(modalEl).show();
+  const urlBase = '{{ url_for("video_job_log", job_id=0) }}';
+  function load() {
+    fetch(urlBase.replace('/0/', '/' + id + '/'))
+      .then(r => r.json())
+      .then(d => { box.textContent = d.log || '(trống)'; box.scrollTop = box.scrollHeight; });
+  }
+  load();
+  if (logTimer) clearInterval(logTimer);
+  logTimer = setInterval(load, 2000);
+  modalEl.addEventListener('hidden.bs.modal', () => { if (logTimer) clearInterval(logTimer); }, { once: true });
+}
+window.showJobLog = showJobLog;
+</script>
+{% endblock %}

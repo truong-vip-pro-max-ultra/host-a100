@@ -162,6 +162,25 @@ def init_db():
                 created_at  REAL NOT NULL,
                 finished_at REAL
             );
+
+            -- One video job: script text → MP4 (+SRT). Runs on the login node
+            -- (chunk + prompt + ffmpeg) and reuses the SAME GPU OmniVoice server
+            -- (voice_servers) for BOTH the per-scene images (diffusers SDXL) and
+            -- the per-scene narration (OmniVoice TTS).
+            CREATE TABLE IF NOT EXISTS video_jobs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT,
+                status      TEXT NOT NULL DEFAULT 'queued',
+                progress    INTEGER NOT NULL DEFAULT 0,
+                stage       TEXT,
+                params      TEXT,              -- JSON of the render/voice/image knobs
+                output_path TEXT,             -- final MP4
+                srt_path    TEXT,
+                logs_path   TEXT,             -- the job working dir
+                error       TEXT,
+                created_at  REAL NOT NULL,
+                finished_at REAL
+            );
             """
         )
         _migrate(conn)

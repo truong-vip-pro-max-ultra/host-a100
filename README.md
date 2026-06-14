@@ -124,6 +124,29 @@ weights warmup for the offline HF cache, ffmpeg), all env/config knobs, a
 troubleshooting table and tests are in
 **[docs/TOOLS_VOICE.md](docs/TOOLS_VOICE.md)**.
 
+## Tools — Gen video từ kịch bản
+
+The second **Công cụ** tool turns a **script into a narrated video** (AI images +
+OmniVoice narration + burned subtitles + Ken-Burns slow-zoom). It **reuses the
+SAME GPU server as Clone giọng nói** — `scripts/omnivoice_server.py` now also
+lazy-loads a diffusers **SDXL** image model, so one SLURM job / one GPU serves
+both TTS and image generation (no extra GPU slot). Image prompts are written by
+the **API-farm LLM** when one is running (falls back to a rule-based prompt +
+VN→EN translation). The login node does scene splitting, prompt writing and all
+ffmpeg assembly. Quick setup:
+
+1. Add `diffusers` to the OmniVoice env (re-pins `transformers==5.3.0`, leaves
+   torch untouched) — upload `scripts/requirements-video-image.txt` via the
+   Môi trường tab, or `pip install "diffusers>=0.30.0" "transformers==5.3.0"`.
+2. Pre-download the image model into the shared HF cache on the login node:
+   `snapshot_download("stabilityai/sdxl-turbo", allow_patterns=["*.json","*.txt","*fp16*","*.safetensors"])`
+   with `HF_HOME=$PWD/host-a100-data/hf-cache`.
+3. **Recreate** the voice server (the `--image-model` branch is new).
+
+Full architecture, all env/config knobs (`HOSTA100_IMAGE_MODEL`,
+`HOSTA100_IMAGE_MAX_BATCH`), a troubleshooting table and tests are in
+**[docs/TOOLS_VIDEO.md](docs/TOOLS_VIDEO.md)**.
+
 ## Inference runner
 
 `inference_runner.py` ships with the platform and is the only code a job

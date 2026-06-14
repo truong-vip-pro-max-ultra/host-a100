@@ -440,7 +440,149 @@ class OmniEngine:
         return results
 
 
+# --------------------------------------------------------------------------- #
+# Image engine — lazy diffusers SDXL, shares this GPU process with OmniVoice.
+#
+# Ported from the desktop "gen-video" project's DiffusersBackend (tuned on an
+# RTX 4090): on a big-VRAM card keep the whole pipe RESIDENT (no model_cpu_offload,
+# no attention slicing) so the UNet runs at full throughput — ~6× faster than the
+# memory-saving path. It is loaded LAZILY (only on the first image request) so a
+# voice-only user never pays its VRAM.
+# --------------------------------------------------------------------------- #
+DEFAULT_IMAGE_MODEL = "stabilityai/sdxl-turbo"
+# Distilled models: 1-4 steps, NO classifier-free guidance, negative ignored.
+_TURBO_HINTS = ("turbo", "lcm", "lightning", "lightni", "sdxs")
+
+
+class ImageEngine:
+    def __init__(self, model_id=DEFAULT_IMAGE_MODEL):
+        self.model_id = (model_id or DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL
+        self._pipe = None
+        self._device = "cpu"
+        self._dtype_str = "float32"
+        self._high_vram = False
+        self._lock = threading.Lock()   # diffusion isn't reentrant; own lock so
+        self.load_error = ""            # image gen never blocks voice synthesis
+
+    @property
+    def ready(self):
+        return self._pipe is not None
+
+    @property
+    def _is_turbo(self):
+        return any(h in self.model_id.lower() for h in _TURBO_HINTS)
+
+    def _base_res(self):
+        mid = self.model_id.lower()
+        if "xl" in mid:
+            return 1024
+        if self._is_turbo:
+            return 512
+        return 768
+
+    def _target_size(self, w, h):
+        """Scale W×H to the model's native sweet spot (keeps aspect, multiples of
+        8). Bigger than native makes diffusion repeat/duplicate content; the
+        video renderer upscales to 1080p with lanczos anyway."""
+        cap = self._base_res()
+        longest = max(w, h)
+        if longest <= cap:
+            tw, th = w, h
+        else:
+            scale = cap / longest
+            tw, th = int(w * scale), int(h * scale)
+        return max(64, (tw // 8) * 8), max(64, (th // 8) * 8)
+
+    def load(self):
+        if self._pipe is not None:
+            return self._pipe
+        with self._lock:
+            if self._pipe is not None:
+                return self._pipe
+            import torch
+            from diffusers import AutoPipelineForText2Image
+            for _name in ("transformers", "diffusers"):
+                try:
+                    __import__(_name).logging.set_verbosity_error()
+                except Exception:
+                    pass
+            if torch.cuda.is_available():
+                self._device, dtype, self._dtype_str = "cuda", torch.float16, "float16"
+                try:
+                    total = torch.cuda.get_device_properties(0).total_memory
+                    self._high_vram = total >= 16 * (1024 ** 3)
+                except Exception:
+                    self._high_vram = False
+            else:
+                self._device, dtype, self._dtype_str = "cpu", torch.float32, "float32"
+            print(f"[image] loading '{self.model_id}' on {self._device} "
+                  f"({self._dtype_str})…", flush=True)
+            try:
+                pipe = AutoPipelineForText2Image.from_pretrained(
+                    self.model_id, torch_dtype=dtype, safety_checker=None,
+                    variant="fp16" if dtype == torch.float16 else None)
+            except Exception:
+                # No fp16 variant on disk, or safety_checker kwarg rejected.
+                try:
+                    pipe = AutoPipelineForText2Image.from_pretrained(
+                        self.model_id, torch_dtype=dtype, safety_checker=None)
+                except TypeError:
+                    pipe = AutoPipelineForText2Image.from_pretrained(
+                        self.model_id, torch_dtype=dtype)
+            pipe = pipe.to(self._device)
+            # Big-VRAM card → keep resident (skip the memory-saving brakes). Only
+            # on a tight card pay the speed cost of slicing/tiling/offload.
+            if not self._high_vram and self._device == "cuda":
+                try:
+                    pipe.enable_attention_slicing()
+                    if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_slicing"):
+                        pipe.vae.enable_slicing()
+                    pipe.enable_vae_tiling()
+                    pipe.enable_model_cpu_offload()
+                except Exception:
+                    pass
+            try:
+                pipe.set_progress_bar_config(disable=True)
+            except Exception:
+                pass
+            self._pipe = pipe
+            print(f"[image] model ready (high_vram={self._high_vram}).", flush=True)
+            return pipe
+
+    def generate(self, prompt, negative, out_path, width=1024, height=576,
+                 steps=24, cfg=7.0, seed=-1):
+        import random
+        import torch
+        pipe = self.load()
+        if seed is None or seed < 0:
+            seed = random.randint(0, 2 ** 31 - 1)
+        w, h = self._target_size(int(width), int(height))
+        if self._is_turbo:
+            steps = max(1, min(int(steps), 4))
+            guidance = 0.0
+            neg = None
+        else:
+            steps = max(1, int(steps))
+            guidance = float(cfg)
+            neg = negative or None
+        with self._lock:
+            generator = torch.Generator(device=self._device).manual_seed(int(seed))
+            result = pipe(prompt=prompt, negative_prompt=neg,
+                          num_inference_steps=steps, guidance_scale=guidance,
+                          width=w, height=h, generator=generator)
+            image = result.images[0]
+        out = Path(out_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if out.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+            out = out.with_suffix(".png")
+        image.convert("RGB").save(out, "PNG")
+        if not out.exists() or out.stat().st_size < 256:
+            raise RuntimeError("Diffusers produced an empty image")
+        return str(out)
+
+
 ENGINE: OmniEngine | None = None
+IMAGE_ENGINE: ImageEngine | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -476,6 +618,11 @@ class Handler(BaseHTTPRequestHandler):
                 "batch": (ENGINE.use_batch if ENGINE else False),
                 "max_batch": (ENGINE.max_batch if ENGINE else 0),
                 "load_error": ENGINE.load_error if ENGINE else "",
+                # Image side (lazy — ready only after the first /generate_image):
+                "image_model": IMAGE_ENGINE.model_id if IMAGE_ENGINE else "",
+                "image_ready": bool(IMAGE_ENGINE and IMAGE_ENGINE.ready),
+                "image_device": IMAGE_ENGINE._device if IMAGE_ENGINE else "",
+                "image_error": IMAGE_ENGINE.load_error if IMAGE_ENGINE else "",
             })
             return
         self._send_json({"error": "not found"}, 404)
@@ -504,6 +651,63 @@ class Handler(BaseHTTPRequestHandler):
                     max_batch=req.get("max_batch"),
                 )
                 self._send_json({"ok": True, "results": results})
+            except Exception as exc:
+                traceback.print_exc()
+                self._send_json({"ok": False, "error": str(exc)}, 500)
+            return
+
+        if route == "/generate_image_batch":
+            if IMAGE_ENGINE is None:
+                self._send_json({"ok": False, "error": "image engine không bật"}, 500)
+                return
+            items = req.get("items") or []
+            if not isinstance(items, list) or not items:
+                self._send_json({"error": "items trống"}, 400)
+                return
+            results = []
+            for it in items:
+                op = (it.get("out_path") or "").strip()
+                if not op:
+                    results.append({"ok": False, "error": "thiếu out_path"})
+                    continue
+                try:
+                    path = IMAGE_ENGINE.generate(
+                        prompt=(it.get("prompt") or "").strip(),
+                        negative=(it.get("negative") or ""),
+                        out_path=op,
+                        width=int(it.get("width", 1024) or 1024),
+                        height=int(it.get("height", 576) or 576),
+                        steps=int(it.get("steps", 24) or 24),
+                        cfg=float(it.get("cfg", 7.0) or 7.0),
+                        seed=int(it.get("seed", -1)),
+                    )
+                    results.append({"ok": True, "out_path": path})
+                except Exception as exc:  # noqa: BLE001 — one bad image must not abort
+                    traceback.print_exc()
+                    results.append({"ok": False, "error": str(exc), "out_path": op})
+            self._send_json({"ok": True, "results": results})
+            return
+
+        if route == "/generate_image":
+            if IMAGE_ENGINE is None:
+                self._send_json({"ok": False, "error": "image engine không bật"}, 500)
+                return
+            out_path = (req.get("out_path") or "").strip()
+            if not out_path:
+                self._send_json({"error": "out_path bắt buộc"}, 400)
+                return
+            try:
+                path = IMAGE_ENGINE.generate(
+                    prompt=(req.get("prompt") or "").strip(),
+                    negative=(req.get("negative") or ""),
+                    out_path=out_path,
+                    width=int(req.get("width", 1024) or 1024),
+                    height=int(req.get("height", 576) or 576),
+                    steps=int(req.get("steps", 24) or 24),
+                    cfg=float(req.get("cfg", 7.0) or 7.0),
+                    seed=int(req.get("seed", -1)),
+                )
+                self._send_json({"ok": True, "out_path": path})
             except Exception as exc:
                 traceback.print_exc()
                 self._send_json({"ok": False, "error": str(exc)}, 500)
@@ -542,9 +746,13 @@ def _free_port():
 
 
 def main():
-    global ENGINE
+    global ENGINE, IMAGE_ENGINE
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=os.environ.get("OMNI_MODEL", DEFAULT_MODEL))
+    ap.add_argument("--image-model",
+                    default=os.environ.get("IMAGE_MODEL", DEFAULT_IMAGE_MODEL),
+                    help="Diffusers text-to-image model (lazy-loaded on first "
+                         "image request). Empty string disables image gen.")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--endpoint-file", default="",
@@ -554,6 +762,10 @@ def main():
     args = ap.parse_args()
 
     ENGINE = OmniEngine(args.model)
+    # Image engine: created but NOT loaded — the diffusers pipe loads lazily on
+    # the first /generate_image request so a voice-only server pays no VRAM.
+    if (args.image_model or "").strip():
+        IMAGE_ENGINE = ImageEngine(args.image_model)
 
     port = args.port or _free_port()
     host_name = os.environ.get("SLURMD_NODENAME") or socket.gethostname().split(".")[0]
@@ -575,8 +787,8 @@ def main():
     threading.Thread(target=_warm, daemon=True).start()
 
     httpd = ThreadingHTTPServer((args.host, port), Handler)
-    print(f"[omnivoice] serving on {host_name}:{port} (model={args.model})",
-          flush=True)
+    print(f"[omnivoice] serving on {host_name}:{port} (model={args.model}, "
+          f"image_model={args.image_model or '(disabled)'})", flush=True)
     httpd.serve_forever()
 
 
