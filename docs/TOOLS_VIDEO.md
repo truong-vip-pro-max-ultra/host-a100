@@ -127,7 +127,9 @@ hết token budget vào phần nghĩ → trả về rỗng**, nhất là khi ser
 `<think>` block** (kể cả khi cụt token), gọi LLM theo **lô 16 cảnh** (vừa ctx 8192),
 và **cắt mỗi dòng còn ~45 từ** trước khi gửi (prompt ảnh chỉ cần ý chính). Nếu vẫn
 rỗng, job log in dòng `[LLM] …` với status/finish_reason/body để chẩn đoán. Không có
-LLM hợp lệ → tự lùi rule-based + dịch (vẫn ra video).
+LLM hợp lệ → tự lùi rule-based + dịch (vẫn ra video). **Job log in prompt thật của
+TỪNG cảnh** kèm nguồn `[LLM]`/`[luật]` + anchor xuyên suốt → bấm nút Log để xem ảnh
+mỗi cảnh được gen từ gì.
 
 ## Kịch bản dạng phim (tự lọc)
 
