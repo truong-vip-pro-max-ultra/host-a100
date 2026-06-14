@@ -32,7 +32,7 @@
     <!-- Narration job -->
     <div class="card"><div class="card-body">
       <h5 class="card-title"><i class="bi bi-soundwave"></i> Tạo giọng đọc</h5>
-      <form method="post" action="{{ url_for('voice_job_submit') }}">
+      <form id="jobForm" method="post" action="{{ url_for('voice_job_submit') }}">
         <div class="mb-2">
           <label class="form-label">Tên (đặt cho file xuất)</label>
           <input class="form-control" name="name" placeholder="ban-tin-01">
@@ -94,7 +94,8 @@
           </div>
         </div>
 
-        <button class="btn btn-primary mt-1"><i class="bi bi-play-fill"></i> Tạo MP3</button>
+        <button class="btn btn-primary mt-1" id="jobSubmitBtn">
+          <i class="bi bi-play-fill"></i> Tạo MP3</button>
         <div class="form-text">Cần một server giọng nói đang <b>sẵn sàng</b> bên dưới.</div>
       </form>
     </div></div>
@@ -177,6 +178,9 @@
             <td>{% set cls, lbl = JST.get(j.status, ('pill-unknown', j.status)) %}
               <span class="pill {{ cls }}" data-st>{{ lbl }}</span></td>
             <td class="text-end text-nowrap">
+              <a class="btn btn-sm btn-outline-success {% if not j.output_path %}disabled{% endif %}"
+                 data-play href="#" onclick="playJob({{ j.id }});return false;"
+                 title="Nghe thử"><i class="bi bi-play-circle"></i></a>
               <a class="btn btn-sm btn-outline-secondary" href="#"
                  onclick="showJobLog({{ j.id }});return false;" title="Log"><i class="bi bi-terminal"></i></a>
               <a class="btn btn-sm btn-outline-primary {% if not j.output_path %}disabled{% endif %}"
@@ -289,6 +293,25 @@
   </div>
 </div>
 
+<!-- Audio preview modal -->
+<div class="modal fade" id="playerModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-music-note-beamed"></i> Nghe thử <span id="playId"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <audio id="player" controls class="w-100" preload="auto"></audio>
+        <div class="mt-2 text-end">
+          <a id="playDl" class="btn btn-sm btn-outline-primary" href="#" download>
+            <i class="bi bi-download"></i> Tải MP3</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Log modal (shared by server + job) -->
 <div class="modal fade" id="logModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered modal-lg">
@@ -308,9 +331,17 @@
 {% block scripts %}
 <script>
 (function(){
-  var m = document.getElementById('logModal');
-  if (m && m.parentElement !== document.body) document.body.appendChild(m);
+  ['logModal', 'playerModal'].forEach(function(id){
+    var m = document.getElementById(id);
+    if (m && m.parentElement !== document.body) document.body.appendChild(m);
+  });
 })();
+
+// URL templates (id 0 placeholder, swapped at call time).
+const URL_MP3 = '{{ url_for("voice_job_mp3", job_id=0) }}';
+const URL_SRT = '{{ url_for("voice_job_srt", job_id=0) }}';
+function mp3Url(id){ return URL_MP3.replace('/0/', '/' + id + '/'); }
+function srtUrl(id){ return URL_SRT.replace('/0/', '/' + id + '/'); }
 
 const spd = document.getElementById('spd');
 if (spd) {
@@ -349,13 +380,39 @@ function pollServers() {
 }
 pollServers();
 
-let jobsReloadNeeded = false;
+// Build a fresh job row (used right after an AJAX submit) so we never full-reload
+// the page (a reload re-runs the slow `sinfo` GPU scan in the page context).
+function makeJobRow(id, name) {
+  const noJob = document.getElementById('noJob');
+  if (noJob) noJob.remove();
+  const tr = document.createElement('tr');
+  tr.id = 'vjob-' + id;
+  tr.innerHTML =
+    '<td>' + id + '</td>' +
+    '<td class="small">' + (name || '') + '</td>' +
+    '<td><div class="progress" style="height:6px">' +
+      '<div class="progress-bar" data-bar role="progressbar" style="width:0%"></div>' +
+      '</div><span class="text-muted small" data-stage>chờ…</span></td>' +
+    '<td><span class="pill pill-queued" data-st>chờ</span></td>' +
+    '<td class="text-end text-nowrap">' +
+      '<a class="btn btn-sm btn-outline-success disabled" data-play href="#" ' +
+        'onclick="playJob(' + id + ');return false;" title="Nghe thử"><i class="bi bi-play-circle"></i></a> ' +
+      '<a class="btn btn-sm btn-outline-secondary" href="#" ' +
+        'onclick="showJobLog(' + id + ');return false;" title="Log"><i class="bi bi-terminal"></i></a> ' +
+      '<a class="btn btn-sm btn-outline-primary disabled" data-mp3 href="' + mp3Url(id) + '" title="Tải MP3"><i class="bi bi-filetype-mp3"></i></a> ' +
+      '<a class="btn btn-sm btn-outline-secondary disabled" data-srt href="' + srtUrl(id) + '" title="Tải SRT"><i class="bi bi-badge-cc"></i></a> ' +
+      '<form class="d-inline" method="post" action="/tools/voice/jobs/' + id + '/delete" ' +
+        'data-confirm="Xoá tác vụ #' + id + '?"><button class="btn btn-sm btn-outline-danger" title="Xoá">×</button></form>' +
+    '</td>';
+  document.getElementById('jobBody').prepend(tr);
+}
+
 function pollJobs() {
   fetch('{{ url_for("voice_jobs_json") }}')
     .then(r => r.json())
     .then(d => d.jobs.forEach(j => {
       const row = document.getElementById('vjob-' + j.id);
-      if (!row) { jobsReloadNeeded = true; return; }
+      if (!row) return;
       const bar = row.querySelector('[data-bar]');
       if (bar) bar.style.width = (j.progress || 0) + '%';
       const stage = row.querySelector('[data-stage]');
@@ -363,19 +420,56 @@ function pollJobs() {
       const pill = row.querySelector('[data-st]');
       if (pill) { const m = JST[j.status] || ['pill-unknown', j.status];
         pill.className = 'pill ' + m[0]; pill.textContent = m[1]; }
+      const play = row.querySelector('[data-play]');
+      if (play) play.classList.toggle('disabled', !j.has_mp3);
       const mp3 = row.querySelector('[data-mp3]');
       if (mp3) mp3.classList.toggle('disabled', !j.has_mp3);
       const srt = row.querySelector('[data-srt]');
       if (srt) srt.classList.toggle('disabled', !j.has_srt);
     }))
-    .finally(() => {
-      // A brand-new job submitted in another tab/session appears only after a
-      // reload; refresh once when we notice an unknown id.
-      if (jobsReloadNeeded) { jobsReloadNeeded = false; location.reload(); return; }
-      setTimeout(pollJobs, 2500);
-    });
+    .finally(() => setTimeout(pollJobs, 2500));
 }
 pollJobs();
+
+// AJAX submit: no full page reload (which would re-run the slow sinfo scan).
+const jobForm = document.getElementById('jobForm');
+if (jobForm) {
+  jobForm.addEventListener('submit', function (e) {
+    e.preventDefault();
+    const btn = document.getElementById('jobSubmitBtn');
+    btn.disabled = true;
+    fetch(jobForm.action, {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'fetch' },
+      body: new FormData(jobForm),
+    })
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok) {
+          makeJobRow(d.id, d.name);
+          jobForm.querySelector('[name="text"]').value = '';
+          toast('Đã bắt đầu tạo giọng đọc.', 'success');
+        } else {
+          toast(d.error || 'Không tạo được.', 'danger');
+        }
+      })
+      .catch(() => toast('Lỗi kết nối.', 'danger'))
+      .finally(() => { btn.disabled = false; });
+  });
+}
+
+// Audio preview: play the finished MP3 in a modal.
+function playJob(id) {
+  document.getElementById('playId').textContent = '#' + id;
+  const player = document.getElementById('player');
+  player.src = mp3Url(id);
+  document.getElementById('playDl').href = mp3Url(id);
+  const modalEl = document.getElementById('playerModal');
+  bootstrap.Modal.getOrCreateInstance(modalEl).show();
+  player.play().catch(() => {});
+  modalEl.addEventListener('hidden.bs.modal', () => { player.pause(); }, { once: true });
+}
+window.playJob = playJob;
 
 let logTimer = null;
 function openLog(title, urlBase, id) {

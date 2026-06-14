@@ -909,8 +909,13 @@ def voice_profile_delete(profile_id):
 @app.route("/tools/voice/jobs/submit", methods=["POST"])
 def voice_job_submit():
     f = request.form
+    # The page submits via fetch (X-Requested-With) so we DON'T re-render the
+    # whole tool page on every job (that re-runs the slow `sinfo` GPU scan).
+    # Return JSON for XHR; keep the redirect as a no-JS fallback.
+    wants_json = (request.headers.get("X-Requested-With") == "fetch"
+                  or "application/json" in request.headers.get("Accept", ""))
     try:
-        voice_pipeline.start_job(
+        job_id = voice_pipeline.start_job(
             name=f.get("name", ""),
             text=f.get("text", ""),
             profile_name=f.get("profile", "").strip(),
@@ -920,8 +925,13 @@ def voice_job_submit():
             speed=f.get("speed", "1.0"),
             denoise=f.get("denoise") is not None,
         )
+        if wants_json:
+            return jsonify({"ok": True, "id": job_id,
+                            "name": (f.get("name", "").strip() or "narration")})
         flash("Đã bắt đầu tạo giọng đọc — theo dõi tiến trình bên dưới.", "success")
     except ValueError as exc:
+        if wants_json:
+            return jsonify({"ok": False, "error": str(exc)}), 400
         flash(str(exc), "danger")
     return redirect(url_for("tool_clone_voice"))
 

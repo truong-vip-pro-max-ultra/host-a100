@@ -62,31 +62,39 @@ dropdown chọn server giọng nói. (Tạo venv tay bằng terminal sẽ KHÔNG
 > `module load cuda`** (driver `libcuda.so.1` đã có sẵn trên GPU node). Card mới
 > hơn (Blackwell 50xx) mới cần cu128 + torch 2.8 — với L40S thì cu124 là an toàn.
 
-### 2. Tải weights OmniVoice vào HF cache chung (web terminal trên login node)
+### 2. Cache weights OmniVoice (chạy script warmup trên login node)
 
-Compute node không có net nên weights phải nằm sẵn trong HF cache **trên FS
-chung** đúng đường dẫn `config.OMNI_HF_HOME` (mặc định `DATA_DIR/hf-cache`).
-Mở **Terminal** trong app rồi:
+Compute node không có net và server chạy `HF_HUB_OFFLINE=1`, nên **mọi** repo
+phải nằm sẵn trong HF cache trên FS chung (`config.OMNI_HF_HOME`, mặc định
+`DATA_DIR/hf-cache`). **`snapshot_download('k2-fsa/OmniVoice')` là CHƯA ĐỦ** —
+OmniVoice còn tải lười (lazy) thêm repo lúc chạy: một vocoder/aux ở lần generate
+đầu, **và một model Whisper ASR khi bạn clone giọng mà KHÔNG điền lời thoại mẫu**
+(nó tự nhận dạng). Mấy repo đó không vào cache qua snapshot_download → server
+offline lỗi đúng các đường đó (`Cannot find an appropriate cached snapshot … offline`).
+
+Dùng script `scripts/warmup_omnivoice.py` (đi theo git) — nó chạy lần lượt cả 3
+đường để kéo đủ mọi repo. Mở **Terminal** trong app:
 
 ```bash
 # Web terminal chặn cd/cat… vào thư mục nguồn — gỡ guard cho phiên này trước:
 unset -f cd ls kill pkill killall cat tac head tail nl less more view vi vim nano strings od xxd bat
 
 cd ~/LeeHoang_/ollama/app/host-a100
-export HF_HOME="$PWD/host-a100-data/hf-cache"
+HF_HOME="$PWD/host-a100-data/hf-cache" HF_HUB_OFFLINE=0 \
+    host-a100-data/envs/env-omnivoice/bin/python scripts/warmup_omnivoice.py
 
-# Dùng CHÍNH python của env vừa tạo (đã có huggingface_hub) để tải:
-host-a100-data/envs/env-omnivoice/bin/python -c \
-  "from huggingface_hub import snapshot_download; snapshot_download('k2-fsa/OmniVoice')"
-
-# Kiểm tra weights đã về:
+# Kiểm tra cache (phải thấy cả 1 thư mục models--…whisper… cho clone):
 ls -la host-a100-data/hf-cache/hub/
 ```
 
-> `env-omnivoice` là TÊN env bạn đặt ở bước 1 (đường dẫn venv =
-> `host-a100-data/envs/<tên>/bin/python`). Đổi model khác: đặt env
-> `HOSTA100_OMNI_MODEL=<repo_id>` (hoặc sửa `config.OMNI_MODEL_ID`) rồi tải đúng
-> repo đó vào cache này.
+> Script chạy trên CPU nên chậm và **có thể báo lỗi ở cuối** — không sao, miễn là
+> phần TẢI đã xong (mỗi bước được chạy theo thứ tự để kéo đủ repo). `env-omnivoice`
+> là tên env bạn đặt ở bước 1. Đổi model khác: đặt `HOSTA100_OMNI_MODEL=<repo_id>`
+> (hoặc sửa `config.OMNI_MODEL_ID`) rồi chạy lại.
+>
+> **Cách né ASR hoàn toàn:** khi clone giọng, ĐIỀN ô "lời thoại mẫu" đúng nội dung
+> file ghi âm → OmniVoice không cần Whisper, chạy offline được ngay cả khi chưa
+> cache ASR.
 
 ### 3. ffmpeg trên login node
 
