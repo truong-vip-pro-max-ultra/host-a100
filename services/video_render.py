@@ -62,6 +62,12 @@ DEFAULT_RENDER = {
     "music_path": "",
     "crf": 20,
     "clip_workers": 0,   # 0 = auto from CPU count
+    # x264 presets: the per-scene clips are intermediate (re-encoded in the final
+    # pass), so a fast preset there is free quality-wise; the final pass governs
+    # the output. Both default fast since this content (stills + slow zoom) stays
+    # clean even at veryfast — the user wants the quickest render.
+    "clip_preset": "veryfast",
+    "final_preset": "veryfast",
 }
 
 
@@ -126,7 +132,8 @@ def _render_scene_clip(scene, index, out, r, work_dir):
 
     args = ["-i", img, "-filter_complex", f"[0:v]{vf}[v]", "-map", "[v]",
             "-t", f"{dur:.3f}", "-r", str(fps),
-            "-c:v", "libx264", "-preset", "medium", "-crf", str(r["crf"]),
+            "-c:v", "libx264", "-preset", r.get("clip_preset", "veryfast"),
+            "-crf", str(r["crf"]),
             "-pix_fmt", "yuv420p", "-an", str(out)]
     rc, log = _run_ffmpeg(args, cwd=work_dir)
     if rc != 0 or not Path(out).exists():
@@ -318,7 +325,10 @@ def render(scenes, work_dir, out_path, render=None, subtitle=None,
     # --- 1. per-scene clips (parallel) ------------------------------------- #
     workers = int(r.get("clip_workers") or 0)
     if workers <= 0:
-        workers = min(8, max(2, (os.cpu_count() or 4) // 3))
+        # Each clip's ffmpeg (zoompan + lanczos) is ~single-threaded, so on a
+        # many-core login node run as many as cores (capped) for the fastest
+        # clip phase. The final pass is one ffmpeg with -threads 0 (all cores).
+        workers = min(16, max(2, os.cpu_count() or 4))
     workers = max(1, min(workers, n))
     _stage(f"Đang dựng {n} cảnh ({workers} luồng song song)")
     done = 0
@@ -396,7 +406,8 @@ def render(scenes, work_dir, out_path, render=None, subtitle=None,
     args = [*inputs, *_FFMPEG_THREADS,
             "-filter_complex_script", filter_script.name,
             "-map", "[v]", "-map", "[a]", "-r", str(r["fps"]),
-            "-c:v", "libx264", "-preset", "medium", "-crf", str(r["crf"]),
+            "-c:v", "libx264", "-preset", r.get("final_preset", "veryfast"),
+            "-crf", str(r["crf"]),
             "-maxrate", r["video_bitrate"], "-bufsize", "16M",
             "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000",

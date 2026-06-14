@@ -38,15 +38,46 @@ except Exception:  # noqa: BLE001 — keep importable in a bare test env
 # --------------------------------------------------------------------------- #
 _BASE_STYLE = "cinematic still, dramatic lighting, highly detailed, sharp focus"
 
+# One art "look" applied to every shot of a video so the whole thing feels like
+# one piece. Key = the value sent by the form's "Phong cách ảnh" dropdown.
 _STYLE_PRESETS = {
-    "cinematic": "",
+    "cinematic": "",  # _BASE_STYLE already covers the house cinematic look
     "realistic": "photorealistic, ultra realistic, lifelike, natural skin texture",
     "documentary": "documentary photography, photojournalism, candid, natural realistic light",
     "3d": "3D render, pixar style, octane render, soft global illumination, subsurface scattering",
     "anime": "anime style, cel shaded, studio anime key visual, clean lineart",
+    "comic": "comic book art, bold ink outlines, halftone shading, dynamic paneling, vivid",
     "oil_painting": "oil painting, visible textured brushstrokes, classical fine art, painterly",
     "watercolor": "watercolor painting, soft washes, paper texture, delicate",
+    "pencil_sketch": "pencil sketch, hand-drawn graphite drawing, fine hatching, "
+                     "sketchbook, monochrome, grayscale, white paper background",
+    "colored_pencil": "colored pencil drawing, hand-drawn, vibrant colored pencils, "
+                      "soft layered strokes, sketchbook, white paper background",
+    "ink_drawing": "pen and ink line art, clean bold outlines, hand-drawn illustration, "
+                   "cross-hatching, black and white, white background",
+    "cartoon_doodle": "cute cartoon illustration, flat vector style, clean bold black "
+                      "outlines, simple rounded shapes, soft flat pastel colors, "
+                      "friendly characters, minimalist explainer doodle, plain white background",
+    "stick_figure": "hand-drawn stick figure doodle, thin black marker lines, round "
+                    "heads with simple smiley faces, stick arms and legs, plain white "
+                    "background, black and white line art, monochrome, no color, "
+                    "minimalist, very simple",
 }
+
+# Drawing presets must NOT inherit the photoreal house look (it fights them).
+_DRAWING_PRESETS = frozenset(
+    {"pencil_sketch", "colored_pencil", "ink_drawing", "cartoon_doodle", "stick_figure"})
+# Presets where the mood's colour/atmosphere tokens leak colour into a monochrome
+# sketch or muddy the flat cartoon look — drop them (mood name still detected).
+_NO_MOOD_PRESETS = frozenset(
+    {"pencil_sketch", "ink_drawing", "cartoon_doodle", "stick_figure"})
+# Playful presets that should NOT lock the recurring subject anchor — the flat
+# look already keeps the video cohesive; the anchor only made shots look alike.
+_NO_ANCHOR_PRESETS = frozenset({"cartoon_doodle", "stick_figure"})
+# Presets whose look is so distinctive it must LEAD the prompt (CLIP weights the
+# first tokens most). For these the style goes first + the subject stays short.
+_STYLE_FIRST_PRESETS = frozenset({"stick_figure"})
+_STYLE_FIRST_LEAD = {"stick_figure": "a simple black stick figure line drawing of"}
 
 DEFAULT_NEGATIVE = (
     "lowres, bad anatomy, bad hands, text, watermark, signature, blurry, "
@@ -164,13 +195,29 @@ def translate_to_en(text):
 # Rule-based prompt assembly
 # --------------------------------------------------------------------------- #
 def build_prompt(subject, anchor, mood_style, style_preset, negative):
+    """Assemble {subject, anchor, mood, style, base} with per-preset handling
+    (drawings drop the photoreal base + mood colours; style-first presets like
+    stick figures lead with the style and bind it to the subject)."""
     subject = re.sub(r"\s+", " ", (subject or "")).strip().strip('"“”')
-    if len(subject) > 200:
-        subject = subject[:200].rsplit(" ", 1)[0]
+    style_first = style_preset in _STYLE_FIRST_PRESETS
+    cap = 110 if style_first else 200   # style-first must let the style win
+    if len(subject) > cap:
+        subject = subject[:cap].rsplit(" ", 1)[0]
     if not subject:
         subject = "cinematic establishing shot"
+
     preset = _STYLE_PRESETS.get(style_preset, "")
-    parts = [subject, (anchor or "").strip(), mood_style or "", preset, _BASE_STYLE]
+    base = "" if style_preset in _DRAWING_PRESETS else _BASE_STYLE
+    mood_part = "" if style_preset in _NO_MOOD_PRESETS else (mood_style or "")
+    anchor_part = "" if style_preset in _NO_ANCHOR_PRESETS else (anchor or "").strip()
+
+    if style_first and preset:
+        lead = _STYLE_FIRST_LEAD.get(style_preset, "")
+        if lead and subject:
+            subject = f"{lead} {subject[0].lower()}{subject[1:]}"
+        parts = [subject, preset, anchor_part, mood_part, base]
+    else:
+        parts = [subject, anchor_part, mood_part, preset, base]
     positive = ", ".join(p for p in parts if p)
     positive = re.sub(r"\s*,\s*,\s*", ", ", positive).strip(" ,")
     return positive, (negative or DEFAULT_NEGATIVE)
@@ -252,18 +299,24 @@ def _chat(messages, max_tokens, timeout):
         return ""
 
 
-def llm_visual_prompts(texts, timeout=180):
+def llm_visual_prompts(texts, timeout=180, simple=False):
     """Rewrite ALL narration lines in ONE LLM call (the API-farm server runs
     --parallel 1, so one batched request is far faster than N parallel ones that
     just queue server-side). Returns a list aligned with ``texts`` (each item is
     the rewritten prompt or "" if unusable), or [] on total failure → the caller
-    falls back to rule-based + translation."""
+    falls back to rule-based + translation. ``simple`` keeps each scene to the
+    bare subject + one action (for stick-figure / minimal drawing styles)."""
     texts = [(t or "").strip() for t in texts]
     if not texts or serve_service is None:
         return []
+    instruction = _LLM_BATCH_INSTRUCTION
+    if simple:
+        instruction += ("\nIMPORTANT: keep EACH scene VERY simple — name only the "
+                        "main subject(s) and ONE clear action. No detailed scenery, "
+                        "backgrounds, lighting or extra objects. Max ~12 words each.")
     numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
     out = _chat(
-        [{"role": "system", "content": _LLM_BATCH_INSTRUCTION},
+        [{"role": "system", "content": instruction},
          {"role": "user", "content": f"{len(texts)} narration lines:\n{numbered}"}],
         max_tokens=min(1600, 90 * len(texts) + 200), timeout=timeout)
     if not out:
@@ -366,7 +419,9 @@ def build_prompts(chunks, style_preset="cinematic", negative="", use_llm=True,
         # just queue → slow). Falls back to rule-based+translate on any failure.
         _log(f"  ➤ viết prompt ảnh bằng LLM API farm (1 lượt, {len(chunks)} cảnh)…")
         t0 = time.time()
-        got = llm_visual_prompts(chunks)
+        simple = (style_preset in _STYLE_FIRST_PRESETS
+                  or style_preset in _DRAWING_PRESETS)
+        got = llm_visual_prompts(chunks, simple=simple)
         if got:
             visuals = got
             _log(f"  ✓ LLM xong {sum(1 for v in visuals if v)}/{len(chunks)} cảnh "

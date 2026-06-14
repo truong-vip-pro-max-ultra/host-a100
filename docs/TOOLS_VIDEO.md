@@ -110,14 +110,42 @@ Như tool voice: bỏ static build vào `ffmpeg/` cạnh `app.py`, hoặc PATH, 
 
 ---
 
+## Phong cách ảnh
+
+Dropdown "Phong cách ảnh" có đủ nhóm: **Ảnh/điện ảnh** (cinematic, realistic,
+documentary), **Hoạt hình/3D** (3d/Pixar, anime, comic, cartoon doodle), **Tranh vẽ
+tay** (sơn dầu, màu nước, bút chì, bút chì màu, bút mực), **Tối giản** (người que /
+stick figure). Style được áp cho TOÀN video để đồng nhất. Các style vẽ tay tự bỏ
+"cinematic still / sharp focus" (khỏi cãi nhau với nét vẽ) và bỏ tông màu mood ở
+sketch; **người que** đưa style lên đầu prompt + ép cảnh đơn giản (LLM cũng được yêu
+cầu viết cảnh tối giản cho các style này). Logic ở `services/video_prompts.py`
+(`_DRAWING_PRESETS`, `_NO_MOOD_PRESETS`, `_NO_ANCHOR_PRESETS`, `_STYLE_FIRST_PRESETS`).
+
+## Vắt GPU + dựng nhanh
+
+- **True GPU batching cho ảnh:** `ImageEngine.generate_batch` chạy NHIỀU prompt trong
+  **một lần gọi pipe** (mỗi ảnh một generator riêng để giữ seed) → lấp VRAM, nhanh hơn
+  hẳn trên card 40–48GB. Defensive: gom theo cùng kích thước/steps, lỗi/**OOM** ở
+  một nhóm → tự lùi về từng ảnh + `empty_cache` (không bao giờ làm hỏng cả job). Chỉnh
+  bằng field **Batch ảnh** trên form (vd 6–12 trên A100/L40S).
+- **Batch ảnh & batch giọng RIÊNG:** hai field độc lập trên form (ảnh dùng VRAM khác
+  giọng). Mặc định = `HOSTA100_IMAGE_MAX_BATCH` / `HOSTA100_OMNI_MAX_BATCH`.
+- **TF32 + cudnn.benchmark** bật cho cả image pipe lẫn OmniVoice.
+- **ffmpeg nhanh nhất:** clip mỗi cảnh render **song song = số core** (cap 16), preset
+  `veryfast` cho cả clip trung gian lẫn pass cuối (`-threads 0`), nội dung still +
+  slow-zoom vẫn nét. Đổi qua `render={clip_preset, final_preset, clip_workers}` trong
+  `video_render.DEFAULT_RENDER` nếu muốn ưu tiên chất lượng hơn tốc độ.
+
 ## Tham số / env knobs
 
-| Env | Mặc định | Ý nghĩa | Đổi cần gì |
+| Env / field | Mặc định | Ý nghĩa | Đổi cần gì |
 |---|---|---|---|
 | `HOSTA100_IMAGE_MODEL` | `stabilityai/sdxl-turbo` | Model text-to-image GPU lazy-load | recreate server |
-| `HOSTA100_IMAGE_MAX_BATCH` | `4` | Số ảnh / request `/generate_image_batch` | restart app |
-| (UI) Batch ảnh | = IMAGE_MAX_BATCH | Số ảnh gửi GPU mỗi lần (mỗi job) | không |
-| (UI) Số bước ảnh | `4` | Steps SDXL (Turbo: 1–4) | không |
+| `HOSTA100_IMAGE_MAX_BATCH` | `4` | Mặc định cho field "Batch ảnh" | restart app |
+| (UI) Batch ảnh | = IMAGE_MAX_BATCH | Số ảnh gen **song song** trên GPU mỗi lần | không |
+| (UI) Batch giọng | = OMNI_MAX_BATCH | Số đoạn giọng nạp GPU mỗi lần | không |
+| (UI) Số bước ảnh | `4` | Steps SDXL (Turbo: 1–4; style vẽ tăng nhẹ) | không |
+| (UI) Số bước giọng | `16` | num_step OmniVoice | không |
 
 Login-side (pipeline/render/UI/routes/prompt) đổi gì cũng chỉ cần **git pull +
 DETACHED restart app**. Chỉ khi đổi `--image-model`/model/quant/env của GPU mới cần

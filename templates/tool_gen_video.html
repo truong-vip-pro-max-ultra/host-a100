@@ -68,13 +68,27 @@
           <div class="col-6 mb-2">
             <label class="form-label">Phong cách ảnh</label>
             <select class="form-select" name="style">
-              <option value="cinematic" selected>Điện ảnh (cinematic)</option>
-              <option value="realistic">Ảnh thật (photorealistic)</option>
-              <option value="documentary">Tư liệu (documentary)</option>
-              <option value="3d">3D / Pixar</option>
-              <option value="anime">Anime</option>
-              <option value="oil_painting">Sơn dầu</option>
-              <option value="watercolor">Màu nước</option>
+              <optgroup label="Ảnh / điện ảnh">
+                <option value="cinematic" selected>Điện ảnh (cinematic)</option>
+                <option value="realistic">Ảnh thật (photorealistic)</option>
+                <option value="documentary">Tư liệu (documentary)</option>
+              </optgroup>
+              <optgroup label="Hoạt hình / 3D">
+                <option value="3d">3D / Pixar</option>
+                <option value="anime">Anime</option>
+                <option value="comic">Truyện tranh (comic)</option>
+                <option value="cartoon_doodle">Hoạt hình doodle (phẳng, dễ thương)</option>
+              </optgroup>
+              <optgroup label="Tranh vẽ tay">
+                <option value="oil_painting">Sơn dầu</option>
+                <option value="watercolor">Màu nước</option>
+                <option value="pencil_sketch">Bút chì (đen trắng)</option>
+                <option value="colored_pencil">Bút chì màu</option>
+                <option value="ink_drawing">Bút mực (line art)</option>
+              </optgroup>
+              <optgroup label="Tối giản">
+                <option value="stick_figure">Người que (stick figure)</option>
+              </optgroup>
             </select>
           </div>
           <div class="col-6 mb-2">
@@ -109,13 +123,32 @@
             <label class="form-label">Batch ảnh (GPU)</label>
             <input type="number" class="form-control" name="image_batch" min="1" max="32"
                    value="{{ image_max_batch }}">
-            <div class="form-text">Số ảnh gửi GPU mỗi lần. OOM thì giảm.</div>
+            <div class="form-text"><b>Vắt VRAM:</b> số ảnh gen <b>song song trong 1
+              lần</b> trên GPU. Tăng (vd 6–12) trên card 40–48GB = nhanh hơn nhiều;
+              OOM thì giảm (tự lùi về từng ảnh nếu hết VRAM).</div>
           </div>
+          <div class="col-6 mb-2">
+            <label class="form-label">Batch giọng (GPU)</label>
+            <input type="number" class="form-control" name="voice_batch" min="1" max="64"
+                   value="{{ omni_max_batch }}">
+            <div class="form-text">Số đoạn giọng nạp vào GPU mỗi lần. Tăng = nhanh,
+              OOM thì giảm.</div>
+          </div>
+        </div>
+        <div class="row g-2">
           <div class="col-6 mb-2">
             <label class="form-label">Số bước ảnh</label>
             <input type="number" class="form-control" name="image_steps" min="1" max="50"
                    value="4">
-            <div class="form-text">SDXL-Turbo: 1–4 là đủ.</div>
+            <div class="form-text">SDXL-Turbo: 1–4 là đủ. Style vẽ/anime có thể tăng nhẹ.</div>
+          </div>
+          <div class="col-6 mb-2">
+            <label class="form-label">Số bước giọng</label>
+            <select class="form-select" name="num_step">
+              <option value="8">8 — nhanh nhất</option>
+              <option value="16" selected>16 — cân bằng</option>
+              <option value="24">24 — nét hơn</option>
+            </select>
           </div>
         </div>
 

@@ -1036,6 +1036,7 @@ def _video_context():
         gpu_ready=bool(ep),
         image_model=config.IMAGE_MODEL_ID,
         image_max_batch=config.IMAGE_MAX_BATCH,
+        omni_max_batch=config.OMNI_MAX_BATCH,
         llm_ready=video_pipeline.video_prompts.llm_available(),
         ffmpeg_ok=config.ffmpeg_available(),
     )

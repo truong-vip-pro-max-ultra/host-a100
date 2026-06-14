@@ -545,32 +545,40 @@ class ImageEngine:
                 pipe.set_progress_bar_config(disable=True)
             except Exception:
                 pass
+            # Squeeze the GPU: TF32 matmul/conv (Ada/Ampere have fast TF32) + the
+            # cudnn autotuner. Inference-only, harmless on CPU. (OmniEngine sets the
+            # same; do it here too in case the image model loads first.)
+            try:
+                torch.backends.cudnn.benchmark = True
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                if hasattr(torch, "set_float32_matmul_precision"):
+                    torch.set_float32_matmul_precision("high")
+            except Exception:
+                pass
             self._pipe = pipe
             print(f"[image] model ready (high_vram={self._high_vram}).", flush=True)
             return pipe
 
-    def generate(self, prompt, negative, out_path, width=1024, height=576,
-                 steps=24, cfg=7.0, seed=-1):
+    def _prep(self, item):
+        """Normalise one request item into the kwargs the pipe needs."""
         import random
-        import torch
-        pipe = self.load()
-        if seed is None or seed < 0:
-            seed = random.randint(0, 2 ** 31 - 1)
-        w, h = self._target_size(int(width), int(height))
+        w, h = self._target_size(int(item.get("width", 1024) or 1024),
+                                 int(item.get("height", 576) or 576))
         if self._is_turbo:
-            steps = max(1, min(int(steps), 4))
-            guidance = 0.0
-            neg = None
+            steps, guidance, neg = max(1, min(int(item.get("steps", 4) or 4), 4)), 0.0, None
         else:
-            steps = max(1, int(steps))
-            guidance = float(cfg)
-            neg = negative or None
-        with self._lock:
-            generator = torch.Generator(device=self._device).manual_seed(int(seed))
-            result = pipe(prompt=prompt, negative_prompt=neg,
-                          num_inference_steps=steps, guidance_scale=guidance,
-                          width=w, height=h, generator=generator)
-            image = result.images[0]
+            steps = max(1, int(item.get("steps", 24) or 24))
+            guidance = float(item.get("cfg", 7.0) or 7.0)
+            neg = (item.get("negative") or "") or None
+        seed = int(item.get("seed", -1))
+        if seed < 0:
+            seed = random.randint(0, 2 ** 31 - 1)
+        return {"prompt": (item.get("prompt") or "").strip(), "neg": neg, "w": w,
+                "h": h, "steps": steps, "guidance": guidance, "seed": seed,
+                "out_path": item.get("out_path", "")}
+
+    def _save(self, image, out_path):
         out = Path(out_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         if out.suffix.lower() not in (".png", ".jpg", ".jpeg"):
@@ -579,6 +587,89 @@ class ImageEngine:
         if not out.exists() or out.stat().st_size < 256:
             raise RuntimeError("Diffusers produced an empty image")
         return str(out)
+
+    def _run_group(self, pipe, group):
+        """ONE pipe call over a LIST of prompts (true GPU batch) → list of PIL.
+        All items in a group share w/h/steps/guidance. Negatives: list, or None
+        for turbo. Per-image generators keep each scene's seed reproducible."""
+        import torch
+        g0 = group[0]
+        prompts = [p["prompt"] for p in group]
+        negs = None if g0["neg"] is None else [(p["neg"] or "") for p in group]
+        gens = [torch.Generator(device=self._device).manual_seed(p["seed"]) for p in group]
+        result = pipe(prompt=prompts, negative_prompt=negs,
+                      num_inference_steps=g0["steps"], guidance_scale=g0["guidance"],
+                      width=g0["w"], height=g0["h"], generator=gens)
+        return result.images
+
+    def generate(self, prompt, negative, out_path, width=1024, height=576,
+                 steps=24, cfg=7.0, seed=-1):
+        """Single image (the /generate_image endpoint)."""
+        pipe = self.load()
+        p = self._prep({"prompt": prompt, "negative": negative, "out_path": out_path,
+                        "width": width, "height": height, "steps": steps,
+                        "cfg": cfg, "seed": seed})
+        with self._lock:
+            image = self._run_group(pipe, [p])[0]
+        return self._save(image, out_path)
+
+    def generate_batch(self, items):
+        """TRUE GPU batching: run a LIST of prompts through the pipe in ONE call so
+        the GPU does them in parallel (fills VRAM, big throughput win on a 40-48GB
+        card). DEFENSIVE — items are grouped by shape (w/h/steps/guidance) and any
+        error (incl. CUDA OOM) in a group falls back to per-image, so a too-large
+        batch never aborts the job; just lower the batch next time. Returns a list
+        of {ok, out_path[, error]} aligned with ``items``."""
+        pipe = self.load()
+        prep = [self._prep(it) for it in items]
+        n = len(prep)
+        results = [None] * n
+        with self._lock:
+            i = 0
+            while i < n:
+                j = i + 1
+                while (j < n and prep[j]["w"] == prep[i]["w"]
+                       and prep[j]["h"] == prep[i]["h"]
+                       and prep[j]["steps"] == prep[i]["steps"]
+                       and prep[j]["guidance"] == prep[i]["guidance"]):
+                    j += 1
+                group = prep[i:j]
+                images = None
+                if len(group) > 1:
+                    try:
+                        images = self._run_group(pipe, group)
+                        if not isinstance(images, list) or len(images) != len(group):
+                            images = None
+                    except Exception as exc:  # noqa: BLE001 — OOM etc → per-image
+                        print(f"[image] batch of {len(group)} failed ({exc}); "
+                              "per-image fallback.", flush=True)
+                        images = None
+                        try:
+                            import torch
+                            torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+                if images is not None:
+                    print(f"[image] batched {len(group)} images in one call.", flush=True)
+                    for k, (p, img) in enumerate(zip(group, images)):
+                        try:
+                            results[i + k] = {"ok": True,
+                                              "out_path": self._save(img, p["out_path"])}
+                        except Exception as exc:  # noqa: BLE001
+                            results[i + k] = {"ok": False, "error": str(exc),
+                                              "out_path": p["out_path"]}
+                else:
+                    for k, p in enumerate(group):
+                        try:
+                            img = self._run_group(pipe, [p])[0]
+                            results[i + k] = {"ok": True,
+                                              "out_path": self._save(img, p["out_path"])}
+                        except Exception as exc:  # noqa: BLE001
+                            traceback.print_exc()
+                            results[i + k] = {"ok": False, "error": str(exc),
+                                              "out_path": p["out_path"]}
+                i = j
+        return results
 
 
 ENGINE: OmniEngine | None = None
@@ -669,28 +760,15 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(items, list) or not items:
                 self._send_json({"error": "items trống"}, 400)
                 return
-            results = []
-            for it in items:
-                op = (it.get("out_path") or "").strip()
-                if not op:
-                    results.append({"ok": False, "error": "thiếu out_path"})
-                    continue
-                try:
-                    path = IMAGE_ENGINE.generate(
-                        prompt=(it.get("prompt") or "").strip(),
-                        negative=(it.get("negative") or ""),
-                        out_path=op,
-                        width=int(it.get("width", 1024) or 1024),
-                        height=int(it.get("height", 576) or 576),
-                        steps=int(it.get("steps", 24) or 24),
-                        cfg=float(it.get("cfg", 7.0) or 7.0),
-                        seed=int(it.get("seed", -1)),
-                    )
-                    results.append({"ok": True, "out_path": path})
-                except Exception as exc:  # noqa: BLE001 — one bad image must not abort
-                    traceback.print_exc()
-                    results.append({"ok": False, "error": str(exc), "out_path": op})
-            self._send_json({"ok": True, "results": results})
+            if any(not (it.get("out_path") or "").strip() for it in items):
+                self._send_json({"error": "có item thiếu out_path"}, 400)
+                return
+            try:
+                results = IMAGE_ENGINE.generate_batch(items)
+                self._send_json({"ok": True, "results": results})
+            except Exception as exc:
+                traceback.print_exc()
+                self._send_json({"ok": False, "error": str(exc)}, 500)
             return
 
         if route == "/generate_image":
