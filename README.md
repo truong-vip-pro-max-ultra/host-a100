@@ -103,6 +103,14 @@ are absent.
   `inference_runner.py`; users only pick model + env + JSON params.
 - Destructive actions require a confirm dialog.
 
+## API farm (LLM serving)
+
+The **API farm** tab serves an OpenAI- and Anthropic-compatible LLM API off a
+GPU node (native `llama-server`), usable from Claude Code, Cline, aider, the
+OpenAI SDK, or the built-in Chat tab. Build/setup, the Anthropic bridge,
+performance tuning, tests, and deploy/ops are documented in
+**[docs/API_FARM.md](docs/API_FARM.md)**.
+
 ## Inference runner
 
 `inference_runner.py` ships with the platform and is the only code a job
