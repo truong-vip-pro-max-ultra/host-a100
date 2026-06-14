@@ -476,21 +476,35 @@ function bulkDelete(all) {
   const body = new FormData();
   if (all) body.append('all', '1');
   else ids.forEach(id => body.append('ids', id));
+  const selBtn = document.getElementById('delSelBtn');
+  const allBtn = document.getElementById('delAllBtn');
+  btnBusy(all ? allBtn : selBtn, 'Đang xoá…');
+  if (window.Loader) Loader.start();
   fetch('{{ url_for("voice_jobs_bulk_delete") }}', {
     method: 'POST', headers: { 'X-Requested-With': 'fetch' }, body,
   })
     .then(r => r.json())
     .then(d => {
       const removeIds = all ? Array.from(document.querySelectorAll('.job-cb')).map(c => c.value) : ids;
-      removeIds.forEach(id => { const row = document.getElementById('vjob-' + id); if (row) row.remove(); });
-      if (!document.querySelector('#jobBody tr')) {
-        document.getElementById('jobBody').innerHTML =
-          '<tr id="noJob"><td colspan="6" class="text-muted">Chưa có tác vụ nào.</td></tr>';
-      }
-      updateSel();
+      removeIds.forEach(id => {
+        const row = document.getElementById('vjob-' + id);
+        if (row) {
+          row.style.transition = 'opacity .25s ease';
+          row.style.opacity = '0';
+          setTimeout(() => row.remove(), 250);
+        }
+      });
+      setTimeout(() => {
+        if (!document.querySelector('#jobBody tr')) {
+          document.getElementById('jobBody').innerHTML =
+            '<tr id="noJob"><td colspan="6" class="text-muted">Chưa có tác vụ nào.</td></tr>';
+        }
+        updateSel();
+      }, 270);
       toast('Đã xoá ' + (d.deleted || 0) + ' tác vụ.', 'success');
     })
-    .catch(() => toast('Lỗi khi xoá.', 'danger'));
+    .catch(() => toast('Lỗi khi xoá.', 'danger'))
+    .finally(() => { btnReset(selBtn); btnReset(allBtn); if (window.Loader) Loader.done(); });
 }
 window.toggleAll = toggleAll; window.updateSel = updateSel; window.bulkDelete = bulkDelete;
 
@@ -518,13 +532,28 @@ function pollJobs() {
 }
 pollJobs();
 
+// Swap a button to a spinner + label while busy, restore afterwards.
+function btnBusy(btn, label) {
+  if (!btn) return;
+  if (btn.dataset.orig === undefined) btn.dataset.orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm" '
+    + 'style="vertical-align:-.125em" role="status" aria-hidden="true"></span>'
+    + (label ? ' ' + label : '');
+}
+function btnReset(btn) {
+  if (!btn || btn.dataset.orig === undefined) return;
+  btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; btn.disabled = false;
+}
+
 // AJAX submit: no full page reload (which would re-run the slow sinfo scan).
 const jobForm = document.getElementById('jobForm');
 if (jobForm) {
   jobForm.addEventListener('submit', function (e) {
     e.preventDefault();
     const btn = document.getElementById('jobSubmitBtn');
-    btn.disabled = true;
+    btnBusy(btn, 'Đang gửi…');
+    if (window.Loader) Loader.start();
     fetch(jobForm.action, {
       method: 'POST',
       headers: { 'X-Requested-With': 'fetch' },
@@ -541,7 +570,7 @@ if (jobForm) {
         }
       })
       .catch(() => toast('Lỗi kết nối.', 'danger'))
-      .finally(() => { btn.disabled = false; });
+      .finally(() => { btnReset(btn); if (window.Loader) Loader.done(); });
   });
 }
 
