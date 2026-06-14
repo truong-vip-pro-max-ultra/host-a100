@@ -51,6 +51,48 @@ def _job_log(job_dir, text):
         pass
 
 
+def _write_scenes(job_dir, scenes):
+    """Persist the per-scene storyboard (text + image prompt + image-ready flag) so
+    the UI can show the generated images as they appear. Rewritten after the prompt
+    step and after each image batch (cheap; n is small)."""
+    try:
+        with open(os.path.join(job_dir, "scenes.json"), "w", encoding="utf-8") as fh:
+            json.dump({"scenes": scenes}, fh, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def get_scenes(job_id):
+    """Storyboard for a job: list of {i, text, prompt, image} with image-existence
+    reconciled against the files on disk at read time."""
+    job = get_job(job_id)
+    if not job or not job.get("logs_path"):
+        return []
+    job_dir = job["logs_path"]
+    scenes = []
+    try:
+        with open(os.path.join(job_dir, "scenes.json"), encoding="utf-8") as fh:
+            scenes = (json.load(fh) or {}).get("scenes") or []
+    except (OSError, ValueError):
+        return []
+    for s in scenes:
+        idx = int(s.get("i", 0)) - 1
+        img = os.path.join(job_dir, f"img_{idx:04d}.png")
+        s["image"] = idx >= 0 and os.path.exists(img) and os.path.getsize(img) > 256
+    return scenes
+
+
+def scene_image_path(job_id, idx):
+    """Absolute path to a scene PNG if it exists inside the job dir, else None."""
+    job = get_job(job_id)
+    if not job or not job.get("logs_path"):
+        return None
+    p = os.path.join(job["logs_path"], f"img_{int(idx):04d}.png")
+    if file_utils.is_within(config.VIDEO_OUTPUTS_DIR, p) and os.path.exists(p):
+        return p
+    return None
+
+
 _HR_RE = re.compile(r"^[-=_*~]{3,}$")                  # --- / *** rule lines
 _BRACKET_HEADER_RE = re.compile(r"^\[.*\]$")           # [PHẦN 1 – 0:10-0:30]
 # A short label ending with ":" (Narrator:, Caster:, Khán giả hô vang:). \w under
@@ -120,7 +162,7 @@ def _set_job(job_id, **fields):
 def start_job(name, script, profile_name="", language="vi", voice_seed=0,
               num_step=16, style="cinematic", use_llm=True, width=1920,
               height=1080, fps=30, ken_burns=True, image_steps=4,
-              image_batch=None, voice_batch=None, music_path=""):
+              image_batch=None, voice_batch=None, music_path="", voice_speed=1.0):
     """Create a video_jobs row + kick off the render thread. Validates that a GPU
     server is ready, ffmpeg exists, and the script is non-empty."""
     script = (script or "").strip()
@@ -145,8 +187,11 @@ def start_job(name, script, profile_name="", language="vi", voice_seed=0,
         image_steps = max(1, int(image_steps))
         ib = max(1, int(image_batch)) if image_batch else config.IMAGE_MAX_BATCH
         vb = max(1, int(voice_batch)) if voice_batch else None
+        voice_speed = float(voice_speed)
     except (TypeError, ValueError):
-        raise ValueError("Tham số số (seed/steps/kích thước/batch) không hợp lệ.")
+        raise ValueError("Tham số số (seed/steps/kích thước/batch/tốc độ) không hợp lệ.")
+    if not (0.5 <= voice_speed <= 2.0):
+        raise ValueError("Tốc độ đọc phải trong khoảng 0.5–2.0.")
 
     params = {
         "profile": profile_name, "language": language or "vi",
@@ -155,6 +200,7 @@ def start_job(name, script, profile_name="", language="vi", voice_seed=0,
         "width": width, "height": height, "fps": fps,
         "ken_burns": bool(ken_burns), "image_steps": image_steps,
         "image_batch": ib, "voice_batch": vb, "music_path": music_path or "",
+        "voice_speed": voice_speed,
     }
     name = (name or "video").strip()[:128]
     job_id = db.execute(
@@ -222,6 +268,13 @@ def _run_job(job_id, script, params):
             chunks, style_preset=params.get("style", "cinematic"),
             use_llm=params.get("use_llm", True), on_log=log)
 
+        # Storyboard: record each scene's text + image prompt now (images not yet
+        # ready) so the UI can show them filling in as the GPU renders.
+        scene_meta = [{"i": i + 1, "text": chunks[i],
+                       "prompt": prompts[i]["prompt"], "image": False}
+                      for i in range(n)]
+        _write_scenes(job_dir, scene_meta)
+
         # --- images (GPU, grouped) ---------------------------------------- #
         w, h = params["width"], params["height"]
         steps = params.get("image_steps", 4)
@@ -248,6 +301,8 @@ def _run_job(job_id, script, params):
                 if not (r or {}).get("ok"):
                     log(f"  ! ảnh cảnh {i + 1} lỗi: {(r or {}).get('error', '?')} "
                         "→ dùng nền phẳng")
+                scene_meta[i]["image"] = os.path.exists(img_paths[i])
+            _write_scenes(job_dir, scene_meta)   # surface the new images live
             done += len(grp)
 
         # --- voice (GPU, reuse voice_pipeline) ----------------------------- #
@@ -281,22 +336,33 @@ def _run_job(job_id, script, params):
             done += len(grp)
 
         # --- assemble scenes ---------------------------------------------- #
+        # Reading speed: the narration is time-stretched by `speed` in the renderer
+        # (pitch-preserved atempo), so a voiced scene's ON-SCREEN time is the raw
+        # speech length / speed. Faster reading → shorter scenes → shorter video;
+        # the picture + subtitles follow the audio exactly. Silent scenes keep their
+        # text-based estimate (no speech to speed up).
+        speed = float(params.get("voice_speed", 1.0)) or 1.0
         scenes = []
         for i in range(n):
             img = img_paths[i] if os.path.exists(img_paths[i]) else ""
             wav = wav_paths[i] if (os.path.exists(wav_paths[i])
                                    and os.path.getsize(wav_paths[i]) > 256) else ""
-            # No voice → give the scene a sane on-screen time from its text length.
-            dur = durations[i] if durations[i] > 0 else max(2.5, len(chunks[i]) / 16.0)
+            if durations[i] > 0:
+                dur = durations[i] / speed
+            else:
+                dur = max(2.5, len(chunks[i]) / 16.0)
             scenes.append({"text": chunks[i], "image_path": img,
                            "audio_path": wav, "duration": dur})
+        if abs(speed - 1.0) > 1e-3:
+            log(f"Tốc độ đọc {speed:.2f}× — thời lượng mỗi cảnh & video co/giãn theo.")
 
         # --- render -------------------------------------------------------- #
         _set_job(job_id, stage="Đang dựng video (ffmpeg)…", progress=70)
         out_mp4 = os.path.join(job_dir, f"{_ascii_slug(job['name'], f'video_{job_id}')}.mp4")
         render_cfg = {"width": w, "height": h, "fps": params.get("fps", 30),
                       "ken_burns": params.get("ken_burns", True),
-                      "music_path": params.get("music_path", "")}
+                      "music_path": params.get("music_path", ""),
+                      "voice_speed": speed}
         mp4, srt = video_render.render(
             scenes, job_dir, out_mp4, render=render_cfg,
             on_log=log,

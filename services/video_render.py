@@ -60,6 +60,10 @@ DEFAULT_RENDER = {
     "ken_burns_intensity": 0.12,
     "music_volume": 0.12,
     "music_path": "",
+    # Narration reading speed (pitch-preserved atempo): >1 faster, <1 slower. The
+    # scene durations are pre-scaled by 1/speed in the pipeline, so the picture +
+    # subtitles follow the audio exactly.
+    "voice_speed": 1.0,
     "crf": 20,
     "clip_workers": 0,   # 0 = auto from CPU count
     # x264 presets: the per-scene clips are intermediate (re-encoded in the final
@@ -174,10 +178,31 @@ def _audio_inputs(scenes, base):
     return inputs
 
 
-def _voice_concat_filters(scenes, start_idx):
+def _atempo_chain(speed):
+    """ffmpeg atempo factors for an arbitrary speed, each within 0.5–2.0 (atempo
+    preserves pitch — speed up/down without the chipmunk/monster effect)."""
+    speed = float(speed)
+    if abs(speed - 1.0) < 1e-3 or speed <= 0:
+        return []
+    factors, remaining = [], speed
+    while remaining > 2.0:
+        factors.append(2.0)
+        remaining /= 2.0
+    while remaining < 0.5:
+        factors.append(0.5)
+        remaining /= 0.5
+    factors.append(remaining)
+    return [f"atempo={f:.6f}" for f in factors]
+
+
+def _voice_concat_filters(scenes, start_idx, speed=1.0):
     lead_trim = (f"silenceremove=start_periods=1:start_threshold="
                  f"{_NARRATION_SILENCE_DB}:start_silence={_NARRATION_EDGE_KEEP}:"
                  f"detection=peak,")
+    # Time-stretch the narration to the chosen reading speed BEFORE it's locked to
+    # the (already 1/speed-scaled) scene duration. Pitch is preserved.
+    tempo = _atempo_chain(speed)
+    tempo_str = (",".join(tempo) + ",") if tempo else ""
     lines, labels = [], []
     for k, s in enumerate(scenes):
         idx = start_idx + k
@@ -186,6 +211,7 @@ def _voice_concat_filters(scenes, start_idx):
         chain = (
             "aresample=async=1,"
             "aformat=sample_rates=48000:channel_layouts=stereo,"
+            f"{tempo_str}"
             f"{lead_trim}"
             f"apad,atrim=0:{dur:.3f},asetpts=N/SR/TB,"
             f"afade=t=in:st=0:d={_DECLICK_FADE},"
@@ -427,7 +453,8 @@ def render(scenes, work_dir, out_path, render=None, subtitle=None,
         inputs += ["-stream_loop", "-1", "-i", str(music)]
         music_idx = audio_start + n
 
-    filters = list(_voice_concat_filters(scenes, audio_start))
+    filters = list(_voice_concat_filters(scenes, audio_start,
+                                         speed=float(r.get("voice_speed", 1.0))))
     if has_music:
         filters.append(f"[{music_idx}:a]volume={r['music_volume']}[mus]")
         filters.append("[voc][mus]amix=inputs=2:duration=first:normalize=0[mix]")

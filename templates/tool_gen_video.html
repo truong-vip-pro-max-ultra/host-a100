@@ -4,6 +4,33 @@
 {% block page_sub %}Kịch bản → video: ảnh AI (SDXL) + giọng OmniVoice + phụ đề + Ken Burns · dùng chung GPU với Clone giọng nói{% endblock %}
 {% block content %}
 
+<style>
+  /* Storyboard gallery */
+  .scene-card { border:1px solid var(--bs-border-color); border-radius:.6rem;
+                overflow:hidden; background:var(--bs-tertiary-bg); height:100%; }
+  .scene-thumb { position:relative; aspect-ratio:16/9; background:#0d1117;
+                 display:flex; align-items:center; justify-content:center;
+                 overflow:hidden; cursor:zoom-in; }
+  .scene-thumb img { width:100%; height:100%; object-fit:cover; display:block;
+                     transition:transform .25s ease; }
+  .scene-thumb:hover img { transform:scale(1.05); }
+  .scene-thumb .scene-num { position:absolute; top:.4rem; left:.4rem; z-index:2;
+                 font-size:.72rem; padding:.15rem .45rem; border-radius:1rem;
+                 background:rgba(0,0,0,.65); color:#fff; backdrop-filter:blur(2px); }
+  .scene-thumb .scene-wait { color:#6c757d; font-size:.8rem; text-align:center;
+                 padding:.5rem; }
+  .scene-body { padding:.5rem .6rem; }
+  .scene-text { font-size:.8rem; line-height:1.35; display:-webkit-box;
+                -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .scene-prompt { font-size:.7rem; color:var(--bs-secondary-color);
+                  margin-top:.25rem; display:-webkit-box; -webkit-line-clamp:2;
+                  -webkit-box-orient:vertical; overflow:hidden; font-family:var(--bs-font-monospace); }
+  .skeleton { background:linear-gradient(90deg,#1b2027 25%,#262d36 37%,#1b2027 63%);
+              background-size:400% 100%; animation:shimmer 1.4s ease infinite;
+              width:100%; height:100%; }
+  @keyframes shimmer { 0%{background-position:100% 0} 100%{background-position:0 0} }
+</style>
+
 {% set JST = {
   'done':    ('pill-done',    'xong'),
   'running': ('pill-running', 'đang chạy'),
@@ -165,6 +192,15 @@
           </div>
         </div>
 
+        <div class="mb-2">
+          <label class="form-label">Tốc độ đọc: <span id="vspdVal">1.00×</span></label>
+          <input type="range" class="form-range" name="voice_speed" id="vspd"
+                 min="0.5" max="2.0" step="0.05" value="1.0">
+          <div class="form-text">Đọc nhanh/chậm giữ nguyên cao độ (không méo giọng).
+            <b>Thời lượng mỗi cảnh và cả video tự co/giãn theo</b> — đọc nhanh thì
+            video ngắn lại, đọc chậm thì dài ra, hình &amp; phụ đề luôn khớp tiếng.</div>
+        </div>
+
         <div class="form-check form-switch mb-2">
           <input class="form-check-input" type="checkbox" role="switch"
                  name="use_llm" id="useLlm" {{ 'checked' if llm_ready else '' }}>
@@ -234,6 +270,9 @@
               <a class="btn btn-sm btn-outline-success {% if not j.output_path %}disabled{% endif %}"
                  data-play href="#" onclick="playJob({{ j.id }});return false;"
                  title="Xem thử"><i class="bi bi-play-circle"></i></a>
+              <a class="btn btn-sm btn-outline-info" href="#"
+                 onclick="showStoryboard({{ j.id }});return false;"
+                 title="Ảnh các cảnh"><i class="bi bi-images"></i></a>
               <a class="btn btn-sm btn-outline-secondary" href="#"
                  onclick="showJobLog({{ j.id }});return false;" title="Log"><i class="bi bi-terminal"></i></a>
               <a class="btn btn-sm btn-outline-primary {% if not j.output_path %}disabled{% endif %}"
@@ -275,6 +314,41 @@
   </div>
 </div>
 
+<!-- Storyboard (scene images) modal -->
+<div class="modal fade" id="storyModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-images"></i> Ảnh các cảnh
+          <span id="storyId"></span>
+          <span class="badge bg-secondary ms-1" id="storyCount"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="storyEmpty" class="text-muted small d-none">Chưa có ảnh nào — chờ
+          bước tạo ảnh chạy xong.</div>
+        <div id="storyGrid" class="row g-3"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Lightbox: a single scene image, full size -->
+<div class="modal fade" id="lightbox" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-xl">
+    <div class="modal-content bg-dark">
+      <div class="modal-header border-0 py-2">
+        <h6 class="modal-title text-light" id="lbTitle"></h6>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body text-center pt-0">
+        <img id="lbImg" class="img-fluid rounded" alt="" style="max-height:78vh">
+        <p class="text-light small mt-2 mb-0" id="lbPrompt" style="opacity:.8"></p>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Log modal -->
 <div class="modal fade" id="logModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered modal-lg">
@@ -294,7 +368,7 @@
 {% block scripts %}
 <script>
 (function(){
-  ['logModal', 'playerModal'].forEach(function(id){
+  ['logModal', 'playerModal', 'storyModal', 'lightbox'].forEach(function(id){
     var m = document.getElementById(id);
     if (m && m.parentElement !== document.body) document.body.appendChild(m);
   });
@@ -321,6 +395,14 @@ if (resSel) {
   resSel.addEventListener('change', sync); sync();
 }
 
+// Reading-speed slider label.
+const vspd = document.getElementById('vspd');
+if (vspd) {
+  const lbl = document.getElementById('vspdVal');
+  const show = () => { lbl.textContent = parseFloat(vspd.value).toFixed(2) + '×'; };
+  vspd.addEventListener('input', show); show();
+}
+
 function makeJobRow(id, name) {
   const noJob = document.getElementById('noJob');
   if (noJob) noJob.remove();
@@ -337,6 +419,8 @@ function makeJobRow(id, name) {
     '<td class="text-end text-nowrap">' +
       '<a class="btn btn-sm btn-outline-success disabled" data-play href="#" ' +
         'onclick="playJob(' + id + ');return false;" title="Xem thử"><i class="bi bi-play-circle"></i></a> ' +
+      '<a class="btn btn-sm btn-outline-info" href="#" ' +
+        'onclick="showStoryboard(' + id + ');return false;" title="Ảnh các cảnh"><i class="bi bi-images"></i></a> ' +
       '<a class="btn btn-sm btn-outline-secondary" href="#" ' +
         'onclick="showJobLog(' + id + ');return false;" title="Log"><i class="bi bi-terminal"></i></a> ' +
       '<a class="btn btn-sm btn-outline-primary disabled" data-mp4 href="' + mp4Url(id) + '" title="Tải MP4"><i class="bi bi-filetype-mp4"></i></a> ' +
@@ -523,5 +607,86 @@ function showJobLog(id) {
   modalEl.addEventListener('hidden.bs.modal', () => { if (logTimer) clearInterval(logTimer); }, { once: true });
 }
 window.showJobLog = showJobLog;
+
+// ---- storyboard (scene images) ------------------------------------------
+const URL_SCENES = '{{ url_for("video_job_scenes", job_id=0) }}';
+const URL_IMG = '{{ url_for("video_job_image", job_id=0, idx=0) }}';
+function scenesUrl(id){ return URL_SCENES.replace('/0/', '/' + id + '/'); }
+function imgUrl(id, idx){ return URL_IMG.replace('/0/', '/' + id + '/').replace(/\/0$/, '/' + idx); }
+
+function esc(s){ const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+
+let storyTimer = null;
+let storyState = {};   // id -> "idx:hasImage" signature to skip needless re-renders
+function showStoryboard(id) {
+  document.getElementById('storyId').textContent = '#' + id;
+  const grid = document.getElementById('storyGrid');
+  const empty = document.getElementById('storyEmpty');
+  grid.innerHTML = '<div class="text-muted small p-2">Đang tải…</div>';
+  empty.classList.add('d-none');
+  storyState[id] = '';
+  const modalEl = document.getElementById('storyModal');
+  bootstrap.Modal.getOrCreateInstance(modalEl).show();
+
+  function render(scenes) {
+    document.getElementById('storyCount').textContent =
+      scenes.length ? (scenes.filter(s => s.image).length + '/' + scenes.length + ' ảnh') : '';
+    if (!scenes.length) { grid.innerHTML = ''; empty.classList.remove('d-none'); return; }
+    empty.classList.add('d-none');
+    grid.innerHTML = scenes.map(function (s) {
+      const thumb = s.image
+        ? '<img loading="lazy" src="' + imgUrl(id, s.i - 1) +
+          '" alt="Cảnh ' + s.i + '" onclick="lightbox(this,' + id + ',' + s.i + ')">'
+        : '<div class="skeleton"></div><span class="scene-wait position-absolute">' +
+          '<i class="bi bi-hourglass-split"></i><br>đang tạo…</span>';
+      return '<div class="col-6 col-md-4 col-lg-3">' +
+          '<div class="scene-card">' +
+            '<div class="scene-thumb">' +
+              '<span class="scene-num">Cảnh ' + s.i + '</span>' + thumb +
+            '</div>' +
+            '<div class="scene-body">' +
+              '<div class="scene-text" title="' + esc(s.text) + '">' + esc(s.text) + '</div>' +
+              '<div class="scene-prompt" title="' + esc(s.prompt) + '">' + esc(s.prompt) + '</div>' +
+            '</div>' +
+          '</div></div>';
+    }).join('');
+  }
+  function load() {
+    fetch(scenesUrl(id)).then(r => r.json()).then(d => {
+      const scenes = d.scenes || [];
+      const sig = scenes.map(s => s.image ? '1' : '0').join('');
+      if (sig !== storyState[id]) { storyState[id] = sig; render(scenes); }
+      // Stop polling once every scene has an image (or there are none).
+      if (scenes.length && scenes.every(s => s.image) && storyTimer) {
+        clearInterval(storyTimer); storyTimer = null;
+      }
+    }).catch(() => {});
+  }
+  load();
+  if (storyTimer) clearInterval(storyTimer);
+  storyTimer = setInterval(load, 2500);
+  modalEl.addEventListener('hidden.bs.modal',
+    () => { if (storyTimer) { clearInterval(storyTimer); storyTimer = null; } },
+    { once: true });
+}
+window.showStoryboard = showStoryboard;
+
+function lightbox(imgEl, id, sceneNo) {
+  const card = imgEl.closest('.scene-card');
+  const prompt = card ? (card.querySelector('.scene-prompt') || {}).textContent : '';
+  document.getElementById('lbTitle').textContent = 'Cảnh ' + sceneNo;
+  document.getElementById('lbImg').src = imgEl.src;   // already loaded → instant
+  document.getElementById('lbPrompt').textContent = prompt || '';
+  const lbEl = document.getElementById('lightbox');
+  bootstrap.Modal.getOrCreateInstance(lbEl).show();
+  // Stacked modal: closing the lightbox strips body.modal-open even though the
+  // storyboard is still open → scroll breaks. Restore it if needed.
+  lbEl.addEventListener('hidden.bs.modal', function () {
+    if (document.getElementById('storyModal').classList.contains('show')) {
+      document.body.classList.add('modal-open');
+    }
+  }, { once: true });
+}
+window.lightbox = lightbox;
 </script>
 {% endblock %}

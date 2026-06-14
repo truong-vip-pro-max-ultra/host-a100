@@ -1093,6 +1093,7 @@ def video_job_submit():
             image_steps=f.get("image_steps", "4"),
             image_batch=f.get("image_batch", ""),
             voice_batch=f.get("voice_batch", ""),
+            voice_speed=f.get("voice_speed", "1.0"),
         )
         if wants_json:
             return jsonify({"ok": True, "id": job_id,
@@ -1155,6 +1156,21 @@ def video_job_log(job_id):
             return jsonify({"log": fh.read()[-20000:]})
     except OSError:
         return jsonify({"log": ""})
+
+
+@app.route("/tools/video/jobs/<int:job_id>/scenes.json")
+def video_job_scenes(job_id):
+    return jsonify({"scenes": video_pipeline.get_scenes(job_id)})
+
+
+@app.route("/tools/video/jobs/<int:job_id>/img/<int:idx>")
+def video_job_image(job_id, idx):
+    path = video_pipeline.scene_image_path(job_id, idx)
+    if not path:
+        abort(404)
+    # Inline so the storyboard can show it in an <img>.
+    return send_from_directory(os.path.dirname(path), os.path.basename(path),
+                               as_attachment=False)
 
 
 @app.route("/tools/video/jobs/<int:job_id>/delete", methods=["POST"])

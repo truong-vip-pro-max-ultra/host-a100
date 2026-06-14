@@ -112,9 +112,22 @@ lặp → đổ vào ô kịch bản. Không cài thì nút bị mờ, tự nh�
    sẵn sàng chưa + LLM prompt bật/tắt. Chưa có server → bấm link sang tab Clone giọng
    nói để khởi động (server đó lo cả ảnh lẫn giọng).
 2. Dán kịch bản, chọn giọng (mặc định/clone), phong cách ảnh, tỉ lệ/độ phân giải,
-   FPS, batch ảnh, số bước ảnh, bật/tắt Ken Burns & LLM-prompt → **Dựng video**.
+   FPS, **tốc độ đọc**, batch ảnh, số bước ảnh, bật/tắt Ken Burns & LLM-prompt →
+   **Dựng video**.
+   - **Tốc độ đọc (0.5–2.0×):** time-stretch giọng bằng `atempo` (giữ cao độ).
+     **Thời lượng MỖI cảnh và cả video tự co/giãn theo** — pipeline đặt
+     `duration = độ-dài-giọng-thô / speed`, renderer atempo audio đúng `speed` rồi
+     khoá vào duration đó (`apad,atrim=0:dur`), nên hình + phụ đề luôn khớp tiếng.
+     Đọc nhanh → video ngắn lại, đọc chậm → dài ra. Cảnh không có giọng giữ thời
+     lượng ước lượng theo độ dài chữ.
 3. Theo dõi tiến trình ở bảng bên phải (chia cảnh → prompt → ảnh GPU → giọng GPU →
    ffmpeg). Xong: xem thử trong modal, tải **MP4** + **SRT**.
+4. **Ảnh các cảnh (storyboard):** nút 🖼 (`bi-images`) ở mỗi tác vụ mở lưới ảnh từng
+   cảnh — kèm số cảnh, lời thoại và prompt ảnh; bấm 1 ảnh để phóng to (lightbox).
+   Lưới **tự cập nhật** trong lúc đang chạy: ảnh hiện dần theo từng nhóm GPU (cảnh
+   chưa tạo xong hiện ô "đang tạo…"). Dùng được cả khi job đang chạy lẫn đã xong.
+   Cơ chế: pipeline ghi `scenes.json` (text+prompt+cờ ảnh) trong job dir, cập nhật
+   sau bước prompt và sau mỗi nhóm ảnh; route `…/scenes.json` + `…/img/<idx>` phục vụ.
 
 ---
 
