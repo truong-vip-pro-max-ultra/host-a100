@@ -266,24 +266,52 @@ _LLM_BATCH_INSTRUCTION = (
 )
 
 
-def _chat(messages, max_tokens, timeout):
-    """One internal call to the API-farm LLM. Returns the content string or ''."""
+def _extract_content(data):
+    """Pull the assistant text out of an OpenAI-style reply, tolerant of shapes:
+    message.content (str OR a list of {type,text} parts), a reasoning-only reply
+    that left content empty, or a legacy completions `text` field."""
+    try:
+        choice = (data.get("choices") or [{}])[0]
+    except Exception:  # noqa: BLE001
+        return ""
+    msg = choice.get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, list):  # some servers return content as parts
+        content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+    if not content:
+        content = msg.get("reasoning_content") or choice.get("text") or ""
+    return (content or "").strip()
+
+
+def _chat(messages, max_tokens, timeout, on_log=None):
+    """One internal call to the API-farm LLM. Returns the content string or "";
+    on failure it LOGS the real reason (status/body/exception) to the job log so a
+    silent empty reply is diagnosable instead of a blind 'không phản hồi'."""
+    def _diag(m):
+        if on_log:
+            on_log(f"      [LLM] {m}")
+
     if serve_service is None:
+        _diag("serve_service không import được")
         return ""
     try:
         ep = serve_service.resolve_endpoint()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _diag(f"resolve_endpoint lỗi: {exc}")
         return ""
     if not ep:
+        _diag("không có server LLM nào ready")
         return ""
     host, port, served_name = ep
+    # NOTE: no hardcoded `stop` — a model whose chat template differs from Qwen's
+    # <|im_end|> could stop at token 0 → empty content. Let the server's own
+    # template provide the stop tokens.
     body = json.dumps({
         "model": served_name or "default",
         "messages": messages,
         "temperature": 0.7,
         "max_tokens": max_tokens,
         "stream": False,
-        "stop": ["<|im_end|>"],
     }).encode("utf-8")
     try:
         conn = http.client.HTTPConnection(host, port, timeout=timeout)
@@ -292,11 +320,29 @@ def _chat(messages, max_tokens, timeout):
         resp = conn.getresponse()
         raw = resp.read()
         conn.close()
-        if resp.status != 200:
-            return ""
-        return (json.loads(raw or b"{}")["choices"][0]["message"]["content"] or "").strip()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _diag(f"kết nối {host}:{port} lỗi: {type(exc).__name__}: {exc}")
         return ""
+    if resp.status != 200:
+        _diag(f"HTTP {resp.status} từ {host}:{port}: "
+              f"{raw.decode('utf-8', 'replace')[:200]}")
+        return ""
+    try:
+        data = json.loads(raw or b"{}")
+    except Exception as exc:  # noqa: BLE001
+        _diag(f"JSON lỗi: {exc}; body: {raw.decode('utf-8', 'replace')[:200]}")
+        return ""
+    out = _extract_content(data)
+    if not out:
+        # 200 but nothing usable — show finish_reason + a snippet so we can see why.
+        fr = ""
+        try:
+            fr = (data.get("choices") or [{}])[0].get("finish_reason", "")
+        except Exception:  # noqa: BLE001
+            pass
+        _diag(f"200 nhưng content rỗng (finish_reason={fr!r}); "
+              f"body: {raw.decode('utf-8', 'replace')[:200]}")
+    return out
 
 
 _NUMBERED_RE = re.compile(r"^\s*\[?(\d{1,3})\]?\s*[.):\-]\s*(.+?)\s*$")
@@ -355,7 +401,7 @@ def llm_visual_prompts(texts, timeout=180, simple=False, on_log=None):
     out = _chat(
         [{"role": "system", "content": instruction},
          {"role": "user", "content": f"{len(texts)} narration lines:\n{numbered}"}],
-        max_tokens=min(2400, 110 * len(texts) + 200), timeout=timeout)
+        max_tokens=min(2400, 110 * len(texts) + 200), timeout=timeout, on_log=on_log)
     if not out:
         if on_log:
             on_log("    (LLM không phản hồi hoặc rỗng)")
