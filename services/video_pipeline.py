@@ -55,9 +55,14 @@ def _write_scenes(job_dir, scenes):
     """Persist the per-scene storyboard (text + image prompt + image-ready flag) so
     the UI can show the generated images as they appear. Rewritten after the prompt
     step and after each image batch (cheap; n is small)."""
+    # Write atomically (temp + os.replace) so a concurrent poll can never read a
+    # half-written file and get an empty list mid-update.
     try:
-        with open(os.path.join(job_dir, "scenes.json"), "w", encoding="utf-8") as fh:
+        path = os.path.join(job_dir, "scenes.json")
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"scenes": scenes}, fh, ensure_ascii=False)
+        os.replace(tmp, path)
     except OSError:
         pass
 
