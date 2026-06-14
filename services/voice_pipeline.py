@@ -409,7 +409,7 @@ def _set_job(job_id, **fields):
 
 
 def start_job(name, text, profile_name="", language="vi", num_step=16, seed=-1,
-              speed=1.0, denoise=False):
+              speed=1.0, denoise=False, batch=None):
     """Create a voice_jobs row and kick off the background render thread.
     Validates that a GPU server is ready and the script is non-empty."""
     text = (text or "").strip()
@@ -425,14 +425,17 @@ def start_job(name, text, profile_name="", language="vi", num_step=16, seed=-1,
         num_step = max(1, int(num_step))
         seed = int(seed)
         speed = float(speed)
+        batch = max(1, int(batch)) if batch else _SYNTH_BATCH
     except (TypeError, ValueError):
-        raise ValueError("Tham số num_step / seed / speed không hợp lệ.")
+        raise ValueError("Tham số num_step / seed / speed / batch không hợp lệ.")
     if not (0.5 <= speed <= 2.0):
         raise ValueError("Tốc độ phải trong khoảng 0.5–2.0.")
+    if not (1 <= batch <= 64):
+        raise ValueError("Số đoạn cùng lúc (batch) phải trong khoảng 1–64.")
 
     params = {"profile": profile_name, "language": language or "vi",
               "num_step": num_step, "seed": seed, "speed": speed,
-              "denoise": bool(denoise)}
+              "denoise": bool(denoise), "batch": batch}
     name = (name or "narration").strip()[:128]
     job_id = db.execute(
         "INSERT INTO voice_jobs (name, status, progress, stage, params, created_at) "
@@ -457,6 +460,7 @@ def _synthesize_chunks(host, port, items, params, timeout=3600):
         "seed": params.get("seed", -1),
         "ref_audio": (prof or {}).get("ref_audio", "") or "",
         "ref_text": (prof or {}).get("ref_text", "") or "",
+        "max_batch": params.get("batch") or _SYNTH_BATCH,
     }
     body = json.dumps(payload).encode("utf-8")
     conn = http.client.HTTPConnection(host, port, timeout=timeout)
@@ -495,15 +499,17 @@ def _run_job(job_id, text, params):
             items.append({"text": t,
                           "out_path": os.path.join(job_dir, f"part_{i:04d}.wav")})
 
-        # Render in mini-batches: each group is one /synthesize_batch call (GPU
-        # stays saturated within the group, no per-chunk HTTP latency), and we
-        # advance the progress bar between groups. The server caches the voice
-        # prompt process-wide, so splitting into groups costs nothing extra.
+        # Render in mini-batches: each group is one /synthesize_batch call sized
+        # to the job's batch so it's exactly one GPU batch on the server (fills
+        # VRAM, no per-chunk HTTP latency); we advance the progress bar between
+        # groups. The server caches the voice prompt process-wide, so splitting
+        # into groups costs nothing extra.
+        bs = int(params.get("batch") or _SYNTH_BATCH)
         n = len(items)
         results = [None] * n
         done = 0
-        for start in range(0, n, _SYNTH_BATCH):
-            group = items[start:start + _SYNTH_BATCH]
+        for start in range(0, n, bs):
+            group = items[start:start + bs]
             _set_job(job_id, stage=f"Đang tổng hợp đoạn {start + 1}–"
                      f"{start + len(group)}/{n} trên GPU…",
                      progress=10 + int(done / n * 65))

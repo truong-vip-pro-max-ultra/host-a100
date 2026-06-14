@@ -388,20 +388,28 @@ class OmniEngine:
         return results
 
     def synthesize_batch(self, items, language="vi", num_step=16, seed=-1,
-                         ref_audio="", ref_text=""):
+                         ref_audio="", ref_text="", max_batch=None):
         """Render many chunks per call. Resolves the voice prompt once, then tries
         TRUE GPU batching in sub-batches of ``max_batch`` (fills the L40S), and
         falls back to per-utterance for any sub-batch the model won't batch.
-        Returns a list of per-item dicts (ok/out_path/duration/error)."""
+        ``max_batch`` (per-request) overrides the server default so the UI can
+        tune VRAM usage without recreating the server. Returns a list of per-item
+        dicts (ok/out_path/duration/error)."""
         model = self.load()
         gen_config = self._gen_config(num_step)
+        mb = self.max_batch
+        if max_batch:
+            try:
+                mb = max(1, int(max_batch))
+            except (TypeError, ValueError):
+                pass
         n = len(items)
         results = [None] * n
         with self._lock:
             cp, rra, rrt = self._resolve_prompt(model, ref_audio, ref_text, seed, language)
             i = 0
             while i < n:
-                sub = items[i:i + self.max_batch]
+                sub = items[i:i + mb]
                 batched = None
                 if self.use_batch and len(sub) > 1:
                     try:
@@ -493,6 +501,7 @@ class Handler(BaseHTTPRequestHandler):
                     seed=int(req.get("seed", -1)),
                     ref_audio=(req.get("ref_audio") or ""),
                     ref_text=(req.get("ref_text") or ""),
+                    max_batch=req.get("max_batch"),
                 )
                 self._send_json({"ok": True, "results": results})
             except Exception as exc:

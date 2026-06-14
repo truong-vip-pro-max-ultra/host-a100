@@ -805,6 +805,7 @@ def _voice_context():
         gpu_models=gpu.slurm_gpu_models(config.SLURM_PARTITION or None) or [],
         slurm_active=job_service.slurm_active(),
         omni_model=config.OMNI_MODEL_ID,
+        omni_max_batch=config.OMNI_MAX_BATCH,
         ffmpeg_ok=config.ffmpeg_available(),
     )
 
@@ -924,6 +925,7 @@ def voice_job_submit():
             seed=f.get("seed", "-1"),
             speed=f.get("speed", "1.0"),
             denoise=f.get("denoise") is not None,
+            batch=f.get("batch", ""),
         )
         if wants_json:
             return jsonify({"ok": True, "id": job_id,

@@ -96,6 +96,16 @@
           </div>
         </div>
 
+        <div class="mb-2">
+          <label class="form-label">Số đoạn xử lý cùng lúc (batch GPU)</label>
+          <input type="number" class="form-control" name="batch" min="1" max="64"
+                 value="{{ omni_max_batch }}">
+          <div class="form-text"><b>Vắt hết VRAM L40S:</b> số đoạn nạp vào GPU
+            trong một lần generate. Tăng lên (vd 12–24) = ăn nhiều VRAM hơn, đọc
+            nhanh hơn; OOM thì giảm. Đổi ngay mỗi lần tạo, <b>không cần tạo lại
+            server</b>. Tự lùi về đọc từng đoạn nếu model không batch được.</div>
+        </div>
+
         <button class="btn btn-primary mt-1" id="jobSubmitBtn">
           <i class="bi bi-play-fill"></i> Tạo MP3</button>
         <div class="form-text">Cần một server giọng nói đang <b>sẵn sàng</b> bên dưới.</div>
