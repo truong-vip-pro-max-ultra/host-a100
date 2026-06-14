@@ -596,11 +596,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_json(self, obj, status=200):
         body = json.dumps(obj).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # A poller (the login-node /health monitor) hung up mid-response —
+            # harmless. Swallow it so socketserver doesn't dump a traceback per poll.
+            pass
 
     def _read_json(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
