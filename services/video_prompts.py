@@ -299,13 +299,50 @@ def _chat(messages, max_tokens, timeout):
         return ""
 
 
-def llm_visual_prompts(texts, timeout=180, simple=False):
+_NUMBERED_RE = re.compile(r"^\s*\[?(\d{1,3})\]?\s*[.):\-]\s*(.+?)\s*$")
+
+
+def _parse_prompt_list(out, n):
+    """Best-effort extract N rewritten prompts from the LLM reply. Tries a JSON
+    array first, then a numbered list (Qwen often ignores 'JSON' and numbers the
+    lines). Returns a list of length n ("" for any scene it couldn't map), or []
+    if nothing usable was found. Partial is fine — the caller translates the gaps."""
+    s = (out or "").strip()
+    # 1) JSON array (tolerate a ```json fence and surrounding prose).
+    a, b = s.find("["), s.rfind("]")
+    if 0 <= a < b:
+        try:
+            arr = json.loads(s[a:b + 1])
+            if isinstance(arr, list) and arr:
+                vals = [(str(x).strip().strip('"“”')[:300] if x else "") for x in arr]
+                if len(vals) == n:
+                    return vals
+                # Wrong count → keep going; the numbered parser may align better.
+        except Exception:  # noqa: BLE001
+            pass
+    # 2) Numbered list: map "3. <prompt>" → index 2, so missing/extra lines don't
+    #    misalign the rest.
+    result = [""] * n
+    hits = 0
+    for line in s.splitlines():
+        m = _NUMBERED_RE.match(line)
+        if not m:
+            continue
+        idx = int(m.group(1)) - 1
+        val = m.group(2).strip().strip('"“”').strip()
+        if 0 <= idx < n and val and not result[idx]:
+            result[idx] = val[:300]
+            hits += 1
+    return result if hits else []
+
+
+def llm_visual_prompts(texts, timeout=180, simple=False, on_log=None):
     """Rewrite ALL narration lines in ONE LLM call (the API-farm server runs
     --parallel 1, so one batched request is far faster than N parallel ones that
     just queue server-side). Returns a list aligned with ``texts`` (each item is
-    the rewritten prompt or "" if unusable), or [] on total failure → the caller
-    falls back to rule-based + translation. ``simple`` keeps each scene to the
-    bare subject + one action (for stick-figure / minimal drawing styles)."""
+    the rewritten prompt or "" → the caller translates that scene), or [] on total
+    failure → the caller falls back to rule-based + translation. ``simple`` keeps
+    each scene to the bare subject + one action (stick-figure / minimal styles)."""
     texts = [(t or "").strip() for t in texts]
     if not texts or serve_service is None:
         return []
@@ -320,22 +357,13 @@ def llm_visual_prompts(texts, timeout=180, simple=False):
          {"role": "user", "content": f"{len(texts)} narration lines:\n{numbered}"}],
         max_tokens=min(1600, 90 * len(texts) + 200), timeout=timeout)
     if not out:
+        if on_log:
+            on_log("    (LLM không phản hồi hoặc rỗng)")
         return []
-    # Strip an accidental ```json fence, then parse the JSON array.
-    s = out.strip()
-    if s.startswith("```"):
-        s = s.strip("`")
-        s = s[s.find("["):] if "[" in s else s
-    start, end = s.find("["), s.rfind("]")
-    if start < 0 or end <= start:
-        return []
-    try:
-        arr = json.loads(s[start:end + 1])
-    except Exception:  # noqa: BLE001
-        return []
-    if not isinstance(arr, list) or len(arr) != len(texts):
-        return []
-    return [(str(x).strip().strip('"“”')[:300] if x else "") for x in arr]
+    parsed = _parse_prompt_list(out, len(texts))
+    if not parsed and on_log:
+        on_log(f"    (LLM trả về không đọc được, đầu ra: {out[:200]!r})")
+    return parsed
 
 
 def llm_visual_prompt(text, seed=-1, timeout=60):
@@ -421,7 +449,7 @@ def build_prompts(chunks, style_preset="cinematic", negative="", use_llm=True,
         t0 = time.time()
         simple = (style_preset in _STYLE_FIRST_PRESETS
                   or style_preset in _DRAWING_PRESETS)
-        got = llm_visual_prompts(chunks, simple=simple)
+        got = llm_visual_prompts(chunks, simple=simple, on_log=on_log)
         if got:
             visuals = got
             _log(f"  ✓ LLM xong {sum(1 for v in visuals if v)}/{len(chunks)} cảnh "
