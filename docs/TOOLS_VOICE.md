@@ -140,6 +140,29 @@ gọi với `-threads 0 -filter_complex_threads 0` để tận dụng **toàn b�
    mỗi đoạn **đã tự khử** (không có nút khử nhiễu — audio TTS vốn sạch). Theo dõi
    ở bảng **Tác vụ**, xong thì **▶ nghe thử** / tải **MP3** / tải **SRT**.
 
+### Kiểu giọng (thiết kế giọng — voice design)
+
+OmniVoice có chế độ **voice design**: thay vì clone từ file mẫu, model tự "thiết
+kế" một giọng theo **bộ thuộc tính cố định**. Trên form Tạo giọng đọc, mở mục
+**"Kiểu giọng (thiết kế giọng)"** và chọn:
+
+- **Giới tính:** Nữ / Nam
+- **Độ tuổi:** trẻ em / thiếu niên / thanh niên / trung niên / lớn tuổi
+- **Cao độ:** rất trầm → rất cao
+- **Thì thầm (whisper)**
+
+> ⚠️ Đây **không** phải prompt tự do. OmniVoice chỉ nhận đúng bộ từ vựng trên
+> (gender / age / pitch / whisper); mô tả kiểu "đọc vui vẻ, hào hứng, dồn dập" sẽ
+> bị model từ chối. (Accent american/british… cũng có nhưng **ép sang tiếng Anh**
+> nên không hợp narration tiếng Việt → không đưa vào UI.)
+
+Cách hoạt động: instruct chỉ dùng để **đúc MỘT clip giọng mẫu** (seed-locked), sau
+đó mọi đoạn đều **clone** từ clip đó → chất giọng + kiểu đọc nhất quán xuyên suốt
+như giọng mặc định bình thường. **Chỉ áp dụng cho giọng mặc định**; khi chọn một
+giọng đã clone thì instruct **bị bỏ qua** (chất giọng lấy từ file mẫu) — UI tự làm
+mờ mục này. Trên server đi qua `instruct` của `OmniVoice.generate()`; cache giọng
+mặc định khoá theo `(seed, instruct)`.
+
 ## Hiệu năng
 
 - **GPU (OmniVoice / L40S):** server bật `fp16` + `TF32` (`allow_tf32`,

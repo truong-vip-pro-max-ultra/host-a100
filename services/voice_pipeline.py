@@ -409,7 +409,7 @@ def _set_job(job_id, **fields):
 
 
 def start_job(name, text, profile_name="", language="vi", num_step=16, seed=-1,
-              speed=1.0, denoise=False, batch=None):
+              speed=1.0, denoise=False, batch=None, instruct=""):
     """Create a voice_jobs row and kick off the background render thread.
     Validates that a GPU server is ready and the script is non-empty."""
     text = (text or "").strip()
@@ -433,9 +433,12 @@ def start_job(name, text, profile_name="", language="vi", num_step=16, seed=-1,
     if not (1 <= batch <= 64):
         raise ValueError("Số đoạn cùng lúc (batch) phải trong khoảng 1–64.")
 
+    # Voice-design instruct (gender/age/pitch/whisper) — only used for the default
+    # voice; ignored when a clone profile is chosen (timbre comes from the clip).
+    instruct = (instruct or "").strip()
     params = {"profile": profile_name, "language": language or "vi",
               "num_step": num_step, "seed": seed, "speed": speed,
-              "denoise": bool(denoise), "batch": batch}
+              "denoise": bool(denoise), "batch": batch, "instruct": instruct}
     name = (name or "narration").strip()[:128]
     job_id = db.execute(
         "INSERT INTO voice_jobs (name, status, progress, stage, params, created_at) "
@@ -461,6 +464,8 @@ def _synthesize_chunks(host, port, items, params, timeout=3600):
         "ref_audio": (prof or {}).get("ref_audio", "") or "",
         "ref_text": (prof or {}).get("ref_text", "") or "",
         "max_batch": params.get("batch") or _SYNTH_BATCH,
+        # Server ignores this when a clone reference is present (ref_audio set).
+        "instruct": params.get("instruct", "") or "",
     }
     body = json.dumps(payload).encode("utf-8")
     conn = http.client.HTTPConnection(host, port, timeout=timeout)
@@ -487,6 +492,8 @@ def _run_job(job_id, text, params):
         if not chunks:
             raise RuntimeError("Không tách được nội dung nào để đọc.")
         _job_log(job_dir, f"Chia kịch bản thành {len(chunks)} đoạn.")
+        if params.get("instruct") and not params.get("profile"):
+            _job_log(job_dir, f"Thiết kế giọng (voice design): {params['instruct']}")
 
         endpoint = voice_service.resolve_endpoint()
         if not endpoint:

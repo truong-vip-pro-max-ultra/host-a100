@@ -36,7 +36,9 @@ except Exception:  # noqa: BLE001 — keep importable in a bare test env
 # --------------------------------------------------------------------------- #
 # Look / style
 # --------------------------------------------------------------------------- #
-_BASE_STYLE = "cinematic still, dramatic lighting, highly detailed, sharp focus"
+_BASE_STYLE = ("cinematic still, dramatic cinematic lighting, highly detailed, "
+               "intricate detail, sharp focus, depth of field, professional color "
+               "grading, volumetric light, 8k, masterpiece")
 
 # One art "look" applied to every shot of a video so the whole thing feels like
 # one piece. Key = the value sent by the form's "Phong cách ảnh" dropdown.
@@ -80,8 +82,11 @@ _STYLE_FIRST_PRESETS = frozenset({"stick_figure"})
 _STYLE_FIRST_LEAD = {"stick_figure": "a simple black stick figure line drawing of"}
 
 DEFAULT_NEGATIVE = (
-    "lowres, bad anatomy, bad hands, text, watermark, signature, blurry, "
-    "jpeg artifacts, deformed, ugly, duplicate, cropped"
+    "lowres, low quality, worst quality, blurry, out of focus, bad anatomy, "
+    "bad proportions, bad hands, extra fingers, missing fingers, fused fingers, "
+    "deformed, disfigured, mutated, malformed, ugly, duplicate, cloned, cropped, "
+    "out of frame, text, words, letters, caption, watermark, signature, logo, "
+    "jpeg artifacts, oversaturated, washed out, grainy, poorly drawn"
 )
 
 # mood -> (keywords VN+EN, style tokens)
@@ -200,7 +205,9 @@ def build_prompt(subject, anchor, mood_style, style_preset, negative):
     stick figures lead with the style and bind it to the subject)."""
     subject = re.sub(r"\s+", " ", (subject or "")).strip().strip('"“”')
     style_first = style_preset in _STYLE_FIRST_PRESETS
-    cap = 110 if style_first else 200   # style-first must let the style win
+    # style-first presets must let the style win (keep the subject short); normal
+    # presets allow a long, richly detailed subject (a 60-word EN prompt ≈ 380 chars).
+    cap = 110 if style_first else 380
     if len(subject) > cap:
         subject = subject[:cap].rsplit(" ", 1)[0]
     if not subject:
@@ -227,15 +234,22 @@ def build_prompt(subject, anchor, mood_style, style_preset, negative):
 # LLM rewrite via the API farm (OpenAI-compatible /v1/chat/completions)
 # --------------------------------------------------------------------------- #
 _LLM_INSTRUCTION = (
-    "You are an art director writing prompts for a text-to-image model. "
-    "Turn the narration line (which may be Vietnamese) into ONE vivid, CONCRETE "
-    "visual scene in English.\n"
+    "You are a senior cinematographer and concept artist writing a prompt for a "
+    "text-to-image model. Turn the narration line (which may be Vietnamese) into "
+    "ONE richly detailed, vivid, CONCRETE visual scene in English.\n"
+    "Pack in, as comma-separated VISUAL phrases:\n"
+    "- the MAIN SUBJECT with specific detail (appearance, clothing, expression, pose);\n"
+    "- the ACTION or exact moment it is caught in;\n"
+    "- the SETTING plus notable foreground and background elements;\n"
+    "- LIGHTING and atmosphere (e.g. golden-hour backlight, soft rim light, "
+    "volumetric god rays, moody fog, warm/cool tones);\n"
+    "- the CAMERA: shot type (extreme close-up, wide establishing, over-the-shoulder, "
+    "low angle, aerial top-down) and depth-of-field feel;\n"
+    "- mood and fine textures that make it feel real.\n"
     "Rules:\n"
-    "- Describe a specific, depictable moment: main subject, what it is doing, "
-    "key objects, setting. Turn any abstract idea into a concrete visual metaphor.\n"
-    "- 15-35 words, comma-separated visual phrases (not a full sentence).\n"
-    "- Vary the framing (close-up, wide shot, over-the-shoulder, top-down…).\n"
-    "- Do NOT mention any art style, medium or colour palette.\n"
+    "- Turn any abstract idea into a concrete, depictable visual metaphor.\n"
+    "- 40-60 words, comma-separated phrases (not a full sentence), all VISUAL.\n"
+    "- Do NOT name an art style, medium, artist or render engine.\n"
     "- Do NOT put any words, text, letters or captions in the image.\n"
     "- Output ONLY the prompt: no quotes, no 'Prompt:', no explanation."
 )
@@ -252,15 +266,25 @@ def llm_available():
 
 
 _LLM_BATCH_INSTRUCTION = (
-    "You are an art director writing prompts for a text-to-image model. You will "
-    "receive a numbered list of narration lines (which may be Vietnamese). For "
-    "EACH line, write ONE vivid, CONCRETE visual scene in English.\n"
+    "You are a senior cinematographer and concept artist writing prompts for a "
+    "text-to-image model. You will receive a numbered list of narration lines "
+    "(which may be Vietnamese). For EACH line, write ONE richly detailed, vivid, "
+    "CONCRETE visual scene in English.\n"
+    "Pack into EACH scene, as comma-separated VISUAL phrases:\n"
+    "- the MAIN SUBJECT with specific detail (appearance, clothing, expression, pose);\n"
+    "- the ACTION or exact moment it is caught in;\n"
+    "- the SETTING plus notable foreground and background elements;\n"
+    "- LIGHTING and atmosphere (golden-hour backlight, soft rim light, volumetric "
+    "god rays, moody fog, warm or cool tones…);\n"
+    "- the CAMERA: shot type (extreme close-up, wide establishing, over-the-shoulder, "
+    "low angle, aerial top-down) and depth-of-field feel;\n"
+    "- mood and fine textures that make it feel real.\n"
     "Rules per scene:\n"
-    "- A specific, depictable moment: main subject, action, key objects, setting; "
-    "turn abstract ideas into a concrete visual metaphor.\n"
-    "- 15-35 words, comma-separated visual phrases (not a full sentence).\n"
-    "- Vary the framing across scenes (close-up, wide, over-the-shoulder, top-down…).\n"
-    "- Do NOT mention any art style, medium or colour palette; no text/letters in the image.\n"
+    "- Turn any abstract idea into a concrete, depictable visual metaphor.\n"
+    "- 40-60 words per scene, comma-separated phrases (not a full sentence), all VISUAL.\n"
+    "- VARY the framing and angle across scenes so the video isn't repetitive.\n"
+    "- Do NOT name an art style, medium, artist or render engine; no text, letters, "
+    "captions or watermark in the image.\n"
     "Output ONLY a JSON array of exactly N strings, in the SAME order as the input, "
     "nothing else (no keys, no markdown fences, no commentary)."
     # Qwen3.x models 'think' by default and burn the whole token budget on a
@@ -383,7 +407,7 @@ def _parse_prompt_list(out, n):
         try:
             arr = json.loads(s[a:b + 1])
             if isinstance(arr, list) and arr:
-                vals = [(str(x).strip().strip('"“”')[:300] if x else "") for x in arr]
+                vals = [(str(x).strip().strip('"“”')[:480] if x else "") for x in arr]
                 if len(vals) == n:
                     return vals
                 # Wrong count → keep going; the numbered parser may align better.
@@ -400,7 +424,7 @@ def _parse_prompt_list(out, n):
         idx = int(m.group(1)) - 1
         val = m.group(2).strip().strip('"“”').strip()
         if 0 <= idx < n and val and not result[idx]:
-            result[idx] = val[:300]
+            result[idx] = val[:480]
             hits += 1
     return result if hits else []
 
@@ -427,7 +451,7 @@ def llm_visual_prompts(texts, timeout=180, simple=False, on_log=None):
     out = _chat(
         [{"role": "system", "content": instruction},
          {"role": "user", "content": f"{len(texts)} narration lines:\n{numbered}"}],
-        max_tokens=min(3000, 140 * len(texts) + 400), timeout=timeout, on_log=on_log)
+        max_tokens=min(4096, 240 * len(texts) + 400), timeout=timeout, on_log=on_log)
     if not out:
         if on_log:
             on_log("    (LLM không phản hồi hoặc rỗng)")
@@ -481,7 +505,7 @@ def llm_visual_prompt(text, seed=-1, timeout=60):
         if line.lower().startswith("prompt:"):
             line = line[7:].strip()
         if line:
-            return line[:300]
+            return line[:480]
     return ""
 
 
@@ -490,9 +514,10 @@ def llm_visual_prompt(text, seed=-1, timeout=60):
 # --------------------------------------------------------------------------- #
 # How many scenes per LLM prompt-rewrite call. Must fit the server's n_ctx (the
 # API-farm default is only 8192) for BOTH the input lines and the output, so keep
-# the group modest; a giant request overruns ctx and the server returns empty. 16
-# is a safe, fast group at ctx 8192.
-_LLM_PROMPT_BATCH = 16
+# the group modest; a giant request overruns ctx and the server returns empty.
+# Each scene now asks for a long (40-60 word) prompt, so 12 keeps N inputs + N
+# rich outputs both inside ctx 8192.
+_LLM_PROMPT_BATCH = 12
 # Each narration line is truncated to this many words before being sent to the LLM
 # — an image prompt only needs the gist, and it bounds the input so a long
 # transcript can't overflow the context window.

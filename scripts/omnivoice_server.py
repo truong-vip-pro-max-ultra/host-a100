@@ -233,10 +233,15 @@ class OmniEngine:
             return None
 
     def _generate(self, model, text, voice_clone_prompt=None, ref_audio="",
-                  ref_text="", language="", gen_config=None):
+                  ref_text="", language="", gen_config=None, instruct=""):
         kwargs = {"text": text}
         if language:
             kwargs["language"] = language
+        if instruct:
+            # Voice-design mode: a controlled instruct string (gender/age/pitch/
+            # whisper). Only meaningful when minting the default voice (no clone
+            # reference); the model raises ValueError on an invalid item.
+            kwargs["instruct"] = instruct
         if gen_config is not None:
             kwargs["generation_config"] = gen_config
         if voice_clone_prompt is not None:
@@ -271,14 +276,19 @@ class OmniEngine:
         self._prompt_cache[key] = prompt
         return prompt
 
-    def _default_clone_prompt(self, model, seed, language=""):
-        key = (int(seed),)
+    def _default_clone_prompt(self, model, seed, language="", instruct=""):
+        # Cache per (seed, instruct): a different style instruct must mint a fresh
+        # reference clip (and thus a different cloned timbre).
+        key = (int(seed), instruct or "")
         cached = self._default_ref_cache.get(key)
         if cached is not None:
             return cached
         seed_rng(seed)
+        # Voice-design mode mints the one reference clip; every chunk then CLONES
+        # this clip, so the requested style (and timbre) stays consistent across
+        # the whole narration — exactly like the plain seed-locked default voice.
         audio = self._generate(model, _DEFAULT_REF_TEXT, language=language or "vi",
-                               gen_config=self._gen_config(16))
+                               instruct=instruct, gen_config=self._gen_config(16))
         wav = audio[0] if isinstance(audio, (list, tuple)) else audio
         ref_path = Path(tempfile.gettempdir()) / f"omni_default_ref_{abs(int(seed))}.wav"
         write_wav_from_float(ref_path, wav, sr=SR)
@@ -287,18 +297,28 @@ class OmniEngine:
         self._default_ref_cache[key] = prompt
         return prompt
 
-    def _resolve_prompt(self, model, ref_audio, ref_text, seed, language):
+    def _resolve_prompt(self, model, ref_audio, ref_text, seed, language, instruct=""):
         """Resolve the voice-conditioning prompt ONCE (cached). Returns
-        (clone_prompt, raw_ref_audio, raw_ref_text)."""
+        (clone_prompt, raw_ref_audio, raw_ref_text).
+
+        A custom clone reference wins — its timbre comes from the user's clip, so
+        any voice-design ``instruct`` is irrelevant and ignored. With no custom
+        reference, the default voice is minted by voice DESIGN when an instruct is
+        given (gender/age/pitch/whisper), else the plain seed-locked default."""
+        instruct = (instruct or "").strip()
         if ref_audio and Path(ref_audio).exists():
             try:
                 return self._clone_prompt(model, ref_audio, ref_text), "", ""
             except Exception as exc:
                 print(f"[omnivoice] clone prompt failed ({exc}); raw ref.", flush=True)
                 return None, ref_audio, ref_text
-        if seed is not None and seed >= 0:
+        # Honour an instruct even with a random seed: pin a stable seed so the
+        # designed reference clip (and timbre) stays consistent across chunks.
+        if (seed is not None and seed >= 0) or instruct:
+            lock_seed = seed if (seed is not None and seed >= 0) else 0
             try:
-                return self._default_clone_prompt(model, seed, language), "", ""
+                return self._default_clone_prompt(
+                    model, lock_seed, language, instruct), "", ""
             except Exception as exc:
                 print(f"[omnivoice] default voice lock failed ({exc}).", flush=True)
         return None, "", ""
@@ -325,11 +345,12 @@ class OmniEngine:
         return str(out), wav_duration(out)
 
     def synthesize(self, text, out_path, language="vi", num_step=16, seed=-1,
-                   ref_audio="", ref_text=""):
+                   ref_audio="", ref_text="", instruct=""):
         model = self.load()
         gen_config = self._gen_config(num_step)
         with self._lock:
-            cp, rra, rrt = self._resolve_prompt(model, ref_audio, ref_text, seed, language)
+            cp, rra, rrt = self._resolve_prompt(model, ref_audio, ref_text, seed,
+                                                language, instruct)
             return self._render_one(model, text, out_path, cp, rra, rrt,
                                     language, gen_config, seed)
 
@@ -388,7 +409,7 @@ class OmniEngine:
         return results
 
     def synthesize_batch(self, items, language="vi", num_step=16, seed=-1,
-                         ref_audio="", ref_text="", max_batch=None):
+                         ref_audio="", ref_text="", max_batch=None, instruct=""):
         """Render many chunks per call. Resolves the voice prompt once, then tries
         TRUE GPU batching in sub-batches of ``max_batch`` (fills the L40S), and
         falls back to per-utterance for any sub-batch the model won't batch.
@@ -406,7 +427,8 @@ class OmniEngine:
         n = len(items)
         results = [None] * n
         with self._lock:
-            cp, rra, rrt = self._resolve_prompt(model, ref_audio, ref_text, seed, language)
+            cp, rra, rrt = self._resolve_prompt(model, ref_audio, ref_text, seed,
+                                                language, instruct)
             i = 0
             while i < n:
                 sub = items[i:i + mb]
@@ -745,6 +767,7 @@ class Handler(BaseHTTPRequestHandler):
                     ref_audio=(req.get("ref_audio") or ""),
                     ref_text=(req.get("ref_text") or ""),
                     max_batch=req.get("max_batch"),
+                    instruct=(req.get("instruct") or ""),
                 )
                 self._send_json({"ok": True, "results": results})
             except Exception as exc:
@@ -810,6 +833,7 @@ class Handler(BaseHTTPRequestHandler):
                     seed=int(req.get("seed", -1)),
                     ref_audio=(req.get("ref_audio") or ""),
                     ref_text=(req.get("ref_text") or ""),
+                    instruct=(req.get("instruct") or ""),
                 )
                 self._send_json({"ok": True, "out_path": path, "duration": dur})
             except Exception as exc:

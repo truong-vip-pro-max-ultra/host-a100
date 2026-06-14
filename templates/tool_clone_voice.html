@@ -77,6 +77,60 @@
           </div>
         </div>
 
+        <!-- Voice design (instruct): OmniVoice supports a FIXED set of speaker
+             attributes, not a free style prompt. Only applies to the default
+             voice — ignored when a clone profile is chosen. -->
+        <div class="mb-2" id="voiceDesignBox">
+          <a class="small text-decoration-none" data-bs-toggle="collapse"
+             href="#voiceDesign" role="button" aria-expanded="false">
+            <i class="bi bi-sliders"></i> Kiểu giọng (thiết kế giọng) — tuỳ chọn ▾</a>
+          <div class="collapse mt-2" id="voiceDesign">
+            <div class="row g-2">
+              <div class="col-4">
+                <label class="form-label small">Giới tính</label>
+                <select class="form-select form-select-sm" name="vd_gender">
+                  <option value="">—</option>
+                  <option value="female">Nữ</option>
+                  <option value="male">Nam</option>
+                </select>
+              </div>
+              <div class="col-4">
+                <label class="form-label small">Độ tuổi</label>
+                <select class="form-select form-select-sm" name="vd_age">
+                  <option value="">—</option>
+                  <option value="child">Trẻ em</option>
+                  <option value="teenager">Thiếu niên</option>
+                  <option value="young adult">Thanh niên</option>
+                  <option value="middle-aged">Trung niên</option>
+                  <option value="elderly">Lớn tuổi</option>
+                </select>
+              </div>
+              <div class="col-4">
+                <label class="form-label small">Cao độ</label>
+                <select class="form-select form-select-sm" name="vd_pitch">
+                  <option value="">—</option>
+                  <option value="very low pitch">Rất trầm</option>
+                  <option value="low pitch">Trầm</option>
+                  <option value="moderate pitch">Vừa</option>
+                  <option value="high pitch">Cao</option>
+                  <option value="very high pitch">Rất cao</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-check mt-2">
+              <input class="form-check-input" type="checkbox" name="vd_whisper"
+                     id="vdWhisper" value="1">
+              <label class="form-check-label small" for="vdWhisper">
+                Thì thầm (whisper)</label>
+            </div>
+            <div class="form-text">Chọn đặc tả giọng (giới tính / tuổi / cao độ /
+              thì thầm). OmniVoice chỉ nhận bộ thuộc tính cố định này — <b>không</b>
+              nhận mô tả tự do kiểu “đọc vui vẻ, hào hứng”. Chỉ áp dụng cho
+              <b>giọng mặc định</b>; khi chọn giọng đã clone thì bị bỏ qua (chất
+              giọng lấy từ file mẫu).</div>
+          </div>
+        </div>
+
         <div class="mb-2">
           <label class="form-label">Tốc độ: <span id="spdVal">1.00×</span></label>
           <input type="range" class="form-range" name="speed" id="spd"
@@ -577,6 +631,23 @@ if (jobForm) {
       .finally(() => { btnReset(btn); if (window.Loader) Loader.done(); });
   });
 }
+
+// Voice design only affects the DEFAULT voice — when a clone profile is picked,
+// the server ignores `instruct`, so grey the box out to avoid confusion.
+(function () {
+  const sel = document.querySelector('#jobForm [name="profile"]');
+  const box = document.getElementById('voiceDesign');
+  const link = document.querySelector('#voiceDesignBox a');
+  if (!sel || !box) return;
+  function sync() {
+    const cloned = !!sel.value;
+    box.querySelectorAll('select, input').forEach(el => { el.disabled = cloned; });
+    box.style.opacity = cloned ? 0.5 : '';
+    if (link) link.classList.toggle('text-muted', cloned);
+  }
+  sel.addEventListener('change', sync);
+  sync();
+})();
 
 // Audio preview: play the finished MP3 in a modal.
 function playJob(id) {

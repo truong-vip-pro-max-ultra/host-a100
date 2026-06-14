@@ -916,6 +916,14 @@ def voice_job_submit():
     # Return JSON for XHR; keep the redirect as a no-JS fallback.
     wants_json = (request.headers.get("X-Requested-With") == "fetch"
                   or "application/json" in request.headers.get("Accept", ""))
+    # Voice-design instruct from the dropdowns. OmniVoice's `instruct` is a FIXED
+    # vocabulary (gender/age/pitch/whisper), not free text — building it from
+    # selects keeps every item valid. Order doesn't matter to the model.
+    vd_parts = [f.get("vd_gender", "").strip(), f.get("vd_age", "").strip(),
+                f.get("vd_pitch", "").strip()]
+    if f.get("vd_whisper") is not None:
+        vd_parts.append("whisper")
+    instruct = ", ".join(p for p in vd_parts if p)
     try:
         job_id = voice_pipeline.start_job(
             name=f.get("name", ""),
@@ -927,6 +935,7 @@ def voice_job_submit():
             speed=f.get("speed", "1.0"),
             denoise=f.get("denoise") is not None,
             batch=f.get("batch", ""),
+            instruct=instruct,
         )
         if wants_json:
             return jsonify({"ok": True, "id": job_id,
