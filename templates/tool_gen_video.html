@@ -322,14 +322,14 @@
         <h5 class="modal-title"><i class="bi bi-images"></i> Ảnh các cảnh
           <span id="storyId"></span>
           <span class="badge bg-secondary ms-1" id="storyCount"></span></h5>
-        <div class="d-flex align-items-center gap-2">
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex justify-content-end mb-2">
           <button type="button" class="btn btn-sm btn-outline-secondary"
                   onclick="if(window.storyReload)window.storyReload()" title="Làm mới">
             <i class="bi bi-arrow-clockwise"></i> Làm mới</button>
-          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
         </div>
-      </div>
-      <div class="modal-body">
         <div id="storyEmpty" class="text-muted small d-none">Chưa có ảnh nào — chờ
           bước tạo ảnh chạy xong.</div>
         <div id="storyGrid" class="row g-3"></div>
