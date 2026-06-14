@@ -1,0 +1,489 @@
+#!/usr/bin/env python3
+"""OmniVoice TTS server — runs on a GPU compute node, driven by host-a100.
+
+This is the GPU half of the "Clone giọng nói" tool. It is launched on a SLURM
+GPU node by ``services/voice_service.py`` (via the env's python), loads OmniVoice
+once into VRAM, and serves synthesis over plain HTTP. The login-node Flask app
+posts one request per text chunk and does ALL the ffmpeg post-processing
+(concat / de-click / speed / denoise / MP3 / SRT) itself — this process only
+turns text + an optional reference clip into a raw WAV on the shared filesystem.
+
+Endpoints (JSON in, JSON out unless noted):
+    GET  /health      → {"ok": true, "ready": <bool>, "device": "...", ...}
+    POST /synthesize  → render ONE chunk to a wav on the shared FS:
+        request:  {"text": "...", "out_path": "/shared/.../part_0001.wav",
+                   "language": "vi", "num_step": 16, "seed": 1234,
+                   "ref_audio": "/shared/voices/.../reference.wav" | "",
+                   "ref_text": "..."}
+        response: {"ok": true, "out_path": "...", "duration": 3.21}
+
+Design notes (ported from clone-voice's OmniVoiceProvider, which is desktop-only):
+  * The heavy model is cached process-wide; clone prompts are cached per
+    (ref_audio, mtime) so the Whisper ASR + feature extraction is a one-time cost.
+  * The default (zero-shot) voice is locked to one timbre by self-cloning from a
+    single seeded clip — OmniVoice samples a fresh speaker from RNG otherwise, so
+    a fixed seed alone does NOT reproduce the same voice across chunks.
+  * OmniVoice prepends a short onset "blip" to every clip; we strip it at the
+    source so the login-node concat doesn't need fragile energy trims.
+
+It is intentionally dependency-light on the HTTP side (stdlib ``http.server``)
+so the only third-party imports are torch / omnivoice / numpy / soundfile, which
+live in the user's OmniVoice env.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+import sys
+import tempfile
+import threading
+import traceback
+import wave
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+DEFAULT_MODEL = "k2-fsa/OmniVoice"
+SR = 24000  # OmniVoice output sample rate
+
+# A fixed, phoneme-rich Vietnamese sentence used to mint the default-voice
+# reference clip (cross-lingual cloning keeps it usable for other languages too).
+_DEFAULT_REF_TEXT = "Xin chào, đây là giọng kể chuyện cho video của chúng ta hôm nay."
+
+
+# --------------------------------------------------------------------------- #
+# Audio helpers (no ffmpeg here — the login node does all post-processing).
+# --------------------------------------------------------------------------- #
+def write_wav_from_float(out_path, audio, sr=SR):
+    """Write a float32 mono waveform to a 16-bit WAV (soundfile, else stdlib)."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    import numpy as np
+    arr = np.asarray(audio, dtype=np.float32).reshape(-1)
+    arr = np.clip(arr, -1.0, 1.0)
+    try:
+        import soundfile as sf  # type: ignore
+        sf.write(str(out_path), arr, sr)
+        return out_path
+    except Exception:
+        pass
+    pcm = (arr * 32767.0).astype("<i2").tobytes()
+    with wave.open(str(out_path), "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes(pcm)
+    return out_path
+
+
+def wav_duration(path):
+    try:
+        with wave.open(str(path), "r") as wf:
+            return wf.getnframes() / float(wf.getframerate() or SR)
+    except Exception:
+        return 0.0
+
+
+def strip_lead_blip(wav, sr=SR):
+    """Remove OmniVoice's fixed-position onset blip (~0.11s, <0.18s long).
+
+    Drops short voiced bursts in the first ~0.65s, keeps from the first real
+    speech region. Defensive: returns the audio untouched on any oddity so we
+    never risk eating speech. (Ported verbatim from clone-voice.)
+    """
+    try:
+        import numpy as np
+        a = np.asarray(wav, dtype=np.float32).reshape(-1)
+        if a.size < int(0.4 * sr):
+            return wav
+        hop = max(1, int(0.01 * sr))
+        rms = np.array([np.sqrt((a[j:j + hop] ** 2).mean() + 1e-12)
+                        for j in range(0, len(a) - hop, hop)])
+        db = 20.0 * np.log10(rms + 1e-9)
+        voiced = db > -38.0
+        regions = []
+        k = 0
+        while k < len(voiced):
+            if voiced[k]:
+                st = k
+                while k < len(voiced) and voiced[k]:
+                    k += 1
+                regions.append((st, k))
+            else:
+                k += 1
+        if not regions:
+            return wav
+        blip_zone = int(0.65 / 0.01)
+        blip_max = int(0.18 / 0.01)
+        lead = int(0.06 / 0.01)
+        last_blip_end = 0
+        cut_frame = 0
+        for st, en in regions:
+            if st < blip_zone and (en - st) < blip_max:
+                last_blip_end = en
+                continue
+            cut_frame = max(last_blip_end, st - lead)
+            break
+        cut = int(cut_frame * hop)
+        if cut <= 0 or cut > int(2.0 * sr):
+            return wav
+        return a[cut:]
+    except Exception:
+        return wav
+
+
+def seed_rng(seed):
+    """Pin every RNG OmniVoice might draw from (so a fixed seed = a fixed voice)."""
+    import random
+    random.seed(seed)
+    try:
+        import numpy as np
+        np.random.seed(seed % (2 ** 32))
+    except Exception:
+        pass
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except Exception:
+        pass
+
+
+# --------------------------------------------------------------------------- #
+# The model wrapper (lazy-loaded, cached, thread-guarded).
+# --------------------------------------------------------------------------- #
+class OmniEngine:
+    def __init__(self, model_id=DEFAULT_MODEL):
+        self.model_id = (model_id or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        self._model = None
+        self._device = "cpu"
+        self._dtype_str = "float32"
+        self._lock = threading.Lock()         # OmniVoice generate isn't reentrant
+        self._prompt_cache = {}               # (ref, mtime) -> clone prompt
+        self._default_ref_cache = {}          # (seed,) -> clone prompt
+        self.load_error = ""
+
+    # -- load -------------------------------------------------------------- #
+    def _pick_device(self):
+        import torch
+        if torch.cuda.is_available():
+            return "cuda:0", torch.float16, "float16"
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return "mps", torch.float16, "float16"
+        return "cpu", torch.float32, "float32"
+
+    def load(self):
+        if self._model is not None:
+            return self._model
+        with self._lock:
+            if self._model is not None:
+                return self._model
+            import torch
+            from omnivoice import OmniVoice
+            device, dtype, dtype_str = self._pick_device()
+            self._device, self._dtype_str = device, dtype_str
+            print(f"[omnivoice] loading '{self.model_id}' on {device} ({dtype_str})…",
+                  flush=True)
+            try:
+                model = OmniVoice.from_pretrained(self.model_id, device_map=device,
+                                                  dtype=dtype)
+            except TypeError:
+                try:
+                    model = OmniVoice.from_pretrained(self.model_id, device_map=device,
+                                                      torch_dtype=dtype)
+                except TypeError:
+                    model = OmniVoice.from_pretrained(self.model_id)
+            try:
+                model.eval()
+                # Squeeze the L40S: TF32 matmul/conv (Ada has fast TF32) + the
+                # cudnn autotuner. fp16 weights are already chosen above. These
+                # are inference-only and harmless on CPU/MPS (guarded).
+                torch.backends.cudnn.benchmark = True
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                if hasattr(torch, "set_float32_matmul_precision"):
+                    torch.set_float32_matmul_precision("high")
+            except Exception:
+                pass
+            self._model = model
+            print("[omnivoice] model ready.", flush=True)
+            return model
+
+    @property
+    def ready(self):
+        return self._model is not None
+
+    # -- generation -------------------------------------------------------- #
+    def _gen_config(self, num_step):
+        try:
+            from omnivoice import OmniVoiceGenerationConfig
+            return OmniVoiceGenerationConfig(num_step=int(num_step))
+        except Exception:
+            return None
+
+    def _generate(self, model, text, voice_clone_prompt=None, ref_audio="",
+                  ref_text="", language="", gen_config=None):
+        kwargs = {"text": text}
+        if language:
+            kwargs["language"] = language
+        if gen_config is not None:
+            kwargs["generation_config"] = gen_config
+        if voice_clone_prompt is not None:
+            kwargs["voice_clone_prompt"] = voice_clone_prompt
+        elif ref_audio:
+            kwargs["ref_audio"] = ref_audio
+            if ref_text:
+                kwargs["ref_text"] = ref_text
+        try:
+            return model.generate(**kwargs)
+        except TypeError:
+            simple = {"text": text}
+            if voice_clone_prompt is not None:
+                simple["voice_clone_prompt"] = voice_clone_prompt
+            elif ref_audio:
+                simple["ref_audio"] = ref_audio
+                if ref_text:
+                    simple["ref_text"] = ref_text
+            return model.generate(**simple)
+
+    def _clone_prompt(self, model, ref_audio, ref_text):
+        try:
+            mtime = Path(ref_audio).stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        key = (ref_audio, mtime)
+        cached = self._prompt_cache.get(key)
+        if cached is not None:
+            return cached
+        prompt = model.create_voice_clone_prompt(ref_audio=ref_audio,
+                                                 ref_text=ref_text or None)
+        self._prompt_cache[key] = prompt
+        return prompt
+
+    def _default_clone_prompt(self, model, seed, language=""):
+        key = (int(seed),)
+        cached = self._default_ref_cache.get(key)
+        if cached is not None:
+            return cached
+        seed_rng(seed)
+        audio = self._generate(model, _DEFAULT_REF_TEXT, language=language or "vi",
+                               gen_config=self._gen_config(16))
+        wav = audio[0] if isinstance(audio, (list, tuple)) else audio
+        ref_path = Path(tempfile.gettempdir()) / f"omni_default_ref_{abs(int(seed))}.wav"
+        write_wav_from_float(ref_path, wav, sr=SR)
+        prompt = model.create_voice_clone_prompt(ref_audio=str(ref_path),
+                                                 ref_text=_DEFAULT_REF_TEXT)
+        self._default_ref_cache[key] = prompt
+        return prompt
+
+    def _resolve_prompt(self, model, ref_audio, ref_text, seed, language):
+        """Resolve the voice-conditioning prompt ONCE (cached). Returns
+        (clone_prompt, raw_ref_audio, raw_ref_text)."""
+        if ref_audio and Path(ref_audio).exists():
+            try:
+                return self._clone_prompt(model, ref_audio, ref_text), "", ""
+            except Exception as exc:
+                print(f"[omnivoice] clone prompt failed ({exc}); raw ref.", flush=True)
+                return None, ref_audio, ref_text
+        if seed is not None and seed >= 0:
+            try:
+                return self._default_clone_prompt(model, seed, language), "", ""
+            except Exception as exc:
+                print(f"[omnivoice] default voice lock failed ({exc}).", flush=True)
+        return None, "", ""
+
+    def _render_one(self, model, text, out_path, clone_prompt, raw_ref_audio,
+                    raw_ref_text, language, gen_config, seed):
+        """Generate + write one wav. Caller must hold self._lock."""
+        spoken = (text or "").strip().lower()
+        if not spoken:
+            raise ValueError("text trống")
+        if seed is not None and seed >= 0:
+            seed_rng(seed)
+        audio = self._generate(model, spoken, voice_clone_prompt=clone_prompt,
+                               ref_audio=raw_ref_audio, ref_text=raw_ref_text,
+                               language=language, gen_config=gen_config)
+        wav = audio[0] if isinstance(audio, (list, tuple)) else audio
+        wav = strip_lead_blip(wav, sr=SR)
+        out = Path(out_path)
+        if out.suffix.lower() != ".wav":
+            out = out.with_suffix(".wav")
+        write_wav_from_float(out, wav, sr=SR)
+        if not out.exists() or out.stat().st_size < 256:
+            raise RuntimeError("OmniVoice produced empty audio")
+        return str(out), wav_duration(out)
+
+    def synthesize(self, text, out_path, language="vi", num_step=16, seed=-1,
+                   ref_audio="", ref_text=""):
+        model = self.load()
+        gen_config = self._gen_config(num_step)
+        with self._lock:
+            cp, rra, rrt = self._resolve_prompt(model, ref_audio, ref_text, seed, language)
+            return self._render_one(model, text, out_path, cp, rra, rrt,
+                                    language, gen_config, seed)
+
+    def synthesize_batch(self, items, language="vi", num_step=16, seed=-1,
+                         ref_audio="", ref_text=""):
+        """Render many chunks in ONE call so the GPU never idles between chunks
+        and the (expensive) voice prompt is resolved once. ``items`` is a list of
+        {"text","out_path"}. Returns a list of per-item dicts (ok/out_path/
+        duration/error) — one bad chunk does not abort the rest."""
+        model = self.load()
+        gen_config = self._gen_config(num_step)
+        results = []
+        with self._lock:
+            cp, rra, rrt = self._resolve_prompt(model, ref_audio, ref_text, seed, language)
+            for it in items:
+                try:
+                    path, dur = self._render_one(
+                        model, it.get("text", ""), it.get("out_path", ""),
+                        cp, rra, rrt, language, gen_config, seed)
+                    results.append({"ok": True, "out_path": path, "duration": dur})
+                except Exception as exc:
+                    traceback.print_exc()
+                    results.append({"ok": False, "error": str(exc),
+                                    "out_path": it.get("out_path", "")})
+        return results
+
+
+ENGINE: OmniEngine | None = None
+
+
+# --------------------------------------------------------------------------- #
+# HTTP handler
+# --------------------------------------------------------------------------- #
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):  # quieter; only to stdout
+        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def _send_json(self, obj, status=200):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_json(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        return json.loads(raw or b"{}")
+
+    def do_GET(self):
+        if self.path.rstrip("/") in ("/health", "/healthz", ""):
+            self._send_json({
+                "ok": True,
+                "ready": bool(ENGINE and ENGINE.ready),
+                "model": ENGINE.model_id if ENGINE else "",
+                "device": ENGINE._device if ENGINE else "",
+                "dtype": ENGINE._dtype_str if ENGINE else "",
+                "load_error": ENGINE.load_error if ENGINE else "",
+            })
+            return
+        self._send_json({"error": "not found"}, 404)
+
+    def do_POST(self):
+        route = self.path.rstrip("/")
+        try:
+            req = self._read_json()
+        except Exception as exc:
+            self._send_json({"error": f"bad json: {exc}"}, 400)
+            return
+
+        if route == "/synthesize_batch":
+            items = req.get("items") or []
+            if not isinstance(items, list) or not items:
+                self._send_json({"error": "items trống"}, 400)
+                return
+            try:
+                results = ENGINE.synthesize_batch(
+                    items=items,
+                    language=(req.get("language") or "vi"),
+                    num_step=int(req.get("num_step", 16) or 16),
+                    seed=int(req.get("seed", -1)),
+                    ref_audio=(req.get("ref_audio") or ""),
+                    ref_text=(req.get("ref_text") or ""),
+                )
+                self._send_json({"ok": True, "results": results})
+            except Exception as exc:
+                traceback.print_exc()
+                self._send_json({"ok": False, "error": str(exc)}, 500)
+            return
+
+        if route == "/synthesize":
+            out_path = req.get("out_path") or ""
+            if not out_path:
+                self._send_json({"error": "out_path bắt buộc"}, 400)
+                return
+            try:
+                path, dur = ENGINE.synthesize(
+                    text=req.get("text", ""),
+                    out_path=out_path,
+                    language=(req.get("language") or "vi"),
+                    num_step=int(req.get("num_step", 16) or 16),
+                    seed=int(req.get("seed", -1)),
+                    ref_audio=(req.get("ref_audio") or ""),
+                    ref_text=(req.get("ref_text") or ""),
+                )
+                self._send_json({"ok": True, "out_path": path, "duration": dur})
+            except Exception as exc:
+                traceback.print_exc()
+                self._send_json({"ok": False, "error": str(exc)}, 500)
+            return
+
+        self._send_json({"error": "not found"}, 404)
+
+
+def _free_port():
+    s = socket.socket()
+    s.bind(("0.0.0.0", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+def main():
+    global ENGINE
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default=os.environ.get("OMNI_MODEL", DEFAULT_MODEL))
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=0)
+    ap.add_argument("--endpoint-file", default="",
+                    help="Write {host,port} JSON here once bound (for host-a100).")
+    ap.add_argument("--warmup", action="store_true",
+                    help="Load the model before accepting requests.")
+    args = ap.parse_args()
+
+    ENGINE = OmniEngine(args.model)
+
+    port = args.port or _free_port()
+    host_name = os.environ.get("SLURMD_NODENAME") or socket.gethostname().split(".")[0]
+    if args.endpoint_file:
+        try:
+            Path(args.endpoint_file).write_text(
+                json.dumps({"host": host_name, "port": port}), encoding="utf-8")
+        except OSError as exc:
+            print(f"[omnivoice] could not write endpoint file: {exc}", flush=True)
+
+    # Warm up in a background thread so /health responds immediately (showing
+    # ready=false) while the multi-GB weights load — the monitor polls /health.
+    def _warm():
+        try:
+            ENGINE.load()
+        except Exception as exc:
+            ENGINE.load_error = str(exc)
+            traceback.print_exc()
+    threading.Thread(target=_warm, daemon=True).start()
+
+    httpd = ThreadingHTTPServer((args.host, port), Handler)
+    print(f"[omnivoice] serving on {host_name}:{port} (model={args.model})",
+          flush=True)
+    httpd.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -27,7 +27,8 @@ from flask import (Flask, Response, abort, flash, jsonify, redirect,
 import config
 from services import (anthropic_bridge, apikey_service, env_service,
                       job_service, model_service, project_service, pty_service,
-                      serve_service, shell_service, storage_service as db)
+                      serve_service, shell_service, storage_service as db,
+                      voice_pipeline, voice_service)
 from utils import file_utils, gpu, progress, sysinfo
 
 app = Flask(__name__)
@@ -780,6 +781,212 @@ def job_result(job_id):
 
 
 # --------------------------------------------------------------------------- #
+# Tools — a hub of GPU-backed utilities. First tool: Clone giọng nói (OmniVoice
+# TTS). A long-running OmniVoice server runs on a GPU node (same lifecycle as the
+# API farm); the login node chunks the script, calls the server per chunk, and
+# stitches the audio with ffmpeg into one MP3 + SRT.
+# --------------------------------------------------------------------------- #
+# Audio formats accepted for a voice-clone reference clip (ffmpeg converts them).
+_AUDIO_REF_EXTS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".webm",
+                   ".aac", ".wma"}
+
+
+@app.route("/tools")
+def tools_page():
+    return render_template("tools.html")
+
+
+def _voice_context():
+    return dict(
+        servers=voice_service.list_servers(),
+        envs=env_service.list_envs(),
+        profiles=voice_pipeline.list_profiles(),
+        jobs=voice_pipeline.list_jobs(),
+        gpu_models=gpu.slurm_gpu_models(config.SLURM_PARTITION or None) or [],
+        slurm_active=job_service.slurm_active(),
+        omni_model=config.OMNI_MODEL_ID,
+        ffmpeg_ok=config.ffmpeg_available(),
+    )
+
+
+@app.route("/tools/clone-voice")
+def tool_clone_voice():
+    return render_template("tool_clone_voice.html", **_voice_context())
+
+
+@app.route("/tools/voice/servers/start", methods=["POST"])
+def voice_server_start():
+    f = request.form
+    try:
+        voice_service.start_server(
+            name=f.get("name", ""),
+            env_id=f.get("env_id", type=int),
+            model_id=f.get("model_id", "").strip(),
+            gpu_model=f.get("gpu_model", "").strip(),
+            time_limit=f.get("time_limit", "").strip(),
+            auto_resubmit=f.get("auto_resubmit") is not None,
+        )
+        flash("Đã gửi server giọng nói tới SLURM, đang chờ cấp GPU…", "success")
+    except ValueError as exc:
+        flash(str(exc), "danger")
+    return redirect(url_for("tool_clone_voice"))
+
+
+@app.route("/tools/voice/servers/<int:server_id>/stop", methods=["POST"])
+def voice_server_stop(server_id):
+    if voice_service.stop_server(server_id):
+        flash("Đã dừng server giọng nói.", "success")
+    else:
+        flash("Không tìm thấy server.", "danger")
+    return redirect(url_for("tool_clone_voice"))
+
+
+@app.route("/tools/voice/servers/<int:server_id>/delete", methods=["POST"])
+def voice_server_delete(server_id):
+    if voice_service.delete_server(server_id):
+        flash("Đã xoá server giọng nói.", "success")
+    else:
+        flash("Không tìm thấy server.", "danger")
+    return redirect(url_for("tool_clone_voice"))
+
+
+@app.route("/tools/voice/servers.json")
+def voice_servers_json():
+    out = []
+    for s in voice_service.list_servers():
+        out.append({
+            "id": s["id"], "name": s["name"], "status": s["status"],
+            "node": s.get("node"), "port": s.get("port"),
+            "env_name": s.get("env_name"),
+        })
+    return jsonify({"servers": out})
+
+
+@app.route("/tools/voice/servers/<int:server_id>/log")
+def voice_server_log(server_id):
+    return jsonify({"log": voice_service.read_log(server_id)})
+
+
+@app.route("/tools/voice/profiles/create", methods=["POST"])
+def voice_profile_create():
+    name = request.form.get("name", "").strip()
+    ref_text = request.form.get("ref_text", "").strip()
+    language = request.form.get("language", "vi").strip() or "vi"
+    f = request.files.get("reference")
+    if not f or not f.filename:
+        flash("Hãy chọn một file ghi âm mẫu (5–15 giây).", "danger")
+        return redirect(url_for("tool_clone_voice"))
+    ext = os.path.splitext(f.filename)[1].lower()
+    if ext not in _AUDIO_REF_EXTS:
+        flash(f"Định dạng audio không hỗ trợ ({ext}). Dùng wav/mp3/m4a/flac/ogg…",
+              "danger")
+        return redirect(url_for("tool_clone_voice"))
+    config.ensure_dirs()
+    tmp = os.path.join(config.VOICES_DIR, f".upload_{uuid.uuid4().hex}{ext}")
+    try:
+        f.save(tmp)
+        voice_pipeline.create_profile(name, tmp, ref_text=ref_text, language=language)
+        flash(f"Đã tạo giọng “{name}”.", "success")
+    except ValueError as exc:
+        flash(str(exc), "danger")
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    return redirect(url_for("tool_clone_voice"))
+
+
+@app.route("/tools/voice/profiles/<int:profile_id>/delete", methods=["POST"])
+def voice_profile_delete(profile_id):
+    if voice_pipeline.delete_profile(profile_id):
+        flash("Đã xoá giọng.", "success")
+    else:
+        flash("Không tìm thấy giọng.", "danger")
+    return redirect(url_for("tool_clone_voice"))
+
+
+@app.route("/tools/voice/jobs/submit", methods=["POST"])
+def voice_job_submit():
+    f = request.form
+    try:
+        voice_pipeline.start_job(
+            name=f.get("name", ""),
+            text=f.get("text", ""),
+            profile_name=f.get("profile", "").strip(),
+            language=f.get("language", "vi").strip() or "vi",
+            num_step=f.get("num_step", "16"),
+            seed=f.get("seed", "-1"),
+            speed=f.get("speed", "1.0"),
+            denoise=f.get("denoise") is not None,
+        )
+        flash("Đã bắt đầu tạo giọng đọc — theo dõi tiến trình bên dưới.", "success")
+    except ValueError as exc:
+        flash(str(exc), "danger")
+    return redirect(url_for("tool_clone_voice"))
+
+
+@app.route("/tools/voice/jobs.json")
+def voice_jobs_json():
+    out = []
+    for j in voice_pipeline.list_jobs():
+        out.append({
+            "id": j["id"], "name": j["name"], "status": j["status"],
+            "progress": j["progress"], "stage": j.get("stage"),
+            "error": j.get("error"),
+            "has_mp3": bool(j.get("output_path")),
+            "has_srt": bool(j.get("srt_path")),
+        })
+    return jsonify({"jobs": out})
+
+
+def _voice_job_file(job_id, kind):
+    job = voice_pipeline.get_job(job_id)
+    if not job:
+        abort(404)
+    path = job.get("output_path") if kind == "mp3" else job.get("srt_path")
+    if not path or not file_utils.is_within(config.VOICE_OUTPUTS_DIR, path) \
+            or not os.path.exists(path):
+        abort(404)
+    return send_from_directory(os.path.dirname(path), os.path.basename(path),
+                               as_attachment=True)
+
+
+@app.route("/tools/voice/jobs/<int:job_id>/mp3")
+def voice_job_mp3(job_id):
+    return _voice_job_file(job_id, "mp3")
+
+
+@app.route("/tools/voice/jobs/<int:job_id>/srt")
+def voice_job_srt(job_id):
+    return _voice_job_file(job_id, "srt")
+
+
+@app.route("/tools/voice/jobs/<int:job_id>/log")
+def voice_job_log(job_id):
+    job = voice_pipeline.get_job(job_id)
+    if not job or not job.get("logs_path"):
+        return jsonify({"log": ""})
+    log_file = os.path.join(job["logs_path"], "job.log")
+    if not os.path.exists(log_file):
+        return jsonify({"log": ""})
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as fh:
+            return jsonify({"log": fh.read()[-20000:]})
+    except OSError:
+        return jsonify({"log": ""})
+
+
+@app.route("/tools/voice/jobs/<int:job_id>/delete", methods=["POST"])
+def voice_job_delete(job_id):
+    if voice_pipeline.delete_job(job_id):
+        flash("Đã xoá tác vụ giọng đọc.", "success")
+    else:
+        flash("Không tìm thấy tác vụ.", "danger")
+    return redirect(url_for("tool_clone_voice"))
+
+
+# --------------------------------------------------------------------------- #
 # API farm — manage long-running LLM servers and the keys that gate the public
 # /v1/* proxy. These management pages stay behind the session login (owner UI);
 # only the /v1/* proxy below is opened to Bearer-key clients.
@@ -1266,6 +1473,9 @@ def main():
     if new_key:
         print(f"[host-a100] API farm key (xem ở tab API farm): {new_key}")
     serve_service.resume_monitors()
+    # Tools / Clone giọng nói: re-attach monitors to any OmniVoice server still
+    # alive on SLURM from before this (re)start (same reconciliation as above).
+    voice_service.resume_monitors()
     # ASCII-only console logs: some HPC nodes use a latin-1 locale and would
     # crash on a non-ASCII print at startup.
     if config.AUTH_ENABLED:

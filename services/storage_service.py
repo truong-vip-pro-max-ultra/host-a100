@@ -112,6 +112,56 @@ def init_db():
                 created_at REAL NOT NULL,
                 revoked    INTEGER NOT NULL DEFAULT 0
             );
+
+            -- Tools / Clone giọng nói: one long-running OmniVoice TTS server on a
+            -- GPU compute node (sbatch), same lifecycle as the API-farm `servers`.
+            -- It writes <node>:<port> into endpoint.json; the login-node app POSTs
+            -- synthesis requests to http://<node>:<port>/synthesize.
+            CREATE TABLE IF NOT EXISTS voice_servers (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                name          TEXT NOT NULL,
+                env_id        INTEGER,
+                model_id      TEXT,            -- HF model id (resolved from cache)
+                status        TEXT NOT NULL DEFAULT 'queued',
+                slurm_job_id  TEXT,
+                node          TEXT,
+                port          INTEGER,
+                gpu_model     TEXT,
+                time_limit    TEXT,
+                auto_resubmit INTEGER NOT NULL DEFAULT 1,
+                logs_path     TEXT,
+                created_at    REAL NOT NULL,
+                stopped_at    REAL,
+                FOREIGN KEY (env_id) REFERENCES envs(id) ON DELETE SET NULL
+            );
+
+            -- A cloned / zero-shot named voice: a (preprocessed) reference clip on
+            -- the shared FS plus its transcript. Synthesis conditions on this.
+            CREATE TABLE IF NOT EXISTS voice_profiles (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                name       TEXT UNIQUE NOT NULL,
+                ref_audio  TEXT NOT NULL,      -- abs path to the stored reference wav
+                ref_text   TEXT,
+                language   TEXT NOT NULL DEFAULT 'vi',
+                created_at REAL NOT NULL
+            );
+
+            -- One narration job: script text → MP3 (+SRT). Runs on the login node
+            -- (chunk + ffmpeg) and calls the GPU server per chunk.
+            CREATE TABLE IF NOT EXISTS voice_jobs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT,
+                status      TEXT NOT NULL DEFAULT 'queued',
+                progress    INTEGER NOT NULL DEFAULT 0,
+                stage       TEXT,
+                params      TEXT,              -- JSON of the synth knobs
+                output_path TEXT,             -- final MP3
+                srt_path    TEXT,
+                logs_path   TEXT,             -- the job working dir
+                error       TEXT,
+                created_at  REAL NOT NULL,
+                finished_at REAL
+            );
             """
         )
         _migrate(conn)

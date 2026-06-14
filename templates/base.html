@@ -228,11 +228,12 @@
       ('jobs_page','/jobs','bi-cpu-fill','Tác vụ'),
       ('api_page','/api','bi-hdd-network-fill','API farm'),
       ('chat_page','/chat','bi-chat-dots-fill','Chat'),
+      ('tools_page','/tools','bi-tools','Công cụ'),
       ('terminal_page','/terminal','bi-terminal-fill','Terminal'),
     ] %}
     <div class="nav-section">Nền tảng</div>
     {% for endpoint, path, icon, label in nav %}
-      <a class="side-link {% if request.path==path %}active{% endif %}"
+      <a class="side-link {% if request.path==path or (path!='/' and request.path.startswith(path)) %}active{% endif %}"
          href="{{ url_for(endpoint) }}"><i class="bi {{ icon }}"></i>{{ label }}</a>
     {% endfor %}
     <div class="nav-section">A100 · HPC</div>

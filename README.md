@@ -111,6 +111,15 @@ OpenAI SDK, or the built-in Chat tab. Build/setup, the Anthropic bridge,
 performance tuning, tests, and deploy/ops are documented in
 **[docs/API_FARM.md](docs/API_FARM.md)**.
 
+## Tools — Clone giọng nói (OmniVoice TTS)
+
+The **Công cụ** tab hosts GPU-backed utilities. The first one, **Clone giọng
+nói**, reads a script into one seamless MP3 using **OmniVoice** on a GPU node
+(same sbatch lifecycle as the API farm): clone a voice from a 5–15 s sample,
+adjust speed (pitch-preserving), denoise, and export a matching `.SRT`. Setup
+(env, weights download, HF cache), ops and tests are in
+**[docs/TOOLS_VOICE.md](docs/TOOLS_VOICE.md)**.
+
 ## Inference runner
 
 `inference_runner.py` ships with the platform and is the only code a job

@@ -1,0 +1,25 @@
+# OmniVoice TTS env cho tab "Công cụ → Clone giọng nói".
+# Cài bằng tab Môi trường → "…hoặc cài từ file requirements.txt" (upload file này).
+# pip ĐỌC ĐƯỢC các dòng --index-url ngay trong requirements (ô "cài gói" thì KHÔNG).
+#
+# --- Vì sao các phiên bản này ---
+# torch 2.6.0 + cu124: khớp module nvidia/cuda-12.4 của cluster (driver chỉ chắc
+#   chắn hỗ trợ tới 12.4 → KHÔNG dùng cu128/torch-2.8 trừ khi driver đủ mới).
+#   L40S = Ada sm_89, được cu124 hỗ trợ.
+# transformers 5.3.0 (ghim CỨNG): là bản tối thiểu omnivoice cần. Bản mới hơn
+#   tham chiếu torch.float8_e8m0fnu (cần torch>=2.7) → với torch 2.6 sẽ CRASH lúc
+#   import. Đừng nâng transformers khi còn dùng torch 2.6.
+# +cu124 ở torch/torchaudio: ép lấy đúng bản CUDA từ index PyTorch.
+
+--index-url https://pypi.org/simple
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+torch==2.6.0+cu124
+torchaudio==2.6.0+cu124
+
+omnivoice>=0.1.0
+transformers==5.3.0
+accelerate>=0.27.0
+soundfile>=0.12.1
+numpy>=1.26.0
+huggingface-hub>=0.20.0

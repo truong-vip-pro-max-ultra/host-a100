@@ -53,6 +53,30 @@ PROJECTS_DIR = os.path.join(DATA_DIR, "projects")
 # One subdir per API-farm server (sbatch script, slurm.out, endpoint.json, log).
 SERVERS_DIR = os.path.join(DATA_DIR, "servers")
 
+# --------------------------------------------------------------------------- #
+# Tools → Clone giọng nói (OmniVoice). Mirrors the API farm: a long-running
+# OmniVoice TTS server runs on a GPU compute node via sbatch and the login-node
+# app talks to it for synthesis. All paths live on the shared FS so the compute
+# node (no internet) can read the model weights + voice references the login node
+# wrote.
+# --------------------------------------------------------------------------- #
+# One subdir per OmniVoice server (run.sh, slurm.out, endpoint.json, server.log).
+VOICE_SERVERS_DIR = os.path.join(DATA_DIR, "voice-servers")
+# Per-job working dir: per-chunk wavs + the final MP3 + SRT.
+VOICE_OUTPUTS_DIR = os.path.join(DATA_DIR, "voice-outputs")
+# Cloned-voice profiles (one subdir per voice: reference.wav + profile.json).
+VOICES_DIR = os.path.join(DATA_DIR, "voices")
+# Shared HuggingFace cache. The OmniVoice weights MUST be downloaded here on the
+# login node first (compute nodes have no internet); the server script exports
+# HF_HOME=this so it loads from cache. Override with HOSTA100_HF_HOME.
+OMNI_HF_HOME = os.environ.get("HOSTA100_HF_HOME", os.path.join(DATA_DIR, "hf-cache"))
+# Default OmniVoice model id (resolved from the shared HF cache above).
+OMNI_MODEL_ID = os.environ.get("HOSTA100_OMNI_MODEL", "k2-fsa/OmniVoice")
+# The GPU-side server script (lives in the repo, shipped by git). The batch
+# script runs it with the env's python on the compute node.
+OMNI_SERVER_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "scripts", "omnivoice_server.py")
+
 # Native llama.cpp server binary (`llama-server` from ggml-org). Used by the
 # API-farm "llama-server (native, --jinja)" engine, which has a built-in
 # tool-call parser + reads the GGUF's embedded chat template — so models like
@@ -169,5 +193,43 @@ def ensure_dirs():
     """Create all required data directories. Safe to call repeatedly."""
     print(f"[host-a100] Using data directory: {DATA_DIR}")
     for path in (DATA_DIR, MODELS_DIR, ENVS_DIR, JOBS_DIR, RESULTS_DIR,
-                 PROJECTS_DIR, PIP_CACHE_DIR, SERVERS_DIR):
+                 PROJECTS_DIR, PIP_CACHE_DIR, SERVERS_DIR,
+                 VOICE_SERVERS_DIR, VOICE_OUTPUTS_DIR, VOICES_DIR, OMNI_HF_HOME):
         os.makedirs(path, exist_ok=True)
+
+
+# --------------------------------------------------------------------------- #
+# ffmpeg / ffprobe discovery. The voice tool stitches the per-chunk audio,
+# adjusts speed, denoises and exports MP3 entirely with ffmpeg on the LOGIN node
+# (no GPU needed for any of that). Prefer an explicit override, then a `ffmpeg/`
+# folder next to the app, then PATH.
+# --------------------------------------------------------------------------- #
+import shutil as _shutil  # noqa: E402  (kept local to these helpers)
+
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _find_bin(name, env_var):
+    explicit = os.environ.get(env_var)
+    if explicit and os.path.isfile(explicit):
+        return explicit
+    local = os.path.join(_APP_DIR, "ffmpeg", name)
+    if os.path.isfile(local):
+        return local
+    if os.name == "nt":
+        local_exe = local + ".exe"
+        if os.path.isfile(local_exe):
+            return local_exe
+    return _shutil.which(name) or name
+
+
+def ffmpeg_path():
+    return _find_bin("ffmpeg", "HOSTA100_FFMPEG")
+
+
+def ffprobe_path():
+    return _find_bin("ffprobe", "HOSTA100_FFPROBE")
+
+
+def ffmpeg_available():
+    return bool(_shutil.which(ffmpeg_path()) or os.path.isfile(ffmpeg_path()))

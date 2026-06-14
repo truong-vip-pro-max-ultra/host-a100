@@ -1,0 +1,399 @@
+{% extends "base.html" %}
+{% block title %}Clone giọng nói{% endblock %}
+{% block page_title %}Clone giọng nói{% endblock %}
+{% block page_sub %}Đọc kịch bản → MP3 (OmniVoice trên GPU) · clone giọng · chỉnh tốc độ · khử nhiễu · xuất .SRT{% endblock %}
+{% block content %}
+
+{% set ST = {
+  'ready':   ('pill-done',    'sẵn sàng'),
+  'loading': ('pill-running', 'đang nạp model'),
+  'queued':  ('pill-queued',  'chờ cấp GPU'),
+  'stopped': ('pill-unknown', 'đã dừng'),
+  'error':   ('pill-error',   'lỗi'),
+} %}
+{% set JST = {
+  'done':    ('pill-done',    'xong'),
+  'running': ('pill-running', 'đang chạy'),
+  'queued':  ('pill-queued',  'chờ'),
+  'error':   ('pill-error',   'lỗi'),
+} %}
+
+{% if not ffmpeg_ok %}
+<div class="alert alert-warning py-2 small">
+  <i class="bi bi-exclamation-triangle"></i> Không tìm thấy <code>ffmpeg</code> trên
+  node này — phần ghép/chỉnh/khử nhiễu/xuất MP3 sẽ lỗi. Cài ffmpeg hoặc đặt
+  <code>HOSTA100_FFMPEG</code>.</div>
+{% endif %}
+
+<div class="row g-3">
+  <!-- ============================ LEFT ============================== -->
+  <div class="col-lg-5">
+
+    <!-- Narration job -->
+    <div class="card"><div class="card-body">
+      <h5 class="card-title"><i class="bi bi-soundwave"></i> Tạo giọng đọc</h5>
+      <form method="post" action="{{ url_for('voice_job_submit') }}">
+        <div class="mb-2">
+          <label class="form-label">Tên (đặt cho file xuất)</label>
+          <input class="form-control" name="name" placeholder="ban-tin-01">
+        </div>
+        <div class="mb-2">
+          <label class="form-label">Kịch bản</label>
+          <textarea class="form-control" name="text" rows="8" required
+            placeholder="Dán kịch bản vào đây. Tự chia đoạn theo câu/mệnh đề tiếng Việt; có thể đánh dấu 'Cảnh 1:', 'Đoạn 2:'…"></textarea>
+        </div>
+
+        <div class="row g-2">
+          <div class="col-7 mb-2">
+            <label class="form-label">Giọng</label>
+            <select class="form-select" name="profile">
+              <option value="">Mặc định (zero-shot, khoá theo seed)</option>
+              {% for p in profiles %}
+              <option value="{{ p.name }}">🎙 {{ p.name }} (clone)</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-5 mb-2">
+            <label class="form-label">Ngôn ngữ</label>
+            <input class="form-control" name="language" value="vi">
+          </div>
+        </div>
+
+        <div class="row g-2">
+          <div class="col-6 mb-2">
+            <label class="form-label">Số bước (num_step)</label>
+            <select class="form-select" name="num_step">
+              <option value="8">8 — nhanh nhất</option>
+              <option value="16" selected>16 — cân bằng</option>
+              <option value="24">24 — nét hơn</option>
+              <option value="32">32 — nét nhất, chậm</option>
+            </select>
+            <div class="form-text">Ít bước = nhanh; nhiều bước = nét/chậm.</div>
+          </div>
+          <div class="col-6 mb-2">
+            <label class="form-label">Seed (khoá giọng mặc định)</label>
+            <input class="form-control" name="seed" value="1234">
+            <div class="form-text">Đổi seed = đổi chất giọng zero-shot. -1 = ngẫu nhiên.</div>
+          </div>
+        </div>
+
+        <div class="row g-2 align-items-end">
+          <div class="col-6 mb-2">
+            <label class="form-label">Tốc độ: <span id="spdVal">1.00×</span></label>
+            <input type="range" class="form-range" name="speed" id="spd"
+                   min="0.5" max="2.0" step="0.05" value="1.0">
+            <div class="form-text">Giữ nguyên cao độ (không bị méo giọng).</div>
+          </div>
+          <div class="col-6 mb-2">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" role="switch"
+                     name="denoise" id="denoise">
+              <label class="form-check-label" for="denoise">Khử nhiễu</label>
+            </div>
+            <div class="form-text">Lọc tần số thấp + FFT (afftdn) trước khi chuẩn âm lượng.</div>
+          </div>
+        </div>
+
+        <button class="btn btn-primary mt-1"><i class="bi bi-play-fill"></i> Tạo MP3</button>
+        <div class="form-text">Cần một server giọng nói đang <b>sẵn sàng</b> bên dưới.</div>
+      </form>
+    </div></div>
+
+    <!-- Cloned voices -->
+    <div class="card mt-3"><div class="card-body">
+      <h5 class="card-title"><i class="bi bi-person-badge"></i> Giọng đã clone</h5>
+      <div class="table-responsive">
+      <table class="table table-sm align-middle mb-2">
+        <tbody>
+        {% for p in profiles %}
+          <tr>
+            <td>🎙 <b>{{ p.name }}</b><br>
+              <span class="text-muted small">{{ p.language }}{% if p.ref_text %} · “{{ p.ref_text[:40] }}”{% endif %}</span></td>
+            <td class="text-end">
+              <form class="d-inline" method="post"
+                    action="{{ url_for('voice_profile_delete', profile_id=p.id) }}"
+                    data-confirm="Xoá giọng “{{ p.name }}”?">
+                <button class="btn btn-sm btn-outline-danger">×</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td class="text-muted">Chưa có giọng clone nào.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      <hr class="my-2">
+      <p class="small fw-semibold mb-1"><i class="bi bi-plus-circle"></i> Clone giọng mới</p>
+      <form method="post" action="{{ url_for('voice_profile_create') }}"
+            enctype="multipart/form-data">
+        <div class="mb-2">
+          <label class="form-label small">File ghi âm mẫu (5–15 giây, rõ tiếng)</label>
+          <input class="form-control form-control-sm" type="file" name="reference"
+                 accept="audio/*" required>
+        </div>
+        <div class="row g-2">
+          <div class="col-7 mb-2">
+            <input class="form-control form-control-sm" name="name"
+                   placeholder="tên giọng (vd: anh-Nam)" required>
+          </div>
+          <div class="col-5 mb-2">
+            <input class="form-control form-control-sm" name="language" value="vi">
+          </div>
+        </div>
+        <div class="mb-2">
+          <input class="form-control form-control-sm" name="ref_text"
+                 placeholder="(tuỳ chọn) lời thoại trong file mẫu — bỏ trống sẽ tự nhận dạng">
+        </div>
+        <button class="btn btn-sm btn-primary"><i class="bi bi-mic"></i> Tạo giọng</button>
+      </form>
+    </div></div>
+  </div>
+
+  <!-- ============================ RIGHT ============================= -->
+  <div class="col-lg-7">
+
+    <!-- Jobs -->
+    <div class="card"><div class="card-body">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="card-title mb-0"><i class="bi bi-music-note-list"></i> Tác vụ giọng đọc</h5>
+        <span class="small text-muted">tự cập nhật</span>
+      </div>
+      <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead><tr><th>#</th><th>Tên</th><th style="width:34%">Tiến trình</th><th>Trạng thái</th><th></th></tr></thead>
+        <tbody id="jobBody">
+        {% for j in jobs %}
+          <tr id="vjob-{{ j.id }}">
+            <td>{{ j.id }}</td>
+            <td class="small">{{ j.name }}</td>
+            <td>
+              <div class="progress" style="height:6px">
+                <div class="progress-bar" data-bar role="progressbar"
+                     style="width: {{ j.progress }}%"></div>
+              </div>
+              <span class="text-muted small" data-stage>{{ j.stage or '' }}</span>
+            </td>
+            <td>{% set cls, lbl = JST.get(j.status, ('pill-unknown', j.status)) %}
+              <span class="pill {{ cls }}" data-st>{{ lbl }}</span></td>
+            <td class="text-end text-nowrap">
+              <a class="btn btn-sm btn-outline-secondary" href="#"
+                 onclick="showJobLog({{ j.id }});return false;" title="Log"><i class="bi bi-terminal"></i></a>
+              <a class="btn btn-sm btn-outline-primary {% if not j.output_path %}disabled{% endif %}"
+                 data-mp3 href="{{ url_for('voice_job_mp3', job_id=j.id) }}" title="Tải MP3"><i class="bi bi-filetype-mp3"></i></a>
+              <a class="btn btn-sm btn-outline-secondary {% if not j.srt_path %}disabled{% endif %}"
+                 data-srt href="{{ url_for('voice_job_srt', job_id=j.id) }}" title="Tải SRT"><i class="bi bi-badge-cc"></i></a>
+              <form class="d-inline" method="post" action="{{ url_for('voice_job_delete', job_id=j.id) }}"
+                    data-confirm="Xoá tác vụ #{{ j.id }}?">
+                <button class="btn btn-sm btn-outline-danger" title="Xoá">×</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr id="noJob"><td colspan="5" class="text-muted">Chưa có tác vụ nào.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </div></div>
+
+    <!-- GPU server -->
+    <div class="card mt-3"><div class="card-body">
+      <h5 class="card-title"><i class="bi bi-gpu-card"></i> Server giọng nói (GPU)</h5>
+      {% if not slurm_active %}
+        <div class="alert alert-warning py-2 small mb-2">
+          <i class="bi bi-exclamation-triangle"></i> Chưa bật SLURM trên node này —
+          không thể cấp GPU cho server.</div>
+      {% endif %}
+
+      <div class="table-responsive">
+      <table class="table table-sm align-middle mb-2">
+        <thead><tr><th>#</th><th>Tên</th><th>Môi trường</th><th>Endpoint</th><th>Trạng thái</th><th></th></tr></thead>
+        <tbody id="srvBody">
+        {% for s in servers %}
+          <tr id="vsrv-{{ s.id }}">
+            <td>{{ s.id }}</td>
+            <td class="small">{{ s.name }}</td>
+            <td class="small text-muted">{{ s.env_name or '-' }}</td>
+            <td class="small" data-ep>{% if s.node %}{{ s.node }}:{{ s.port }}{% else %}—{% endif %}</td>
+            <td>{% set cls, lbl = ST.get(s.status, ('pill-unknown', s.status)) %}
+              <span class="pill {{ cls }}" data-st>{{ lbl }}</span></td>
+            <td class="text-end text-nowrap">
+              <a class="btn btn-sm btn-outline-secondary" href="#"
+                 onclick="showSrvLog({{ s.id }});return false;" title="Log"><i class="bi bi-terminal"></i></a>
+              {% if s.status in ('ready','loading','queued') %}
+              <form class="d-inline" method="post" action="{{ url_for('voice_server_stop', server_id=s.id) }}">
+                <button class="btn btn-sm btn-outline-warning" title="Dừng"><i class="bi bi-stop-fill"></i></button>
+              </form>
+              {% endif %}
+              <form class="d-inline" method="post" action="{{ url_for('voice_server_delete', server_id=s.id) }}"
+                    data-confirm="Xoá server #{{ s.id }}?">
+                <button class="btn btn-sm btn-outline-danger" title="Xoá">×</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr id="noSrv"><td colspan="6" class="text-muted">Chưa có server nào.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+
+      <hr class="my-2">
+      <p class="small fw-semibold mb-1"><i class="bi bi-rocket-takeoff"></i> Khởi động server</p>
+      <form method="post" action="{{ url_for('voice_server_start') }}">
+        <div class="row g-2">
+          <div class="col-6 mb-2">
+            <label class="form-label">Môi trường (có <code>omnivoice</code>+<code>torch</code>)</label>
+            <select class="form-select" name="env_id" required>
+              <option value="">— chọn môi trường —</option>
+              {% for e in envs %}<option value="{{ e.id }}">{{ e.name }}</option>{% endfor %}
+            </select>
+          </div>
+          <div class="col-6 mb-2">
+            <label class="form-label">Loại GPU</label>
+            <select class="form-select" name="gpu_model">
+              <option value="">Bất kỳ GPU rảnh (cấp nhanh nhất)</option>
+              {% for m in gpu_models %}
+              <option value="{{ m.model }}" {% if m.model=='l40s' %}selected{% endif %}>
+                {{ m.model|upper }} — {{ m.free }}/{{ m.total }} trống ({{ m.arch }}, {{ m.nodes }} node)</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+        <div class="row g-2">
+          <div class="col-7 mb-2">
+            <label class="form-label">Tên hiển thị</label>
+            <input class="form-control" name="name" placeholder="omnivoice">
+          </div>
+          <div class="col-5 mb-2">
+            <label class="form-label">Thời lượng tối đa</label>
+            <input class="form-control" name="time_limit" value="24:00:00">
+          </div>
+        </div>
+        <input type="hidden" name="model_id" value="{{ omni_model }}">
+        <div class="form-text mb-2">Model: <code>{{ omni_model }}</code> (nạp từ HF cache
+          chung — phải tải sẵn ở login node, xem <code>docs/TOOLS_VOICE.md</code>).</div>
+        <div class="form-check form-switch mb-2">
+          <input class="form-check-input" type="checkbox" role="switch"
+                 name="auto_resubmit" id="autoResubmit" checked>
+          <label class="form-check-label" for="autoResubmit">Tự khởi động lại khi hết giờ</label>
+        </div>
+        <button class="btn btn-primary" {% if not envs %}disabled{% endif %}>
+          <i class="bi bi-play-fill"></i> Khởi động</button>
+        {% if not envs %}<div class="form-text text-danger">Cần ít nhất 1 môi trường.</div>{% endif %}
+      </form>
+    </div></div>
+  </div>
+</div>
+
+<!-- Log modal (shared by server + job) -->
+<div class="modal fade" id="logModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Log <span id="logId"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <pre class="logbox mb-0" id="logBox" style="max-height:60vh">Đang tải…</pre>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function(){
+  var m = document.getElementById('logModal');
+  if (m && m.parentElement !== document.body) document.body.appendChild(m);
+})();
+
+const spd = document.getElementById('spd');
+if (spd) {
+  const lab = document.getElementById('spdVal');
+  const sync = () => lab.textContent = parseFloat(spd.value).toFixed(2) + '×';
+  spd.addEventListener('input', sync); sync();
+}
+
+const ST = {
+  ready:   ['pill-done',    'sẵn sàng'],
+  loading: ['pill-running', 'đang nạp model'],
+  queued:  ['pill-queued',  'chờ cấp GPU'],
+  stopped: ['pill-unknown', 'đã dừng'],
+  error:   ['pill-error',   'lỗi'],
+};
+const JST = {
+  done:    ['pill-done',    'xong'],
+  running: ['pill-running', 'đang chạy'],
+  queued:  ['pill-queued',  'chờ'],
+  error:   ['pill-error',   'lỗi'],
+};
+
+function pollServers() {
+  fetch('{{ url_for("voice_servers_json") }}')
+    .then(r => r.json())
+    .then(d => d.servers.forEach(s => {
+      const row = document.getElementById('vsrv-' + s.id);
+      if (!row) return;
+      const ep = row.querySelector('[data-ep]');
+      if (ep) ep.textContent = s.node ? (s.node + ':' + s.port) : '—';
+      const pill = row.querySelector('[data-st]');
+      if (pill) { const m = ST[s.status] || ['pill-unknown', s.status];
+        pill.className = 'pill ' + m[0]; pill.textContent = m[1]; }
+    }))
+    .finally(() => setTimeout(pollServers, 3000));
+}
+pollServers();
+
+let jobsReloadNeeded = false;
+function pollJobs() {
+  fetch('{{ url_for("voice_jobs_json") }}')
+    .then(r => r.json())
+    .then(d => d.jobs.forEach(j => {
+      const row = document.getElementById('vjob-' + j.id);
+      if (!row) { jobsReloadNeeded = true; return; }
+      const bar = row.querySelector('[data-bar]');
+      if (bar) bar.style.width = (j.progress || 0) + '%';
+      const stage = row.querySelector('[data-stage]');
+      if (stage) stage.textContent = j.error ? ('Lỗi: ' + j.error) : (j.stage || '');
+      const pill = row.querySelector('[data-st]');
+      if (pill) { const m = JST[j.status] || ['pill-unknown', j.status];
+        pill.className = 'pill ' + m[0]; pill.textContent = m[1]; }
+      const mp3 = row.querySelector('[data-mp3]');
+      if (mp3) mp3.classList.toggle('disabled', !j.has_mp3);
+      const srt = row.querySelector('[data-srt]');
+      if (srt) srt.classList.toggle('disabled', !j.has_srt);
+    }))
+    .finally(() => {
+      // A brand-new job submitted in another tab/session appears only after a
+      // reload; refresh once when we notice an unknown id.
+      if (jobsReloadNeeded) { jobsReloadNeeded = false; location.reload(); return; }
+      setTimeout(pollJobs, 2500);
+    });
+}
+pollJobs();
+
+let logTimer = null;
+function openLog(title, urlBase, id) {
+  document.getElementById('logId').textContent = title;
+  const box = document.getElementById('logBox');
+  box.textContent = 'Đang tải…';
+  const modalEl = document.getElementById('logModal');
+  bootstrap.Modal.getOrCreateInstance(modalEl).show();
+  function load() {
+    fetch(urlBase.replace('/0/', '/' + id + '/'))
+      .then(r => r.json())
+      .then(d => { box.textContent = d.log || '(trống)'; box.scrollTop = box.scrollHeight; });
+  }
+  load();
+  if (logTimer) clearInterval(logTimer);
+  logTimer = setInterval(load, 2000);
+  modalEl.addEventListener('hidden.bs.modal', () => { if (logTimer) clearInterval(logTimer); }, { once: true });
+}
+function showSrvLog(id){ openLog('server #' + id, '{{ url_for("voice_server_log", server_id=0) }}', id); }
+function showJobLog(id){ openLog('tác vụ #' + id, '{{ url_for("voice_job_log", job_id=0) }}', id); }
+window.showSrvLog = showSrvLog; window.showJobLog = showJobLog;
+</script>
+{% endblock %}
