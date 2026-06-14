@@ -263,6 +263,10 @@ _LLM_BATCH_INSTRUCTION = (
     "- Do NOT mention any art style, medium or colour palette; no text/letters in the image.\n"
     "Output ONLY a JSON array of exactly N strings, in the SAME order as the input, "
     "nothing else (no keys, no markdown fences, no commentary)."
+    # Qwen3.x models 'think' by default and burn the whole token budget on a
+    # <think> block (→ empty answer) on a small ctx. /no_think disables it; harmless
+    # text for non-Qwen models.
+    "\n/no_think"
 )
 
 
@@ -279,8 +283,11 @@ def _extract_content(data):
     if isinstance(content, list):  # some servers return content as parts
         content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
     if not content:
-        content = msg.get("reasoning_content") or choice.get("text") or ""
-    return (content or "").strip()
+        content = choice.get("text") or ""
+    # Strip a Qwen3 <think>…</think> reasoning block (even if left unclosed because
+    # the token budget ran out) so it never leaks into the parsed prompts.
+    content = re.sub(r"<think>.*?(</think>|$)", "", content or "", flags=re.S).strip()
+    return content
 
 
 def _chat(messages, max_tokens, timeout, on_log=None):
@@ -397,7 +404,10 @@ def llm_visual_prompts(texts, timeout=180, simple=False, on_log=None):
         instruction += ("\nIMPORTANT: keep EACH scene VERY simple — name only the "
                         "main subject(s) and ONE clear action. No detailed scenery, "
                         "backgrounds, lighting or extra objects. Max ~12 words each.")
-    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
+    def _short(t):
+        w = t.split()
+        return " ".join(w[:_LLM_LINE_WORDS]) + ("…" if len(w) > _LLM_LINE_WORDS else "")
+    numbered = "\n".join(f"{i + 1}. {_short(t)}" for i, t in enumerate(texts))
     out = _chat(
         [{"role": "system", "content": instruction},
          {"role": "user", "content": f"{len(texts)} narration lines:\n{numbered}"}],
@@ -462,10 +472,15 @@ def llm_visual_prompt(text, seed=-1, timeout=60):
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
-# How many scenes per LLM prompt-rewrite call. One call must comfortably fit its
-# output budget (~90 tok/scene) and stay reliable; a giant 100+-scene request
-# overruns it and the server returns empty. ~24 is a safe, fast group.
-_LLM_PROMPT_BATCH = 24
+# How many scenes per LLM prompt-rewrite call. Must fit the server's n_ctx (the
+# API-farm default is only 8192) for BOTH the input lines and the output, so keep
+# the group modest; a giant request overruns ctx and the server returns empty. 16
+# is a safe, fast group at ctx 8192.
+_LLM_PROMPT_BATCH = 16
+# Each narration line is truncated to this many words before being sent to the LLM
+# — an image prompt only needs the gist, and it bounds the input so a long
+# transcript can't overflow the context window.
+_LLM_LINE_WORDS = 45
 
 
 def _stable_seed(text):

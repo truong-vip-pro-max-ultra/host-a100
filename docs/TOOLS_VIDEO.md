@@ -118,6 +118,17 @@ lặp → đổ vào ô kịch bản. Không cài thì nút bị mờ, tự nh�
 
 ---
 
+## Prompt ảnh & model LLM "thinking"
+
+Tool gọi LLM của API farm để viết prompt ảnh. Lưu ý với model **Qwen3.x** (vd
+`qwen3.6-35b-a3b`): chúng mặc định "thinking" (sinh `<think>…</think>`) và sẽ **đốt
+hết token budget vào phần nghĩ → trả về rỗng**, nhất là khi server `n_ctx` nhỏ (mặc
+định API farm = 8192). `video_prompts` xử lý: chèn `/no_think` vào prompt + **strip
+`<think>` block** (kể cả khi cụt token), gọi LLM theo **lô 16 cảnh** (vừa ctx 8192),
+và **cắt mỗi dòng còn ~45 từ** trước khi gửi (prompt ảnh chỉ cần ý chính). Nếu vẫn
+rỗng, job log in dòng `[LLM] …` với status/finish_reason/body để chẩn đoán. Không có
+LLM hợp lệ → tự lùi rule-based + dịch (vẫn ra video).
+
 ## Kịch bản dạng phim (tự lọc)
 
 Nếu dán kịch bản kiểu phim/storyboard, `video_pipeline.clean_screenplay` tự **lọc
