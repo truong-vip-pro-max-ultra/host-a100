@@ -253,12 +253,14 @@
           <div class="col-6 mb-2">
             <label class="form-label">Loại GPU</label>
             <select class="form-select" name="gpu_model">
-              <option value="">Bất kỳ GPU rảnh (cấp nhanh nhất)</option>
+              <option value="" selected>Bất kỳ GPU rảnh (cấp nhanh nhất)</option>
               {% for m in gpu_models %}
-              <option value="{{ m.model }}" {% if m.model=='l40s' %}selected{% endif %}>
+              <option value="{{ m.model }}">
                 {{ m.model|upper }} — {{ m.free }}/{{ m.total }} trống ({{ m.arch }}, {{ m.nodes }} node)</option>
               {% endfor %}
             </select>
+            <div class="form-text">OmniVoice không nặng — để "bất kỳ GPU rảnh" sẽ
+              được cấp nhanh nhất. Chỉ ghim L40S nếu cần tốc độ tối đa (có thể phải chờ).</div>
           </div>
         </div>
         <div class="row g-2">
