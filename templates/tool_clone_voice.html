@@ -472,7 +472,11 @@ function bulkDelete(all) {
   const ids = selectedIds();
   if (!all && ids.length === 0) return;
   const msg = all ? 'Xoá TẤT CẢ tác vụ giọng đọc?' : ('Xoá ' + ids.length + ' tác vụ đã chọn?');
-  if (!confirm(msg)) return;
+  const ask = window.confirmModal ? confirmModal(msg) : Promise.resolve(window.confirm(msg));
+  ask.then(ok => { if (ok) doBulkDelete(all, ids); });
+}
+
+function doBulkDelete(all, ids) {
   const body = new FormData();
   if (all) body.append('all', '1');
   else ids.forEach(id => body.append('ids', id));
