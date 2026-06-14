@@ -135,10 +135,16 @@ marked.setOptions({ breaks: true, gfm: true });
 function renderMarkdown(text) {
   return DOMPurify.sanitize(marked.parse(text || ""));
 }
-function highlightAndDecorate(el) {
+// Colour code blocks. Cheap enough to run on every streamed frame so code is
+// highlighted AS it generates, not only once at the end.
+function highlightCode(el) {
   el.querySelectorAll('pre code').forEach(block => {
     try { hljs.highlightElement(block); } catch (_) {}
   });
+}
+// Copy buttons are added only at the final paint (not mid-stream) so they don't
+// flicker / get rebuilt every frame.
+function addCopyButtons(el) {
   el.querySelectorAll('pre').forEach(pre => {
     if (pre.querySelector('.code-copy')) return;
     const btn = document.createElement('button');
@@ -150,6 +156,10 @@ function highlightAndDecorate(el) {
     };
     pre.appendChild(btn);
   });
+}
+function highlightAndDecorate(el) {
+  highlightCode(el);
+  addCopyButtons(el);
 }
 
 function bubbleFor(role) {
@@ -179,6 +189,7 @@ function scheduleRender(el, text) {
   rafId = requestAnimationFrame(() => {
     rafId = null;
     pendingEl.innerHTML = renderMarkdown(pendingText);
+    highlightCode(pendingEl);           // tô màu code/text NGAY khi đang gen
     pendingEl.classList.add('blinker');
     scrollDown();
   });
