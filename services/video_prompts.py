@@ -556,9 +556,13 @@ def build_prompts(chunks, style_preset="cinematic", negative="", use_llm=True,
     else:
         _log("  ! Không có LLM (API farm chưa chạy) — dùng prompt theo luật + dịch.")
 
+    if anchor:
+        _log(f"  • Nhân vật/bối cảnh xuyên suốt (anchor): {anchor}")
     out = []
     for i, t in enumerate(chunks):
         subject = visuals[i] or translate_to_en(t)
         pos, neg = build_prompt(subject, anchor, mood_style, style_preset, negative)
+        src = "LLM" if visuals[i] else "luật"
+        _log(f"    cảnh {i + 1} [{src}]: {pos[:240]}")
         out.append({"prompt": pos, "negative": neg, "seed": seeds[i]})
     return out
