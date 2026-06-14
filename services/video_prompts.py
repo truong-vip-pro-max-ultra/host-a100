@@ -541,12 +541,15 @@ def build_prompts(chunks, style_preset="cinematic", negative="", use_llm=True,
             for k, v in enumerate(res or []):
                 visuals[s + k] = v
             n_ok = sum(1 for v in visuals[s:s + len(sub)] if v)
-            _log(f"    cảnh {s + 1}–{s + len(sub)}: LLM viết {n_ok}/{len(sub)} "
-                 "(còn lại tự dịch)")
+            extra = "" if n_ok == len(sub) else f" ({len(sub) - n_ok} cảnh tự dịch)"
+            _log(f"    cảnh {s + 1}–{s + len(sub)}: LLM viết {n_ok}/{len(sub)}{extra}")
         total_ok = sum(1 for v in visuals if v)
-        if total_ok:
-            _log(f"  ✓ LLM xong {total_ok}/{len(chunks)} cảnh "
-                 f"({time.time() - t0:.1f}s); phần còn lại dùng prompt theo luật + dịch.")
+        n = len(chunks)
+        if total_ok == n:
+            _log(f"  ✓ LLM viết prompt cho cả {n}/{n} cảnh ({time.time() - t0:.1f}s).")
+        elif total_ok:
+            _log(f"  ✓ LLM xong {total_ok}/{n} cảnh ({time.time() - t0:.1f}s); "
+                 f"{n - total_ok} cảnh còn lại dùng prompt theo luật + dịch.")
         else:
             _log(f"  ! LLM không trả về hợp lệ ({time.time() - t0:.1f}s) — "
                  "dùng prompt theo luật + dịch cho tất cả.")
