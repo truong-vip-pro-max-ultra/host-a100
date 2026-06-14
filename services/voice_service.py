@@ -208,6 +208,10 @@ export HF_HOME={hf_home}
 export HUGGINGFACE_HUB_CACHE={hf_home}/hub
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
+# Let torch/OpenMP actually use all the CPUs SLURM gave us (the CPU-side cost of
+# diffusion sampling + tokenize), instead of defaulting to 1 thread.
+export OMP_NUM_THREADS=${{SLURM_CPUS_PER_TASK:-8}}
+export MKL_NUM_THREADS=${{SLURM_CPUS_PER_TASK:-8}}
 {ld_line}PORT=$({shlex.quote(py)} -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));p=s.getsockname()[1];s.close();print(p)')
 HOST=${{SLURMD_NODENAME:-$(hostname -s)}}
 cat > {shlex.quote(endpoint)} <<EOF
@@ -225,6 +229,14 @@ exec {quoted} --port "$PORT"
     return script
 
 
+# OmniVoice's diffusion sampling + tokenize + multi-GB weight load have real
+# CPU-side cost, and many clusters default a job to 1 CPU / a tiny RAM slice,
+# which throttles an otherwise-idle L40S. Request a sensible amount unless the
+# operator pinned explicit values in config. L40S nodes have plenty of CPUs.
+_VOICE_DEFAULT_CPUS = "8"
+_VOICE_DEFAULT_MEM = "32G"
+
+
 def _sbatch_flags(server_id, server_dir, slurm_out, gpu_model, time_limit):
     flags = ["--job-name", f"hosta100-voice-{server_id}",
              "--chdir", server_dir,
@@ -237,10 +249,8 @@ def _sbatch_flags(server_id, server_dir, slurm_out, gpu_model, time_limit):
         flags += ["--account", config.SLURM_ACCOUNT]
     if time_limit:
         flags += ["--time", time_limit]
-    if config.SLURM_CPUS:
-        flags += ["--cpus-per-task", config.SLURM_CPUS]
-    if config.SLURM_MEM:
-        flags += ["--mem", config.SLURM_MEM]
+    flags += ["--cpus-per-task", config.SLURM_CPUS or _VOICE_DEFAULT_CPUS]
+    flags += ["--mem", config.SLURM_MEM or _VOICE_DEFAULT_MEM]
     return flags
 
 
