@@ -140,6 +140,14 @@ SLURM_ACCOUNT = os.environ.get("HOSTA100_SLURM_ACCOUNT", DEFAULT_SLURM_ACCOUNT)
 SLURM_CPUS = os.environ.get("HOSTA100_SLURM_CPUS", DEFAULT_SLURM_CPUS)
 SLURM_MEM = os.environ.get("HOSTA100_SLURM_MEM", DEFAULT_SLURM_MEM)
 
+# Optional alert webhook. When an API-farm server dies for real (auto-resubmit
+# circuit breaker trips, sbatch fails, or a job ends without ever serving), the
+# app POSTs a JSON {"content","text"} message here — works with a Discord/Slack
+# incoming webhook URL or any generic endpoint. "" = alerts disabled (default).
+# >>> Dán URL webhook Discord/Slack vào đây (hoặc đặt env HOSTA100_ALERT_WEBHOOK).
+DEFAULT_ALERT_WEBHOOK = ""
+ALERT_WEBHOOK = os.environ.get("HOSTA100_ALERT_WEBHOOK", DEFAULT_ALERT_WEBHOOK)
+
 # Flask secret key (sessions / flash messages).
 SECRET_KEY = os.environ.get("HOSTA100_SECRET", "change-me-on-the-hpc-server")
 

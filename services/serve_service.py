@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.request
 
 import config
 from services import env_service, job_service, model_service
@@ -395,27 +396,34 @@ def _run_loop(server_id, existing_slurm_id=None):
                 except ValueError as exc:
                     _set_status(server_id, "error")
                     _append_log(server_dir, f"\n{exc}\n")
+                    _alert(server_id, f"cấu hình lỗi, không khởi động được: {exc}")
                     return
                 slurm_id = _submit_once(server_id, server_dir, py, cmd, lib_dirs,
                                         server["gpu_model"], server["time_limit"])
                 if not slurm_id:
                     _set_status(server_id, "error")
+                    _alert(server_id, "sbatch thất bại — không gửi được job lên SLURM")
                     return
             first = False
 
-            t0 = time.time()
-            outcome = _monitor(server_id, slurm_id, server_dir)
-            ran = time.time() - t0
+            outcome, ready_at = _monitor(server_id, slurm_id, server_dir)
+            # Time the server actually SERVED (ready→death), excluding any queue
+            # wait — a long PENDING must not reset the crash-loop breaker and let
+            # an OOM-on-first-request server resubmit forever.
+            alive = (time.time() - ready_at) if ready_at else 0
 
             if outcome == "user_stopped":
                 return
             if outcome == "ended_ready" and server["auto_resubmit"]:
-                quick_fail = quick_fail + 1 if ran < _QUICK_FAIL_SECS else 0
+                quick_fail = quick_fail + 1 if alive < _QUICK_FAIL_SECS else 0
                 if quick_fail >= _QUICK_FAIL_MAX:
                     _set_status(server_id, "error")
                     _append_log(server_dir, "\n[auto-resubmit] server chết liên "
                                 "tục (<60s) — dừng tự khởi động lại. Kiểm tra log "
                                 "(thường là hết VRAM: hạ n_gpu_layers/n_ctx).\n")
+                    _alert(server_id, f"chết liên tục <60s sau khi ready "
+                           f"{_QUICK_FAIL_MAX} lần — cầu dao auto-resubmit đã ngắt, "
+                           "server NGỪNG (thường do OOM: hạ n_gpu_layers/n_ctx)")
                     return
                 _append_log(server_dir, f"\n[auto-resubmit] phiên kết thúc, gửi "
                             f"lại sau {_RESUBMIT_DELAY}s…\n")
@@ -431,6 +439,9 @@ def _run_loop(server_id, existing_slurm_id=None):
             db.execute("UPDATE servers SET status=?, stopped_at=? WHERE id=?",
                        (final, db.now(), server_id), commit=True)
             _append_log(server_dir, f"\nSLURM job {slurm_id} kết thúc ({final}).\n")
+            if final == "error":
+                _alert(server_id, "job kết thúc mà server chưa từng phục vụ "
+                       "(never ready) — kiểm tra slurm.out/server.log")
             return
     finally:
         with _monitors_lock:
@@ -479,7 +490,9 @@ def _submit_once(server_id, server_dir, py, cmd, lib_dirs, gpu_model, time_limit
 
 def _monitor(server_id, slurm_id, server_dir):
     """Poll squeue, tail slurm.out, discover the endpoint, and health-check until
-    the server is ready; keep watching until the SLURM job ends. Returns:
+    the server is ready; keep watching until the SLURM job ends. Returns a
+    (outcome, ready_at) tuple where ready_at is the time.time() at which the
+    server first became ready (None if it never did):
         'user_stopped'       — the row went non-active (user stop/delete)
         'ended_ready'        — job left the queue AFTER becoming ready (resubmit-able)
         'ended_never_ready'  — job left the queue without ever serving (real error)
@@ -489,12 +502,13 @@ def _monitor(server_id, slurm_id, server_dir):
     endpoint_path = os.path.join(server_dir, _ENDPOINT_FILE)
     host = port = None
     became_ready = False
+    ready_at = None
     unknown = 0
     while True:
         pos = _tail(slurm_out, server_dir, pos)
         cur = get_server(server_id)
         if not cur or cur.get("status") not in _ACTIVE:
-            return "user_stopped"
+            return "user_stopped", ready_at
         state = job_service._squeue_state(slurm_id)
         if state is None:
             break                       # job left the queue → it ended
@@ -516,6 +530,7 @@ def _monitor(server_id, slurm_id, server_dir):
             if host and not became_ready:
                 if _health(host, port):
                     became_ready = True
+                    ready_at = time.time()
                     _set_status(server_id, "ready")
                     _append_log(server_dir,
                                 f"\nSERVER READY: http://{host}:{port}/v1\n")
@@ -526,7 +541,7 @@ def _monitor(server_id, slurm_id, server_dir):
         time.sleep(_POLL_SECS)
 
     _tail(slurm_out, server_dir, pos)
-    return "ended_ready" if became_ready else "ended_never_ready"
+    return ("ended_ready" if became_ready else "ended_never_ready"), ready_at
 
 
 def _tail(slurm_out, server_dir, pos):
@@ -571,6 +586,31 @@ def _health(host, port):
 def _set_status(server_id, status):
     db.execute("UPDATE servers SET status=? WHERE id=?",
                (status, server_id), commit=True)
+
+
+def _alert(server_id, reason):
+    """Best-effort push notification when an API-farm server dies for real (NOT a
+    user stop). No-op unless config.ALERT_WEBHOOK is set; POSTs a JSON message
+    that works for Discord (`content`), Slack (`text`) and generic webhooks. The
+    HTTP call runs in a daemon thread and never raises, so alerting can never
+    delay or break the monitor loop."""
+    url = (getattr(config, "ALERT_WEBHOOK", "") or "").strip()
+    if not url:
+        return
+    s = get_server(server_id) or {}
+    name = s.get("name") or f"#{server_id}"
+    msg = f"⚠️ [host-a100] API server “{name}” (#{server_id}) lỗi: {reason}"
+
+    def _post():
+        try:
+            data = json.dumps({"content": msg, "text": msg}).encode("utf-8")
+            req = urllib.request.Request(
+                url, data=data, headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=10).close()
+        except Exception:  # noqa: BLE001 - alerting must never break the loop
+            pass
+
+    threading.Thread(target=_post, daemon=True).start()
 
 
 # --------------------------------------------------------------------------- #
