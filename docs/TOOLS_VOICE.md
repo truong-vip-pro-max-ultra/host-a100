@@ -6,7 +6,7 @@ GPU (khuyến nghị **L40S**), kèm:
 - **Clone giọng** từ 5–15 giây ghi âm mẫu (zero-shot voice cloning), hoặc dùng
   giọng mặc định khoá theo `seed`.
 - **Chỉnh tốc độ** (0.5–2.0×, giữ nguyên cao độ — không bị méo giọng).
-- **Khử nhiễu** (highpass + FFT `afftdn`).
+- **Tự khử nhiễu "tạch" đầu/cuối mỗi đoạn** (strip onset blip + trim mép).
 - **Xuất phụ đề `.SRT`** khớp đúng độ dài file MP3.
 
 Kiến trúc **giống hệt API farm**: một server OmniVoice thường trú chạy trên GPU
@@ -137,8 +137,8 @@ gọi với `-threads 0 -filter_complex_threads 0` để tận dụng **toàn b�
    Yyyy…" sẽ ra audio rỗng), chọn giọng, `num_step` (8 nhanh ↔ 32 nét), `seed`
    (khoá chất giọng zero-shot), tốc độ, **"Số đoạn xử lý cùng lúc (batch GPU)"**
    (tăng để vắt VRAM L40S, đọc nhanh hơn) → **Tạo MP3**. Nhiễu "tạch" đầu/cuối
-   mỗi đoạn **đã tự khử**; nút "Lọc ồn nền (nâng cao)" chỉ là tuỳ chọn thêm. Theo
-   dõi ở bảng **Tác vụ**, xong thì **▶ nghe thử** / tải **MP3** / tải **SRT**.
+   mỗi đoạn **đã tự khử** (không có nút khử nhiễu — audio TTS vốn sạch). Theo dõi
+   ở bảng **Tác vụ**, xong thì **▶ nghe thử** / tải **MP3** / tải **SRT**.
 
 ## Hiệu năng
 
@@ -190,7 +190,9 @@ Tất cả có default hợp lý — chỉ đặt khi cần đổi. Sửa thẳn
 | `HOSTA100_SLURM_CPUS` / `_MEM` | `SLURM_CPUS`/`_MEM` | `8` / `32G` (riêng voice) | CPU/RAM xin cho server giọng nói |
 
 Tham số **mỗi lần tạo** (trên UI, không phải env): giọng (mặc định/clone),
-`num_step` 8–32, `seed`, tốc độ 0.5–2.0×, "Lọc ồn nền (nâng cao)".
+`num_step` 8–32, `seed`, tốc độ 0.5–2.0×, số đoạn batch GPU. (Không có nút khử
+nhiễu — audio TTS vốn sạch; nhiễu mép đoạn đã tự khử. Pipeline vẫn còn tham số
+`denoise=afftdn` nhưng mặc định tắt, không lộ ra UI.)
 
 **Chỗ nào đổi thì cần gì:**
 - Đổi `OMNI_MAX_BATCH` / model / env → **recreate server giọng nói** (nằm trong

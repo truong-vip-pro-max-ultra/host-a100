@@ -77,23 +77,12 @@
           </div>
         </div>
 
-        <div class="row g-2 align-items-end">
-          <div class="col-6 mb-2">
-            <label class="form-label">Tốc độ: <span id="spdVal">1.00×</span></label>
-            <input type="range" class="form-range" name="speed" id="spd"
-                   min="0.5" max="2.0" step="0.05" value="1.0">
-            <div class="form-text">Giữ nguyên cao độ (không bị méo giọng).</div>
-          </div>
-          <div class="col-6 mb-2">
-            <div class="form-check form-switch">
-              <input class="form-check-input" type="checkbox" role="switch"
-                     name="denoise" id="denoise">
-              <label class="form-check-label" for="denoise">Lọc ồn nền (nâng cao)</label>
-            </div>
-            <div class="form-text">Khử tạp âm nền của audio (FFT afftdn). Phần nhiễu
-              “tạch” ở <b>đầu/cuối mỗi đoạn</b> ĐÃ tự động xử lý sẵn (như clone-voice)
-              — không cần bật cái này.</div>
-          </div>
+        <div class="mb-2">
+          <label class="form-label">Tốc độ: <span id="spdVal">1.00×</span></label>
+          <input type="range" class="form-range" name="speed" id="spd"
+                 min="0.5" max="2.0" step="0.05" value="1.0">
+          <div class="form-text">Giữ nguyên cao độ (không bị méo giọng). Nhiễu
+            “tạch” đầu/cuối mỗi đoạn đã được tự khử sẵn.</div>
         </div>
 
         <div class="mb-2">

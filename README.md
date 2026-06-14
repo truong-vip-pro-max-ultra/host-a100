@@ -116,8 +116,8 @@ performance tuning, tests, and deploy/ops are documented in
 The **Công cụ** tab hosts GPU-backed utilities. The first one, **Clone giọng
 nói**, reads a script into one seamless MP3 using **OmniVoice** on a GPU node
 (same sbatch lifecycle as the API farm): clone a voice from a 5–15 s sample,
-adjust speed (pitch-preserving), auto-trim the per-chunk onset/edge noise, an
-optional FFT denoise, in-page audio preview, and a matching `.SRT`. It maxes the
+adjust speed (pitch-preserving), auto-trim the per-chunk onset/edge noise,
+in-page audio preview, and a matching `.SRT`. It maxes the
 L40S with fp16 + TF32 and **true GPU batching** (`HOSTA100_OMNI_MAX_BATCH`,
 defensive fallback to per-utterance). Full setup (env via the requirements file,
 weights warmup for the offline HF cache, ffmpeg), all env/config knobs, a
