@@ -203,9 +203,19 @@
       </div>
     </div></div>
 
-    <!-- GPU server -->
+    <!-- GPU server (thu gọn — bấm để sổ ra cài) -->
     <div class="card mt-3"><div class="card-body">
-      <h5 class="card-title"><i class="bi bi-gpu-card"></i> Server giọng nói (GPU)</h5>
+      <a class="d-flex justify-content-between align-items-center text-decoration-none text-reset srv-toggle collapsed"
+         data-bs-toggle="collapse" href="#srvCollapse" role="button"
+         aria-expanded="false" aria-controls="srvCollapse">
+        <h5 class="card-title mb-0"><i class="bi bi-gpu-card"></i> Server giọng nói (GPU)</h5>
+        <span class="d-flex align-items-center gap-2">
+          <span class="pill pill-unknown" id="srvBadge">…</span>
+          <i class="bi bi-chevron-down srv-chevron"></i>
+        </span>
+      </a>
+
+      <div class="collapse mt-3" id="srvCollapse">
       {% if not slurm_active %}
         <div class="alert alert-warning py-2 small mb-2">
           <i class="bi bi-exclamation-triangle"></i> Chưa bật SLURM trên node này —
@@ -291,9 +301,16 @@
           <i class="bi bi-play-fill"></i> Khởi động</button>
         {% if not envs %}<div class="form-text text-danger">Cần ít nhất 1 môi trường.</div>{% endif %}
       </form>
+      </div><!-- /#srvCollapse -->
     </div></div>
   </div>
 </div>
+
+<style>
+  .srv-chevron{ transition:transform .2s ease; }
+  .srv-toggle[aria-expanded="true"] .srv-chevron{ transform:rotate(180deg); }
+  .srv-toggle{ cursor:pointer; }
+</style>
 
 <!-- Audio preview modal -->
 <div class="modal fade" id="playerModal" tabindex="-1" aria-hidden="true">
@@ -369,15 +386,27 @@ const JST = {
 function pollServers() {
   fetch('{{ url_for("voice_servers_json") }}')
     .then(r => r.json())
-    .then(d => d.servers.forEach(s => {
-      const row = document.getElementById('vsrv-' + s.id);
-      if (!row) return;
-      const ep = row.querySelector('[data-ep]');
-      if (ep) ep.textContent = s.node ? (s.node + ':' + s.port) : '—';
-      const pill = row.querySelector('[data-st]');
-      if (pill) { const m = ST[s.status] || ['pill-unknown', s.status];
-        pill.className = 'pill ' + m[0]; pill.textContent = m[1]; }
-    }))
+    .then(d => {
+      d.servers.forEach(s => {
+        const row = document.getElementById('vsrv-' + s.id);
+        if (!row) return;
+        const ep = row.querySelector('[data-ep]');
+        if (ep) ep.textContent = s.node ? (s.node + ':' + s.port) : '—';
+        const pill = row.querySelector('[data-st]');
+        if (pill) { const m = ST[s.status] || ['pill-unknown', s.status];
+          pill.className = 'pill ' + m[0]; pill.textContent = m[1]; }
+      });
+      // Header badge so status shows without expanding the (collapsed) card.
+      const badge = document.getElementById('srvBadge');
+      if (badge) {
+        const all = d.servers || [];
+        const ready = all.filter(s => s.status === 'ready').length;
+        const busy = all.filter(s => s.status === 'queued' || s.status === 'loading').length;
+        if (ready) { badge.className = 'pill pill-done'; badge.textContent = ready + ' sẵn sàng'; }
+        else if (busy) { badge.className = 'pill pill-running'; badge.textContent = 'đang chuẩn bị'; }
+        else { badge.className = 'pill pill-unknown'; badge.textContent = 'chưa có server'; }
+      }
+    })
     .finally(() => setTimeout(pollServers, 3000));
 }
 pollServers();
