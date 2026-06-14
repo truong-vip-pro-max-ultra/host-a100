@@ -126,15 +126,18 @@ gọi với `-threads 0 -filter_complex_threads 0` để tận dụng **toàn b�
 ## Dùng
 
 1. Vào tab **Công cụ → Clone giọng nói**.
-2. Mục **Server giọng nói (GPU)** → chọn môi trường + Loại GPU (**L40S**) →
-   **Khởi động**. Chờ trạng thái `chờ cấp GPU → đang nạp model → sẵn sàng`
-   (lần đầu nạp vài GB weights).
-3. (Tuỳ chọn) **Clone giọng mới**: tải file ghi âm mẫu 5–15s → đặt tên → Tạo
-   giọng. File được chuẩn hoá (mono/24k/highpass/loudnorm) và lưu trên FS chung.
-4. **Tạo giọng đọc**: dán kịch bản, chọn giọng (mặc định hoặc giọng clone),
-   `num_step` (8 nhanh ↔ 32 nét), `seed` (khoá chất giọng zero-shot), tốc độ,
-   bật/tắt khử nhiễu → **Tạo MP3**. Theo dõi tiến trình ở bảng **Tác vụ**, xong
-   thì tải **MP3** và **SRT**.
+2. Mục **Server giọng nói (GPU)** → chọn môi trường + Loại GPU. **Để "Bất kỳ GPU
+   rảnh" (mặc định)** để được cấp nhanh nhất — chỉ ghim L40S nếu cần tốc độ tối đa
+   và chấp nhận chờ. Bấm **Khởi động**, chờ `chờ cấp GPU → đang nạp model → sẵn
+   sàng` (lần đầu nạp vài GB weights).
+3. (Tuỳ chọn) **Clone giọng mới**: tải file ghi âm mẫu 5–15s → đặt tên → **nên
+   ĐIỀN ô "lời thoại mẫu"** (đúng nội dung file) để khỏi cần Whisper ASR (chạy
+   offline ngay) → Tạo giọng. File được chuẩn hoá (mono/24k/highpass/loudnorm).
+4. **Tạo giọng đọc**: dán kịch bản (văn bản CÓ NGHĨA — chuỗi vô nghĩa kiểu "Yyyy
+   Yyyy…" sẽ ra audio rỗng), chọn giọng, `num_step` (8 nhanh ↔ 32 nét), `seed`
+   (khoá chất giọng zero-shot), tốc độ → **Tạo MP3**. Nhiễu "tạch" đầu/cuối mỗi
+   đoạn **đã tự khử**; nút "Lọc ồn nền (nâng cao)" chỉ là tuỳ chọn thêm. Theo dõi
+   ở bảng **Tác vụ**, xong thì **▶ nghe thử** / tải **MP3** / tải **SRT**.
 
 ## Hiệu năng
 
@@ -171,10 +174,46 @@ gọi với `-threads 0 -filter_complex_threads 0` để tận dụng **toàn b�
 - **Lỗi một đoạn không làm hỏng cả file**: đoạn nào server trả lỗi sẽ bị bỏ qua
   (ghi vào job.log), phần còn lại vẫn ghép thành MP3.
 
+## Settings (biến môi trường / config)
+
+Tất cả có default hợp lý — chỉ đặt khi cần đổi. Sửa thẳng trong `config.py` hoặc
+đặt biến môi trường tương ứng.
+
+| Biến môi trường | config | Mặc định | Ý nghĩa |
+|---|---|---|---|
+| `HOSTA100_OMNI_MODEL` | `OMNI_MODEL_ID` | `k2-fsa/OmniVoice` | Model HF (nạp từ HF cache chung) |
+| `HOSTA100_HF_HOME` | `OMNI_HF_HOME` | `DATA_DIR/hf-cache` | HF cache chung (warmup tải vào đây) |
+| `HOSTA100_OMNI_MAX_BATCH` | `OMNI_MAX_BATCH` | `8` | Số đoạn/1 lần generate (batch GPU). ↑ = ăn VRAM nhiều hơn, OOM thì ↓; `1`=tắt. **Đổi phải recreate server** |
+| `HOSTA100_OMNI_BATCH` | `OMNI_BATCH_ENABLED` | `1` | `0` = tắt hẳn batch GPU |
+| `HOSTA100_FFMPEG` / `HOSTA100_FFPROBE` | — | dò PATH / `ffmpeg/` | Đường dẫn ffmpeg/ffprobe trên login node |
+| `HOSTA100_SLURM_CPUS` / `_MEM` | `SLURM_CPUS`/`_MEM` | `8` / `32G` (riêng voice) | CPU/RAM xin cho server giọng nói |
+
+Tham số **mỗi lần tạo** (trên UI, không phải env): giọng (mặc định/clone),
+`num_step` 8–32, `seed`, tốc độ 0.5–2.0×, "Lọc ồn nền (nâng cao)".
+
+**Chỗ nào đổi thì cần gì:**
+- Đổi `OMNI_MAX_BATCH` / model / env → **recreate server giọng nói** (nằm trong
+  batch script lúc sbatch).
+- Đổi pipeline/UI/ffmpeg/CPU-mem-default → chỉ cần `git pull` + **restart app**.
+
+## Troubleshooting
+
+| Triệu chứng | Nguyên nhân | Cách xử lý |
+|---|---|---|
+| Job treo `PD (QOSMaxGRESPerUser)` | Quota GPU/user (vd 2) đã hết — server khác đang giữ | Dừng bớt 1 server GPU (API farm/voice). Bạn chạy tối đa N GPU job cùng lúc |
+| Treo dù còn GPU trống | Ghim loại GPU (`--constraint`) mà loại đó bận; hoặc `--time` vượt giới hạn node | Chọn "Bất kỳ GPU rảnh"; hạ "Thời lượng tối đa" |
+| `Cannot find … cached snapshot … offline` (giọng **mặc định**) | Weights chính chưa cache | Chạy `scripts/warmup_omnivoice.py` (Bước 2) |
+| Lỗi offline chỉ khi dùng **giọng clone** | Clone bỏ trống lời thoại → cần Whisper ASR chưa cache | Chạy warmup (cache cả ASR), **hoặc** điền ô "lời thoại mẫu" |
+| `OmniVoice produced empty audio` | Văn bản vô nghĩa (vd "Yyyy Yyyy…") → không có âm tiết | Dùng văn bản có nghĩa |
+| Cảnh báo vàng "không tìm thấy ffmpeg" | ffmpeg chưa có trên login node | Bước 3 (tải bản tĩnh vào `ffmpeg/`) |
+| `server.log`: `batch of N failed … falling back` | Bản omnivoice này không nhận list text | Vẫn chạy đúng (từng đoạn). Gửi log để chỉnh cách gọi batch, hoặc đặt `HOSTA100_OMNI_BATCH=0` |
+| Server `error` sau khi chết <60s nhiều lần | OOM hoặc thiếu env/weights | Xem `server.log`; hạ `OMNI_MAX_BATCH`/đổi GPU; kiểm tra env + warmup |
+
 ## Test
 
-Không cần GPU/HPC để test phần login (chunk/SRT/atempo/ffmpeg), chỉ cần ffmpeg:
+Không cần GPU/HPC (chỉ stdlib + numpy + ffmpeg):
 
 ```bash
-python3 tests/test_voice_pipeline.py
+python3 tests/test_voice_pipeline.py    # chunk/SRT/atempo/ffmpeg round-trip
+python3 tests/test_omnivoice_batch.py   # batch GPU + fallback (fake model)
 ```
