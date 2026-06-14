@@ -43,9 +43,22 @@
           <input class="form-control" name="name" placeholder="video-01">
         </div>
         <div class="mb-2">
+          <label class="form-label">Lấy kịch bản từ YouTube
+            {% if not ytdlp_ok %}<span class="text-warning small">(cần cài
+            <code>yt-dlp</code> trên login node)</span>{% endif %}</label>
+          <div class="input-group input-group-sm">
+            <input class="form-control" id="ytUrl" placeholder="dán link YouTube (có phụ đề)…">
+            <button class="btn btn-outline-primary" type="button" id="ytBtn"
+                    {% if not ytdlp_ok %}disabled{% endif %}>
+              <i class="bi bi-youtube"></i> Lấy phụ đề</button>
+          </div>
+          <div class="form-text">Tải phụ đề (vi/en, kể cả tự động) → đổ vào ô kịch bản
+            bên dưới. Ưu tiên phụ đề chuẩn, gộp các dòng caption lặp.</div>
+        </div>
+        <div class="mb-2">
           <label class="form-label">Kịch bản</label>
-          <textarea class="form-control" name="script" rows="9" required
-            placeholder="Dán kịch bản vào đây. Tự chia cảnh theo câu/mệnh đề tiếng Việt; có thể đánh dấu 'Cảnh 1:', 'Đoạn 2:'…"></textarea>
+          <textarea class="form-control" name="script" id="scriptBox" rows="9" required
+            placeholder="Dán kịch bản vào đây, hoặc lấy từ YouTube ở trên. Tự chia cảnh theo câu/mệnh đề tiếng Việt; có thể đánh dấu 'Cảnh 1:', 'Đoạn 2:'…"></textarea>
         </div>
 
         <div class="row g-2">
@@ -426,6 +439,33 @@ function btnBusy(btn, label) {
 function btnReset(btn) {
   if (!btn || btn.dataset.orig === undefined) return;
   btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; btn.disabled = false;
+}
+
+// Fetch a YouTube transcript into the script box (login node has internet).
+const ytBtn = document.getElementById('ytBtn');
+if (ytBtn) {
+  ytBtn.addEventListener('click', function () {
+    const url = (document.getElementById('ytUrl').value || '').trim();
+    if (!url) { toast('Dán link YouTube đã.', 'warning'); return; }
+    btnBusy(ytBtn, 'Đang tải…');
+    if (window.Loader) Loader.start();
+    const body = new FormData(); body.append('url', url);
+    fetch('{{ url_for("video_fetch_transcript") }}', {
+      method: 'POST', headers: { 'X-Requested-With': 'fetch' }, body,
+    })
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok) {
+          document.getElementById('scriptBox').value = d.text || '';
+          const nameEl = jobForm.querySelector('[name="name"]');
+          if (nameEl && !nameEl.value && d.title) nameEl.value = d.title.slice(0, 80);
+          const kind = d.auto ? 'tự động' : 'chuẩn';
+          toast('Đã lấy phụ đề ' + (d.lang || '') + ' (' + kind + ').', 'success');
+        } else { toast(d.error || 'Không lấy được phụ đề.', 'danger'); }
+      })
+      .catch(() => toast('Lỗi kết nối.', 'danger'))
+      .finally(() => { btnReset(ytBtn); if (window.Loader) Loader.done(); });
+  });
 }
 
 const jobForm = document.getElementById('jobForm');

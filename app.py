@@ -28,7 +28,8 @@ import config
 from services import (anthropic_bridge, apikey_service, env_service,
                       job_service, model_service, project_service, pty_service,
                       serve_service, shell_service, storage_service as db,
-                      video_pipeline, voice_pipeline, voice_service)
+                      video_pipeline, voice_pipeline, voice_service,
+                      youtube_transcript)
 from utils import file_utils, gpu, progress, sysinfo
 
 app = Flask(__name__)
@@ -1039,12 +1040,25 @@ def _video_context():
         omni_max_batch=config.OMNI_MAX_BATCH,
         llm_ready=video_pipeline.video_prompts.llm_available(),
         ffmpeg_ok=config.ffmpeg_available(),
+        ytdlp_ok=youtube_transcript.yt_dlp_available(),
     )
 
 
 @app.route("/tools/gen-video")
 def tool_gen_video():
     return render_template("tool_gen_video.html", **_video_context())
+
+
+@app.route("/tools/video/fetch-transcript", methods=["POST"])
+def video_fetch_transcript():
+    """Pull a YouTube video's subtitles into script text (login node has net)."""
+    url = (request.form.get("url") or "").strip()
+    try:
+        res = youtube_transcript.fetch_transcript(url)
+        return jsonify({"ok": True, "text": res["text"], "title": res.get("title", ""),
+                        "lang": res.get("lang", ""), "auto": res.get("auto", False)})
+    except RuntimeError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
 
 
 @app.route("/tools/video/jobs/submit", methods=["POST"])

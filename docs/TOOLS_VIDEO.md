@@ -96,6 +96,14 @@ server cũ, tạo server mới (cùng env-omnivoice). `/health` lúc này có
 Như tool voice: bỏ static build vào `ffmpeg/` cạnh `app.py`, hoặc PATH, hoặc
 `HOSTA100_FFMPEG`/`HOSTA100_FFPROBE`.
 
+### 5. (Tuỳ chọn) yt-dlp để lấy kịch bản từ YouTube
+
+Cài vào **môi trường chạy `app.py` (login node, có internet)**:
+`pip install -U yt-dlp`. Khi có, form Gen video hiện ô "Lấy kịch bản từ YouTube":
+dán link → `services/youtube_transcript.fetch_transcript` shell ra `yt-dlp` tải
+phụ đề (ưu tiên vi rồi en, kể cả phụ đề tự động), flatten + gộp các dòng caption
+lặp → đổ vào ô kịch bản. Không cài thì nút bị mờ, tự nhập tay vẫn chạy.
+
 ---
 
 ## Dùng
@@ -165,6 +173,8 @@ DETACHED restart app**. Chỉ khi đổi `--image-model`/model/quant/env của G
 | Prompt ra tiếng Anh chung chung | Không có LLM API farm → rule-based. Bật một API-farm server để có prompt cụ thể hơn. |
 | OOM khi vừa chạy ảnh vừa chạy giọng | SDXL + OmniVoice cùng card. Giảm batch ảnh/giọng, hoặc dùng card ≥40GB. |
 | "ffmpeg dựng video thất bại" | Thiếu ffmpeg trên login node (xem banner), hoặc audio toàn im lặng (mọi cảnh đều fail TTS → loudnorm NaN). |
+| Nút "Lấy phụ đề" mờ / "Không tìm thấy yt-dlp" | Chưa cài yt-dlp ở login node: `pip install -U yt-dlp`. |
+| "Video này không có phụ đề" | Video không có phụ đề vi/en (kể cả tự động) — thử video khác hoặc nhập tay. |
 
 ---
 

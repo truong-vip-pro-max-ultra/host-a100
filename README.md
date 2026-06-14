@@ -142,6 +142,9 @@ ffmpeg assembly. Quick setup:
    `snapshot_download("stabilityai/sdxl-turbo", allow_patterns=["*.json","*.txt","*fp16*","*.safetensors"])`
    with `HF_HOME=$PWD/host-a100-data/hf-cache`.
 3. **Recreate** the voice server (the `--image-model` branch is new).
+4. *(Optional)* `pip install -U yt-dlp` in the app's python (login node) to enable
+   the **"Lấy kịch bản từ YouTube"** box — paste a video URL and its subtitles drop
+   into the script editor.
 
 Full architecture, all env/config knobs (`HOSTA100_IMAGE_MODEL`,
 `HOSTA100_IMAGE_MAX_BATCH`), a troubleshooting table and tests are in
