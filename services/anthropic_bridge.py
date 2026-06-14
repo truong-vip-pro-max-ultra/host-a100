@@ -589,30 +589,77 @@ def _message_body_events(message):
 _PING_INTERVAL = 15  # seconds
 
 
-def buffered_stream(resp, conn, model, input_tokens, types=None):
-    """Client wants a stream AND sent tools, so we must read the WHOLE upstream
-    reply to parse Qwen's text `<tool_call>` before we can emit correct tool_use
-    blocks (we can't forward text live — it might turn out to be a tool call).
+# A tool-bearing reply starts buffering the moment Qwen's native tool-call
+# opener appears in the text. Until then the prose is streamed LIVE (like the
+# Chat tab) so an explanatory turn shows tokens immediately instead of only
+# after the whole generation finishes. `_HOLDBACK` is how many trailing chars we
+# keep un-emitted so a `<tool_call>` split across two SSE chunks is still caught
+# by the substring search before any of it leaks out as visible text.
+_TOOLCALL_OPEN = "<tool_call>"
+_HOLDBACK = len(_TOOLCALL_OPEN) - 1
 
-    Reading silently can take well over 120s on a big file write, which trips the
-    Cloudflare tunnel's read timeout → Error 524. So instead of a blocking
-    `resp.read()`, we stream the upstream and: (1) flush `message_start` + a ping
-    immediately so bytes start flowing at t=0, (2) emit a `ping` at least every
-    `_PING_INTERVAL`s while accumulating, keeping the tunnel alive; then once the
-    reply is complete we parse it and replay the real blocks. `resp` must be a
-    STREAMING OpenAI response (stream=true). Closes `conn` when exhausted."""
-    start_msg = {"id": _id("msg"), "type": "message", "role": "assistant",
+
+def buffered_stream(resp, conn, model, input_tokens, types=None):
+    """Stream the LEADING prose live, then buffer once a tool call appears.
+
+    Claude Code always sends tools, but most turns are still mostly prose
+    (explanations, plans) with a tool call only at the end — or none at all. We
+    forward that prose to the client as real text deltas as it generates, and
+    only switch to buffering when Qwen's `<tool_call>` opener (or a native
+    tool_calls fragment) shows up. From that point we accumulate the rest, parse
+    it with the same logic as the non-stream path, and replay the tool_use (plus
+    any trailing text) blocks. This gives Chat-tab latency for the talky part
+    while still producing correct tool_use for the agentic part.
+
+    We never emit a partial `<tool_call>` as text: a holdback tail guards a
+    marker split across SSE chunks, and a complete marker is found by substring
+    search before the text ahead of it is flushed. A long pure-tool generation
+    still emits a `ping` every `_PING_INTERVAL`s so the Cloudflare tunnel's ~120s
+    read timeout (Error 524) never trips. `resp` must be a STREAMING OpenAI
+    response (stream=true). Closes `conn` when exhausted."""
+    msg_id = _id("msg")
+    start_msg = {"id": msg_id, "type": "message", "role": "assistant",
                  "model": model, "content": [], "stop_reason": None,
                  "stop_sequence": None,
                  "usage": {"input_tokens": input_tokens, "output_tokens": 0}}
     yield _sse("message_start", {"type": "message_start", "message": start_msg})
     yield _sse("ping", {"type": "ping"})
 
-    content_parts = []
-    tool_calls = {}          # index -> {"id", "name", "args": [fragment, ...]}
+    state = {"index": -1, "text_open": False}
+
+    def _open_text():
+        state["index"] += 1
+        state["text_open"] = True
+        return _sse("content_block_start",
+                    {"type": "content_block_start", "index": state["index"],
+                     "content_block": {"type": "text", "text": ""}})
+
+    def _close_block():
+        state["text_open"] = False
+        return _sse("content_block_stop",
+                    {"type": "content_block_stop", "index": state["index"]})
+
+    def _emit_text(s):
+        """Yield `s` as text deltas, opening a text block if needed and slicing to
+        _TEXT_CHUNK so Claude Code's TUI doesn't mis-paint one giant delta."""
+        if not s:
+            return
+        if not state["text_open"]:
+            yield _open_text()
+        for j in range(0, len(s), _TEXT_CHUNK):
+            yield _sse("content_block_delta",
+                       {"type": "content_block_delta", "index": state["index"],
+                        "delta": {"type": "text_delta", "text": s[j:j + _TEXT_CHUNK]}})
+
+    pending = ""             # live prose not yet flushed (holds the marker tail)
+    buffering = False        # True once a tool call (text or native) has begun
+    tail_parts = []          # all content accumulated AFTER the switch
+    tool_calls = {}          # native fragmented tool_calls: index -> slot
+    live_chars = 0
     finish_reason = None
     usage = {}
     last_ping = time.monotonic()
+
     try:
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
@@ -627,23 +674,60 @@ def buffered_stream(resp, conn, model, input_tokens, types=None):
                 continue
             choice = (obj.get("choices") or [{}])[0]
             delta = choice.get("delta") or {}
-            piece = delta.get("content")
-            if piece:
-                content_parts.append(piece)
-            for tc in delta.get("tool_calls") or []:
-                slot = tool_calls.setdefault(tc.get("index", 0),
-                                             {"id": None, "name": None, "args": []})
-                if tc.get("id"):
-                    slot["id"] = tc["id"]
-                fn = tc.get("function") or {}
-                if fn.get("name"):
-                    slot["name"] = fn["name"]
-                if fn.get("arguments"):
-                    slot["args"].append(fn["arguments"])
             if choice.get("finish_reason"):
                 finish_reason = choice["finish_reason"]
             if obj.get("usage"):
                 usage = obj["usage"]
+            native = delta.get("tool_calls") or []
+            piece = delta.get("content") or ""
+
+            # A native tool_calls fragment means tools have begun → flush any safe
+            # pending prose, close the live block, and switch to buffering.
+            if native and not buffering:
+                if pending:
+                    for ev in _emit_text(pending):
+                        yield ev
+                    live_chars += len(pending)
+                    pending = ""
+                if state["text_open"]:
+                    yield _close_block()
+                buffering = True
+
+            if not buffering and piece:
+                pending += piece
+                idx = pending.find(_TOOLCALL_OPEN)
+                if idx != -1:
+                    # Complete marker: everything before it is safe prose.
+                    safe, rest = pending[:idx], pending[idx:]
+                    for ev in _emit_text(safe):
+                        yield ev
+                    live_chars += len(safe)
+                    if state["text_open"]:
+                        yield _close_block()
+                    buffering = True
+                    tail_parts.append(rest)
+                    pending = ""
+                elif len(pending) > _HOLDBACK:
+                    # No marker yet: flush all but a holdback tail that could be
+                    # the start of a `<tool_call>` split across chunks.
+                    safe, pending = pending[:-_HOLDBACK], pending[-_HOLDBACK:]
+                    for ev in _emit_text(safe):
+                        yield ev
+                    live_chars += len(safe)
+            elif buffering:
+                if piece:
+                    tail_parts.append(piece)
+                for tc in native:
+                    slot = tool_calls.setdefault(
+                        tc.get("index", 0), {"id": None, "name": None, "args": []})
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        slot["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["args"].append(fn["arguments"])
+
             now = time.monotonic()
             if now - last_ping >= _PING_INTERVAL:
                 last_ping = now
@@ -654,19 +738,78 @@ def buffered_stream(resp, conn, model, input_tokens, types=None):
         except Exception:  # noqa: BLE001
             pass
 
-    msg = {"role": "assistant", "content": "".join(content_parts) or None}
+    # ----- finalize ---------------------------------------------------------- #
+    if not buffering:
+        # Pure prose: flush the leftover holdback tail (plain text, no marker).
+        for ev in _emit_text(pending):
+            yield ev
+        live_chars += len(pending)
+        if state["index"] == -1:          # nothing at all → one empty text block
+            yield _open_text()
+        if state["text_open"]:
+            yield _close_block()
+        out_tokens = usage.get("completion_tokens") or max(1, live_chars // 4)
+        stop = _STOP_MAP.get(finish_reason, "end_turn")
+        yield _sse("message_delta",
+                   {"type": "message_delta",
+                    "delta": {"stop_reason": stop, "stop_sequence": None},
+                    "usage": {"output_tokens": out_tokens}})
+        yield _sse("message_stop", {"type": "message_stop"})
+        return
+
+    # Buffering happened: parse the tail for tool calls + trailing text via the
+    # SAME conversion the non-stream path uses (handles truncation-drop, native
+    # tool_calls, type coercion), then emit the remaining blocks continuing the
+    # block index (the leading prose was already streamed as its own block).
+    tail_text = "".join(tail_parts)
+    tail_msg = {"role": "assistant", "content": tail_text or None}
     if tool_calls:
-        msg["tool_calls"] = [
+        tail_msg["tool_calls"] = [
             {"id": slot["id"], "type": "function",
-             "function": {"name": slot["name"],
-                          "arguments": "".join(slot["args"])}}
-            for _, slot in sorted(tool_calls.items())
-        ]
-    oai_resp = {"id": start_msg["id"], "usage": usage,
-                "choices": [{"message": msg, "finish_reason": finish_reason}]}
+             "function": {"name": slot["name"], "arguments": "".join(slot["args"])}}
+            for _, slot in sorted(tool_calls.items())]
+    oai_resp = {"id": msg_id, "usage": usage,
+                "choices": [{"message": tail_msg, "finish_reason": finish_reason}]}
     message = openai_response_to_anthropic(oai_resp, model, types)
-    for ev in _message_body_events(message):
-        yield ev
+
+    for blk in message.get("content") or []:
+        if blk.get("type") == "tool_use":
+            state["index"] += 1
+            yield _sse("content_block_start",
+                       {"type": "content_block_start", "index": state["index"],
+                        "content_block": {"type": "tool_use",
+                                          "id": blk.get("id") or _id("toolu"),
+                                          "name": blk.get("name") or "", "input": {}}})
+            partial = json.dumps(blk.get("input") or {}, ensure_ascii=False)
+            yield _sse("content_block_delta",
+                       {"type": "content_block_delta", "index": state["index"],
+                        "delta": {"type": "input_json_delta", "partial_json": partial}})
+            yield _sse("content_block_stop",
+                       {"type": "content_block_stop", "index": state["index"]})
+        else:
+            text = blk.get("text", "")
+            # Skip the empty filler block openai_response_to_anthropic adds when a
+            # reply has no blocks — but only if we already emitted something, so a
+            # tool-only-then-stripped reply still yields a valid (empty) block.
+            if text == "" and state["index"] >= 0:
+                continue
+            for ev in _emit_text(text):
+                yield ev
+            if state["text_open"]:
+                yield _close_block()
+
+    if state["index"] == -1:              # nothing emitted at all → empty block
+        yield _open_text()
+        yield _close_block()
+
+    total = live_chars + len(tail_text)
+    out_tokens = usage.get("completion_tokens") or max(1, total // 4)
+    yield _sse("message_delta",
+               {"type": "message_delta",
+                "delta": {"stop_reason": message.get("stop_reason") or "end_turn",
+                          "stop_sequence": None},
+                "usage": {"output_tokens": out_tokens}})
+    yield _sse("message_stop", {"type": "message_stop"})
 
 
 # --------------------------------------------------------------------------- #
