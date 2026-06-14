@@ -67,15 +67,15 @@
         <div class="mb-2">
           <label class="form-label">Engine</label>
           <select class="form-select" name="engine" id="engineSelect">
-            <option value="llamacpp">llama-cpp-python (mặc định)</option>
-            <option value="llama-server">llama-server (native, --jinja) — tool-calling</option>
+            <option value="llama-server">llama-server (native, --jinja)</option>
           </select>
-          <div class="form-text">Chọn <code>llama-server (native)</code> nếu dùng
-            cho <b>Claude Code / client gọi tool</b> (ghi/sửa file): nó đọc chat
-            template trong GGUF + có bộ phân tích tool-call gốc nên Qwen3-Coder
-            sinh đúng <code>tool_calls</code>. Cần binary CUDA của ggml-org đặt ở
-            <code>host-a100-data/bin/llama-server</code>. Bản
-            <code>llama-cpp-python</code> không phân tích được tool-call của Qwen.</div>
+          <div class="form-text">Engine native ggml-org: đọc chat template trong
+            GGUF + phân tích tool-call gốc → Qwen3-Coder sinh đúng
+            <code>tool_calls</code> (cho <b>Claude Code / client gọi tool</b>) và
+            tái dùng KV theo slot. Cần binary CUDA ở
+            <code>host-a100-data/bin/llama-server</code>. (Engine cũ
+            <code>llama-cpp-python</code> đã bỏ: không phân tích được tool-call của
+            Qwen, và bridge hiện chỉ hỗ trợ native.)</div>
         </div>
 
         <div class="mb-2">

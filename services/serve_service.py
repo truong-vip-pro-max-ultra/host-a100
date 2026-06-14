@@ -146,11 +146,11 @@ _ENGINES = ("llamacpp", "llama-server")
 
 def start_server(name, model_id, env_id, served_name="", gpu_model="",
                  n_gpu_layers=99, n_ctx=8192, chat_format="", extra_args="",
-                 time_limit="", auto_resubmit=True, engine="llamacpp"):
+                 time_limit="", auto_resubmit=True, engine="llama-server"):
     """Validate, create the DB row + server dir, and start the run-loop thread.
     Returns the new server_id. Raises ValueError on bad input.
     """
-    engine = (engine or "llamacpp").strip()
+    engine = (engine or "llama-server").strip()
     if engine not in _ENGINES:
         raise ValueError("Engine không hợp lệ.")
     # Fail fast (before creating the row/thread) if the native engine is picked
