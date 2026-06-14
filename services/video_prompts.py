@@ -20,11 +20,11 @@ Pure-CPU + stdlib (+ optional deep_translator); safe to unit-test without a GPU.
 """
 from __future__ import annotations
 
-import concurrent.futures
 import functools
 import hashlib
 import json
 import re
+import time
 import http.client
 
 try:
@@ -204,6 +204,87 @@ def llm_available():
         return False
 
 
+_LLM_BATCH_INSTRUCTION = (
+    "You are an art director writing prompts for a text-to-image model. You will "
+    "receive a numbered list of narration lines (which may be Vietnamese). For "
+    "EACH line, write ONE vivid, CONCRETE visual scene in English.\n"
+    "Rules per scene:\n"
+    "- A specific, depictable moment: main subject, action, key objects, setting; "
+    "turn abstract ideas into a concrete visual metaphor.\n"
+    "- 15-35 words, comma-separated visual phrases (not a full sentence).\n"
+    "- Vary the framing across scenes (close-up, wide, over-the-shoulder, top-down…).\n"
+    "- Do NOT mention any art style, medium or colour palette; no text/letters in the image.\n"
+    "Output ONLY a JSON array of exactly N strings, in the SAME order as the input, "
+    "nothing else (no keys, no markdown fences, no commentary)."
+)
+
+
+def _chat(messages, max_tokens, timeout):
+    """One internal call to the API-farm LLM. Returns the content string or ''."""
+    if serve_service is None:
+        return ""
+    try:
+        ep = serve_service.resolve_endpoint()
+    except Exception:  # noqa: BLE001
+        return ""
+    if not ep:
+        return ""
+    host, port, served_name = ep
+    body = json.dumps({
+        "model": served_name or "default",
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": max_tokens,
+        "stream": False,
+        "stop": ["<|im_end|>"],
+    }).encode("utf-8")
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn.request("POST", "/v1/chat/completions", body=body,
+                     headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        raw = resp.read()
+        conn.close()
+        if resp.status != 200:
+            return ""
+        return (json.loads(raw or b"{}")["choices"][0]["message"]["content"] or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def llm_visual_prompts(texts, timeout=180):
+    """Rewrite ALL narration lines in ONE LLM call (the API-farm server runs
+    --parallel 1, so one batched request is far faster than N parallel ones that
+    just queue server-side). Returns a list aligned with ``texts`` (each item is
+    the rewritten prompt or "" if unusable), or [] on total failure → the caller
+    falls back to rule-based + translation."""
+    texts = [(t or "").strip() for t in texts]
+    if not texts or serve_service is None:
+        return []
+    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
+    out = _chat(
+        [{"role": "system", "content": _LLM_BATCH_INSTRUCTION},
+         {"role": "user", "content": f"{len(texts)} narration lines:\n{numbered}"}],
+        max_tokens=min(1600, 90 * len(texts) + 200), timeout=timeout)
+    if not out:
+        return []
+    # Strip an accidental ```json fence, then parse the JSON array.
+    s = out.strip()
+    if s.startswith("```"):
+        s = s.strip("`")
+        s = s[s.find("["):] if "[" in s else s
+    start, end = s.find("["), s.rfind("]")
+    if start < 0 or end <= start:
+        return []
+    try:
+        arr = json.loads(s[start:end + 1])
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(arr, list) or len(arr) != len(texts):
+        return []
+    return [(str(x).strip().strip('"“”')[:300] if x else "") for x in arr]
+
+
 def llm_visual_prompt(text, seed=-1, timeout=60):
     """Rewrite one narration line into a concrete English scene via the API farm.
     Returns "" on any failure so the caller falls back to the rule-based path."""
@@ -281,17 +362,18 @@ def build_prompts(chunks, style_preset="cinematic", negative="", use_llm=True,
     use_llm = bool(use_llm) and llm_available()
     visuals = [""] * len(chunks)
     if use_llm:
-        _log(f"  ➤ viết prompt ảnh bằng LLM API farm cho {len(chunks)} cảnh…")
-        workers = max(1, int(workers or 1))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-            fut = {ex.submit(llm_visual_prompt, chunks[i], seeds[i]): i
-                   for i in range(len(chunks))}
-            for f in concurrent.futures.as_completed(fut):
-                i = fut[f]
-                try:
-                    visuals[i] = f.result() or ""
-                except Exception:  # noqa: BLE001
-                    visuals[i] = ""
+        # ONE batched request (the LLM server is --parallel 1, so N parallel calls
+        # just queue → slow). Falls back to rule-based+translate on any failure.
+        _log(f"  ➤ viết prompt ảnh bằng LLM API farm (1 lượt, {len(chunks)} cảnh)…")
+        t0 = time.time()
+        got = llm_visual_prompts(chunks)
+        if got:
+            visuals = got
+            _log(f"  ✓ LLM xong {sum(1 for v in visuals if v)}/{len(chunks)} cảnh "
+                 f"({time.time() - t0:.1f}s).")
+        else:
+            _log(f"  ! LLM không trả về hợp lệ ({time.time() - t0:.1f}s) — "
+                 "dùng prompt theo luật + dịch.")
     else:
         _log("  ! Không có LLM (API farm chưa chạy) — dùng prompt theo luật + dịch.")
 

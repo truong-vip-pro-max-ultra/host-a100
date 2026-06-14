@@ -18,6 +18,7 @@ import http.client
 import json
 import os
 import threading
+import time
 
 import config
 from services import storage_service as db
@@ -165,6 +166,8 @@ def _run_job(job_id, script, params):
         steps = params.get("image_steps", 4)
         img_paths = [os.path.join(job_dir, f"img_{i:04d}.png") for i in range(n)]
         ib = int(params.get("image_batch") or config.IMAGE_MAX_BATCH)
+        log(f"Bắt đầu tạo {n} ảnh trên GPU (batch {ib}). Lần đầu GPU phải nạp "
+            "model SDXL vào VRAM nên nhóm đầu chậm hơn, các nhóm sau nhanh.")
         done = 0
         for start in range(0, n, ib):
             grp = list(range(start, min(start + ib, n)))
@@ -174,7 +177,11 @@ def _run_job(job_id, script, params):
                       "negative": prompts[i]["negative"],
                       "out_path": img_paths[i], "seed": prompts[i]["seed"],
                       "width": w, "height": h, "steps": steps} for i in grp]
+            t0 = time.time()
             results = _generate_images(host, port, items)
+            ok = sum(1 for r in results if (r or {}).get("ok"))
+            log(f"  ✓ ảnh {grp[0] + 1}–{grp[-1] + 1}/{n}: {ok}/{len(grp)} cảnh "
+                f"({time.time() - t0:.1f}s)")
             for k, i in enumerate(grp):
                 r = results[k] if k < len(results) else {}
                 if not (r or {}).get("ok"):
@@ -190,6 +197,7 @@ def _run_job(job_id, script, params):
                    "seed": params.get("voice_seed", 0),
                    "batch": params.get("voice_batch") or config.OMNI_MAX_BATCH}
         vb = int(vparams["batch"])
+        log(f"Bắt đầu tạo giọng {n} cảnh trên GPU (batch {vb}).")
         durations = [0.0] * n
         done = 0
         for start in range(0, n, vb):
@@ -197,7 +205,11 @@ def _run_job(job_id, script, params):
             _set_job(job_id, stage=f"Đang tạo giọng {grp[0] + 1}–{grp[-1] + 1}/{n} "
                      "trên GPU…", progress=40 + int(done / n * 30))
             items = [{"text": chunks[i], "out_path": wav_paths[i]} for i in grp]
+            t0 = time.time()
             results = voice_pipeline._synthesize_chunks(host, port, items, vparams)
+            ok = sum(1 for r in results if (r or {}).get("ok"))
+            log(f"  ✓ giọng {grp[0] + 1}–{grp[-1] + 1}/{n}: {ok}/{len(grp)} cảnh "
+                f"({time.time() - t0:.1f}s)")
             for k, i in enumerate(grp):
                 r = results[k] if k < len(results) else {}
                 if (r or {}).get("ok"):
