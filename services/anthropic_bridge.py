@@ -82,13 +82,18 @@ _TOOL_FORMAT_INSTRUCTIONS = (
 )
 
 
-def _qwen_tool_param(pname, schema):
+def _qwen_tool_param(pname, schema, required=False):
     schema = schema if isinstance(schema, dict) else {}
     out = [f"\n<parameter>\n<name>{pname}</name>"]
     if schema.get("type"):
         out.append(f"\n<type>{schema['type']}</type>")
     if schema.get("description"):
         out.append(f"\n<description>{schema['description']}</description>")
+    # Tell the model which params are mandatory. Without this Qwen guesses and
+    # omits required args (e.g. the Agent/Task tool's `description`), so Claude
+    # Code rejects the call with "Invalid tool parameters" and the model has to
+    # retry — each retry costs another full-prompt prefill.
+    out.append(f"\n<required>{'true' if required else 'false'}</required>")
     out.append("\n</parameter>")
     return "".join(out)
 
@@ -102,8 +107,11 @@ def qwen_tools_prompt(tools):
         name = t.get("name")
         if not name:
             continue
-        props = (t.get("input_schema") or {}).get("properties") or {}
-        params = "".join(_qwen_tool_param(p, s) for p, s in props.items())
+        schema = t.get("input_schema") or {}
+        props = schema.get("properties") or {}
+        required = set(schema.get("required") or [])
+        params = "".join(_qwen_tool_param(p, s, p in required)
+                         for p, s in props.items())
         funcs.append(f"\n<function>\n<name>{name}</name>"
                      f"\n<description>{t.get('description', '') or ''}</description>"
                      f"\n<parameters>{params}\n</parameters>\n</function>")
