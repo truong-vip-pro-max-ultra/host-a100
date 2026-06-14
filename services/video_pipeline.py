@@ -17,8 +17,10 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import threading
 import time
+import unicodedata
 
 import config
 from services import storage_service as db
@@ -47,6 +49,18 @@ def _job_log(job_dir, text):
             fh.write(text + "\n")
     except OSError:
         pass
+
+
+def _ascii_slug(name, fallback):
+    """An ASCII-only, filesystem-safe slug (strips Vietnamese diacritics). The
+    output MP4/SRT names must be ASCII: a YouTube-title job name carries accents,
+    and on a C/POSIX-locale login node Python encodes filenames with ascii →
+    opening a file whose NAME has 'ờ'/'đ' raises 'latin-1' codec can't encode.
+    The display name (job['name']) keeps its Vietnamese; only the file is sanitised."""
+    s = unicodedata.normalize("NFKD", name or "")
+    s = s.encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"[^\w\-]+", "_", s).strip("_")
+    return s or fallback
 
 
 def _set_job(job_id, **fields):
@@ -232,7 +246,7 @@ def _run_job(job_id, script, params):
 
         # --- render -------------------------------------------------------- #
         _set_job(job_id, stage="Đang dựng video (ffmpeg)…", progress=70)
-        out_mp4 = os.path.join(job_dir, f"{voice_pipeline._slug(job['name'] or 'video')}.mp4")
+        out_mp4 = os.path.join(job_dir, f"{_ascii_slug(job['name'], f'video_{job_id}')}.mp4")
         render_cfg = {"width": w, "height": h, "fps": params.get("fps", 30),
                       "ken_burns": params.get("ken_burns", True),
                       "music_path": params.get("music_path", "")}
