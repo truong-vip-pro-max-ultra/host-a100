@@ -149,10 +149,13 @@ _NARRATION_EDGE_KEEP = 0.05
 # codec and the (large) filter graph.
 _FFMPEG_THREADS = ["-threads", "0", "-filter_complex_threads", "0"]
 
-# How many chunks per /synthesize_batch call. Big enough to keep the GPU busy
-# (no per-chunk HTTP round-trip) but small enough to advance the progress bar a
-# few times on a long script. The server caches the voice prompt across calls.
-_SYNTH_BATCH = 8
+# How many chunks per /synthesize_batch call = the server's true GPU batch size
+# (config.OMNI_MAX_BATCH). One HTTP request is then exactly one GPU batch, so
+# raising the config raises both the request size and the VRAM the L40S uses.
+try:
+    _SYNTH_BATCH = max(1, int(config.OMNI_MAX_BATCH))
+except (TypeError, ValueError):
+    _SYNTH_BATCH = 8
 
 
 def _run_ffmpeg(args, cwd=None, timeout=3600):

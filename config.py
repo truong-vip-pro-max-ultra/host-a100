@@ -72,6 +72,13 @@ VOICES_DIR = os.path.join(DATA_DIR, "voices")
 OMNI_HF_HOME = os.environ.get("HOSTA100_HF_HOME", os.path.join(DATA_DIR, "hf-cache"))
 # Default OmniVoice model id (resolved from the shared HF cache above).
 OMNI_MODEL_ID = os.environ.get("HOSTA100_OMNI_MODEL", "k2-fsa/OmniVoice")
+# True GPU batching: how many utterances to feed the model in ONE generate() call
+# (the login node also sends this many chunks per request). Bigger = more VRAM
+# used + higher throughput on the L40S, but risks OOM if too large. The server
+# tries a batched call and falls back to per-utterance if the model won't batch.
+# "1" effectively disables batching. Raising this REQUIRES recreating the server.
+OMNI_MAX_BATCH = os.environ.get("HOSTA100_OMNI_MAX_BATCH", "8")
+OMNI_BATCH_ENABLED = os.environ.get("HOSTA100_OMNI_BATCH", "1")  # "0" = off
 # The GPU-side server script (lives in the repo, shipped by git). The batch
 # script runs it with the env's python on the compute node.
 OMNI_SERVER_SCRIPT = os.path.join(

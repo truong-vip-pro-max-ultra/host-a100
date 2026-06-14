@@ -164,6 +164,15 @@ class OmniEngine:
         self._prompt_cache = {}               # (ref, mtime) -> clone prompt
         self._default_ref_cache = {}          # (seed,) -> clone prompt
         self.load_error = ""
+        # True GPU batching: feed up to N utterances through one generate() call
+        # so the GPU does them in parallel (fills the L40S VRAM, big throughput
+        # win). OmniVoice's batch API is unverified, so this is DEFENSIVE — we
+        # try a batched call and fall back to per-utterance on ANY mismatch.
+        self.use_batch = os.environ.get("OMNI_BATCH", "1") != "0"
+        try:
+            self.max_batch = max(1, int(os.environ.get("OMNI_MAX_BATCH", "8")))
+        except ValueError:
+            self.max_batch = 8
 
     # -- load -------------------------------------------------------------- #
     def _pick_device(self):
@@ -324,27 +333,102 @@ class OmniEngine:
             return self._render_one(model, text, out_path, cp, rra, rrt,
                                     language, gen_config, seed)
 
+    def _generate_batch(self, model, texts, *, voice_clone_prompt=None,
+                        ref_audio="", ref_text="", language="", gen_config=None):
+        """One generate() over a LIST of texts. Returns whatever the model gives;
+        the caller validates the shape. No retry — any error means 'fall back'."""
+        kwargs = {"text": list(texts)}
+        if language:
+            kwargs["language"] = language
+        if gen_config is not None:
+            kwargs["generation_config"] = gen_config
+        if voice_clone_prompt is not None:
+            kwargs["voice_clone_prompt"] = voice_clone_prompt
+        elif ref_audio:
+            kwargs["ref_audio"] = ref_audio
+            if ref_text:
+                kwargs["ref_text"] = ref_text
+        return model.generate(**kwargs)
+
+    def _render_sub_batch(self, model, sub, clone_prompt, raw_ref_audio,
+                          raw_ref_text, language, gen_config, seed):
+        """Try to render a sub-batch in ONE batched generate. Returns a list of
+        result dicts on success, or None to signal 'fall back to per-item'.
+
+        We accept the batched output ONLY if it is a list/tuple of exactly
+        len(sub) real waveforms — anything else (model doesn't batch, returns a
+        single concatenated clip, nests differently…) triggers the safe
+        per-utterance fallback, so a mismatched API can never produce garbled or
+        misaligned audio."""
+        import numpy as np
+        texts = [(it.get("text", "") or "").strip().lower() for it in sub]
+        if any(not t for t in texts):
+            return None
+        if seed is not None and seed >= 0:
+            seed_rng(seed)
+        out = self._generate_batch(model, texts, voice_clone_prompt=clone_prompt,
+                                   ref_audio=raw_ref_audio, ref_text=raw_ref_text,
+                                   language=language, gen_config=gen_config)
+        if not isinstance(out, (list, tuple)) or len(out) != len(sub):
+            return None
+        results = []
+        for it, x in zip(sub, out):
+            a = np.asarray(x, dtype=np.float32)
+            if a.ndim == 0 or a.size < 100:          # not a real waveform
+                return None
+            wav = strip_lead_blip(a.reshape(-1), sr=SR)
+            op = Path(it["out_path"])
+            if op.suffix.lower() != ".wav":
+                op = op.with_suffix(".wav")
+            write_wav_from_float(op, wav, sr=SR)
+            if not op.exists() or op.stat().st_size < 256:
+                return None
+            results.append({"ok": True, "out_path": str(op),
+                            "duration": wav_duration(op)})
+        return results
+
     def synthesize_batch(self, items, language="vi", num_step=16, seed=-1,
                          ref_audio="", ref_text=""):
-        """Render many chunks in ONE call so the GPU never idles between chunks
-        and the (expensive) voice prompt is resolved once. ``items`` is a list of
-        {"text","out_path"}. Returns a list of per-item dicts (ok/out_path/
-        duration/error) — one bad chunk does not abort the rest."""
+        """Render many chunks per call. Resolves the voice prompt once, then tries
+        TRUE GPU batching in sub-batches of ``max_batch`` (fills the L40S), and
+        falls back to per-utterance for any sub-batch the model won't batch.
+        Returns a list of per-item dicts (ok/out_path/duration/error)."""
         model = self.load()
         gen_config = self._gen_config(num_step)
-        results = []
+        n = len(items)
+        results = [None] * n
         with self._lock:
             cp, rra, rrt = self._resolve_prompt(model, ref_audio, ref_text, seed, language)
-            for it in items:
-                try:
-                    path, dur = self._render_one(
-                        model, it.get("text", ""), it.get("out_path", ""),
-                        cp, rra, rrt, language, gen_config, seed)
-                    results.append({"ok": True, "out_path": path, "duration": dur})
-                except Exception as exc:
-                    traceback.print_exc()
-                    results.append({"ok": False, "error": str(exc),
-                                    "out_path": it.get("out_path", "")})
+            i = 0
+            while i < n:
+                sub = items[i:i + self.max_batch]
+                batched = None
+                if self.use_batch and len(sub) > 1:
+                    try:
+                        batched = self._render_sub_batch(
+                            model, sub, cp, rra, rrt, language, gen_config, seed)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[omnivoice] batch of {len(sub)} failed "
+                              f"({exc}); falling back to per-utterance.", flush=True)
+                        batched = None
+                if batched is not None:
+                    print(f"[omnivoice] batched {len(sub)} utterances in one "
+                          "generate().", flush=True)
+                    for k, r in enumerate(batched):
+                        results[i + k] = r
+                else:
+                    for k, it in enumerate(sub):
+                        try:
+                            path, dur = self._render_one(
+                                model, it.get("text", ""), it.get("out_path", ""),
+                                cp, rra, rrt, language, gen_config, seed)
+                            results[i + k] = {"ok": True, "out_path": path,
+                                              "duration": dur}
+                        except Exception as exc:  # noqa: BLE001
+                            traceback.print_exc()
+                            results[i + k] = {"ok": False, "error": str(exc),
+                                              "out_path": it.get("out_path", "")}
+                i += len(sub)
         return results
 
 
@@ -381,6 +465,8 @@ class Handler(BaseHTTPRequestHandler):
                 "model": ENGINE.model_id if ENGINE else "",
                 "device": ENGINE._device if ENGINE else "",
                 "dtype": ENGINE._dtype_str if ENGINE else "",
+                "batch": (ENGINE.use_batch if ENGINE else False),
+                "max_batch": (ENGINE.max_batch if ENGINE else 0),
                 "load_error": ENGINE.load_error if ENGINE else "",
             })
             return

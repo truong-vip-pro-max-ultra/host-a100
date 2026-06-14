@@ -139,13 +139,23 @@ gọi với `-threads 0 -filter_complex_threads 0` để tận dụng **toàn b�
 ## Hiệu năng
 
 - **GPU (OmniVoice / L40S):** server bật `fp16` + `TF32` (`allow_tf32`,
-  `set_float32_matmul_precision("high")`) + `cudnn.benchmark`. App gửi **cả
-  kịch bản trong một request `/synthesize_batch`** nên GPU không nghỉ giữa các
-  đoạn và prompt clone chỉ tính 1 lần (Whisper ASR + trích đặc trưng giọng được
-  cache).
+  `set_float32_matmul_precision("high")`) + `cudnn.benchmark`, và xin `8 CPU +
+  32G` + `OMP/MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK` để không nghẽn phần CPU.
+- **Batch GPU thật (ăn VRAM tối đa):** server thử generate **nhiều đoạn trong
+  MỘT lần gọi** (`OMNI_MAX_BATCH`, mặc định 8) để lấp VRAM L40S + tăng thông
+  lượng. **Phòng thủ:** nếu OmniVoice không nhận list text (lỗi/sai số lượng),
+  nó **tự lùi về đọc từng đoạn** nên không bao giờ méo/lệch tiếng. Chỉnh bằng
+  `config.OMNI_MAX_BATCH` (env `HOSTA100_OMNI_MAX_BATCH`): tăng lên 12–16 để ăn
+  nhiều VRAM hơn, nếu OOM thì hạ; `1` = tắt batch. **Đổi giá trị này phải
+  recreate server** (nó nằm trong batch script). Tắt hẳn: `HOSTA100_OMNI_BATCH=0`.
+  Xem batch đang bật không: `GET /health` của server trả `batch`/`max_batch`,
+  và `server.log` in `batched N utterances in one generate()` mỗi lô.
 - **CPU (ffmpeg / login node):** `-threads 0 -filter_complex_threads 0` =
   dùng hết nhân.
 - `num_step` là cần gạt tốc/độ nét rõ nhất: 8 cho nhanh, 16 cân bằng, 24–32 nét.
+
+> **Lưu ý so với clone-voice:** bản desktop của bạn cũng đọc **tuần tự từng đoạn**
+> (narrator.py), KHÔNG batch. Batch GPU ở đây là tính năng MỚI, vượt clone-voice.
 
 ## Vận hành / lưu ý
 

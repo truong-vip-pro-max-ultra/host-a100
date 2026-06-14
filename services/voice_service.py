@@ -208,6 +208,10 @@ export HF_HOME={hf_home}
 export HUGGINGFACE_HUB_CACHE={hf_home}/hub
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
+# True GPU batching knobs (server reads these): fill the L40S by generating up to
+# OMNI_MAX_BATCH utterances per call. Tune via config.OMNI_MAX_BATCH.
+export OMNI_BATCH={shlex.quote(str(config.OMNI_BATCH_ENABLED))}
+export OMNI_MAX_BATCH={shlex.quote(str(config.OMNI_MAX_BATCH))}
 # Let torch/OpenMP actually use all the CPUs SLURM gave us (the CPU-side cost of
 # diffusion sampling + tokenize), instead of defaulting to 1 thread.
 export OMP_NUM_THREADS=${{SLURM_CPUS_PER_TASK:-8}}

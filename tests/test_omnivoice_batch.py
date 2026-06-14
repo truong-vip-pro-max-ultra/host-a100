@@ -1,0 +1,134 @@
+"""Tests for the OmniVoice server's TRUE GPU-batching path + its safe fallback.
+Uses fake models (no torch/omnivoice/GPU needed; only numpy). Run:
+    python3 tests/test_omnivoice_batch.py
+
+Verifies: (1) when the model batches a list of texts, synthesize_batch writes one
+correct wav per item via the batched path; (2) when the model does NOT accept a
+list (raises) it falls back to per-utterance and still writes every wav; (3) a
+batched reply with the WRONG count is rejected → per-item fallback.
+"""
+import os
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "scripts"))
+import numpy as np  # noqa: E402
+import omnivoice_server as ov  # noqa: E402
+
+FAILS = []
+
+
+def check(name, cond, detail=""):
+    print(f"  [{'PASS' if cond else 'FAIL'}] {name}" + (f" — {detail}" if detail and not cond else ""))
+    if not cond:
+        FAILS.append(name)
+
+
+def _clip(n=ov.SR):
+    return (np.ones(n, dtype=np.float32) * 0.1)
+
+
+class BatchModel:
+    """Accepts a list of texts and returns one waveform per text."""
+    def __init__(self):
+        self.calls = []
+
+    def generate(self, text=None, **kw):
+        self.calls.append(text)
+        if isinstance(text, list):
+            return [_clip() for _ in text]
+        return [_clip()]
+
+
+class NoBatchModel:
+    """Only accepts a single string; raises on a list (no batch support)."""
+    def __init__(self):
+        self.calls = []
+
+    def generate(self, text=None, **kw):
+        self.calls.append(text)
+        if isinstance(text, list):
+            raise TypeError("does not accept batched text")
+        return [_clip()]
+
+
+class WrongCountModel:
+    """Accepts a list but returns the WRONG number of clips (1 for N)."""
+    def generate(self, text=None, **kw):
+        if isinstance(text, list):
+            return [_clip()]          # only 1 back for N → must be rejected
+        return [_clip()]
+
+
+def _items(d, n):
+    return [{"text": f"đoạn số {i}", "out_path": os.path.join(d, f"part_{i:04d}.wav")}
+            for i in range(n)]
+
+
+def _engine(model):
+    e = ov.OmniEngine("fake")
+    e._model = model                  # bypass load() → no torch import
+    return e
+
+
+def t1_batched_path():
+    print("t1: model that batches → batched path, all wavs written")
+    d = tempfile.mkdtemp()
+    m = BatchModel()
+    e = _engine(m)
+    items = _items(d, 5)
+    res = e.synthesize_batch(items, seed=-1)
+    check("t1: 5 results", len(res) == 5)
+    check("t1: all ok", all(r["ok"] for r in res))
+    check("t1: all wavs exist", all(os.path.exists(r["out_path"]) for r in res))
+    # max_batch defaults to 8, so 5 go in ONE batched call (text passed as list)
+    list_calls = [c for c in m.calls if isinstance(c, list)]
+    check("t1: one batched generate call", len(list_calls) == 1, str(m.calls))
+    check("t1: no per-item str calls", not any(isinstance(c, str) for c in m.calls))
+
+
+def t2_fallback_on_raise():
+    print("t2: model without batch → per-utterance fallback, all wavs written")
+    d = tempfile.mkdtemp()
+    m = NoBatchModel()
+    e = _engine(m)
+    items = _items(d, 4)
+    res = e.synthesize_batch(items, seed=-1)
+    check("t2: 4 results", len(res) == 4)
+    check("t2: all ok", all(r["ok"] for r in res))
+    check("t2: all wavs exist", all(os.path.exists(r["out_path"]) for r in res))
+    # one failed list attempt + 4 per-item string calls
+    check("t2: fell back to 4 str calls",
+          sum(isinstance(c, str) for c in m.calls) == 4, str(m.calls))
+
+
+def t3_reject_wrong_count():
+    print("t3: batched reply with wrong count → rejected, fallback writes all")
+    d = tempfile.mkdtemp()
+    e = _engine(WrongCountModel())
+    items = _items(d, 3)
+    res = e.synthesize_batch(items, seed=-1)
+    check("t3: 3 results all ok", len(res) == 3 and all(r["ok"] for r in res))
+    check("t3: all wavs exist", all(os.path.exists(r["out_path"]) for r in res))
+
+
+def t4_batch_disabled():
+    print("t4: OMNI_BATCH=0 → never attempts a list call")
+    d = tempfile.mkdtemp()
+    m = BatchModel()
+    e = _engine(m)
+    e.use_batch = False
+    res = e.synthesize_batch(_items(d, 3), seed=-1)
+    check("t4: all ok", len(res) == 3 and all(r["ok"] for r in res))
+    check("t4: no list calls", not any(isinstance(c, list) for c in m.calls))
+
+
+if __name__ == "__main__":
+    for fn in (t1_batched_path, t2_fallback_on_raise, t3_reject_wrong_count, t4_batch_disabled):
+        fn()
+    print()
+    if FAILS:
+        print(f"FAILED ({len(FAILS)}): " + ", ".join(FAILS))
+        sys.exit(1)
+    print("ALL TESTS PASSED")
