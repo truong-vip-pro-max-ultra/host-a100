@@ -1160,7 +1160,11 @@ def video_job_log(job_id):
 
 @app.route("/tools/video/jobs/<int:job_id>/scenes.json")
 def video_job_scenes(job_id):
-    return jsonify({"scenes": video_pipeline.get_scenes(job_id)})
+    # Polled live while images render — never let a layer (browser/Cloudflare) serve
+    # a stale copy, or new scene images would not show until the popup is reopened.
+    resp = jsonify({"scenes": video_pipeline.get_scenes(job_id)})
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
 
 
 @app.route("/tools/video/jobs/<int:job_id>/img/<int:idx>")

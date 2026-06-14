@@ -616,58 +616,72 @@ function imgUrl(id, idx){ return URL_IMG.replace('/0/', '/' + id + '/').replace(
 
 function esc(s){ const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 
+function storyThumb(id, s) {
+  return '<span class="scene-num">Cảnh ' + s.i + '</span>' + (s.image
+    ? '<img loading="lazy" src="' + imgUrl(id, s.i - 1) + '" alt="Cảnh ' + s.i +
+      '" onclick="lightbox(this,' + id + ',' + s.i + ')">'
+    : '<div class="skeleton"></div><span class="scene-wait position-absolute">' +
+      '<i class="bi bi-hourglass-split"></i><br>đang tạo…</span>');
+}
+function storyCell(id, s) {
+  return '<div class="col-6 col-md-4 col-lg-3" data-scene="' + s.i + '">' +
+      '<div class="scene-card">' +
+        '<div class="scene-thumb">' + storyThumb(id, s) + '</div>' +
+        '<div class="scene-body">' +
+          '<div class="scene-text" title="' + esc(s.text) + '">' + esc(s.text) + '</div>' +
+          '<div class="scene-prompt" title="' + esc(s.prompt) + '">' + esc(s.prompt) + '</div>' +
+        '</div>' +
+      '</div></div>';
+}
+
 let storyTimer = null;
-let storyState = {};   // id -> "idx:hasImage" signature to skip needless re-renders
+let storyOpenId = null;
 function showStoryboard(id) {
+  storyOpenId = id;
   document.getElementById('storyId').textContent = '#' + id;
   const grid = document.getElementById('storyGrid');
   const empty = document.getElementById('storyEmpty');
   grid.innerHTML = '<div class="text-muted small p-2">Đang tải…</div>';
   empty.classList.add('d-none');
-  storyState[id] = '';
-  const modalEl = document.getElementById('storyModal');
-  bootstrap.Modal.getOrCreateInstance(modalEl).show();
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('storyModal')).show();
 
-  function render(scenes) {
+  // Idempotent + INCREMENTAL: only swap a scene's skeleton → image when it becomes
+  // ready (no full innerHTML rebuild → no flicker, no scroll jump). Runs every poll.
+  function paint(scenes) {
     document.getElementById('storyCount').textContent =
       scenes.length ? (scenes.filter(s => s.image).length + '/' + scenes.length + ' ảnh') : '';
     if (!scenes.length) { grid.innerHTML = ''; empty.classList.remove('d-none'); return; }
     empty.classList.add('d-none');
-    grid.innerHTML = scenes.map(function (s) {
-      const thumb = s.image
-        ? '<img loading="lazy" src="' + imgUrl(id, s.i - 1) +
-          '" alt="Cảnh ' + s.i + '" onclick="lightbox(this,' + id + ',' + s.i + ')">'
-        : '<div class="skeleton"></div><span class="scene-wait position-absolute">' +
-          '<i class="bi bi-hourglass-split"></i><br>đang tạo…</span>';
-      return '<div class="col-6 col-md-4 col-lg-3">' +
-          '<div class="scene-card">' +
-            '<div class="scene-thumb">' +
-              '<span class="scene-num">Cảnh ' + s.i + '</span>' + thumb +
-            '</div>' +
-            '<div class="scene-body">' +
-              '<div class="scene-text" title="' + esc(s.text) + '">' + esc(s.text) + '</div>' +
-              '<div class="scene-prompt" title="' + esc(s.prompt) + '">' + esc(s.prompt) + '</div>' +
-            '</div>' +
-          '</div></div>';
-    }).join('');
+    if (grid.querySelectorAll('[data-scene]').length !== scenes.length) {
+      grid.innerHTML = scenes.map(s => storyCell(id, s)).join('');   // first / structure change
+      return;
+    }
+    scenes.forEach(function (s) {
+      const thumb = grid.querySelector('[data-scene="' + s.i + '"] .scene-thumb');
+      if (thumb && s.image && !thumb.querySelector('img')) thumb.innerHTML = storyThumb(id, s);
+    });
   }
   function load() {
-    fetch(scenesUrl(id)).then(r => r.json()).then(d => {
-      const scenes = d.scenes || [];
-      const sig = scenes.map(s => s.image ? '1' : '0').join('');
-      if (sig !== storyState[id]) { storyState[id] = sig; render(scenes); }
-      // Stop polling once every scene has an image (or there are none).
-      if (scenes.length && scenes.every(s => s.image) && storyTimer) {
-        clearInterval(storyTimer); storyTimer = null;
-      }
-    }).catch(() => {});
+    // Cache-bust + no-store: the poll MUST hit the server each time (browser /
+    // Cloudflare could otherwise serve a stale scenes.json → images never appear).
+    fetch(scenesUrl(id) + '?_=' + Date.now(), { cache: 'no-store' })
+      .then(r => r.json())
+      .then(d => {
+        if (storyOpenId !== id) return;            // modal was closed / switched
+        const scenes = d.scenes || [];
+        paint(scenes);
+        if (scenes.length && scenes.every(s => s.image) && storyTimer) {
+          clearInterval(storyTimer); storyTimer = null;   // all done → stop polling
+        }
+      }).catch(() => {});
   }
   load();
   if (storyTimer) clearInterval(storyTimer);
-  storyTimer = setInterval(load, 2500);
-  modalEl.addEventListener('hidden.bs.modal',
-    () => { if (storyTimer) { clearInterval(storyTimer); storyTimer = null; } },
-    { once: true });
+  storyTimer = setInterval(load, 2000);
+  document.getElementById('storyModal').addEventListener('hidden.bs.modal', function () {
+    if (storyTimer) { clearInterval(storyTimer); storyTimer = null; }
+    storyOpenId = null;
+  }, { once: true });
 }
 window.showStoryboard = showStoryboard;
 
