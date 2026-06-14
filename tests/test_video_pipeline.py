@@ -52,6 +52,25 @@ def t1_prompts():
     check("t1: anchor derived", isinstance(anchor, str))
 
 
+def t1b_clean_screenplay():
+    print("t1b: screenplay cleaning (strip stage directions / labels / headers)")
+    from services.video_pipeline import clean_screenplay
+    script = ("*TÊN PHIM*\n\n*[MỞ ĐẦU – 0:00-0:10]*\n\n(Cảnh màn hình tối)\n\n"
+              "Narrator:\n\n\"Đây là lời thoại một.\nDòng hai của lời thoại.\"\n\n"
+              "---\n\nCaster:\n\n\"Lời thoại hai!\"\n\n*ON-SCREEN TEXT*")
+    out = clean_screenplay(script)
+    check("t1b: keeps narration", "Đây là lời thoại một." in out)
+    check("t1b: drops bracket header", "MỞ ĐẦU" not in out)
+    check("t1b: drops stage direction", "màn hình tối" not in out)
+    check("t1b: drops speaker label", "Narrator" not in out and "Caster" not in out)
+    check("t1b: drops bold title/on-screen", "TÊN PHIM" not in out and "ON-SCREEN" not in out)
+    check("t1b: strips surrounding quotes", '"Lời thoại hai' not in out
+          and "Lời thoại hai!" in out)
+    # Plain prose is left intact (nothing matches the screenplay rules).
+    prose = "Vũ trụ bao la. Có hàng tỉ ngôi sao ngoài kia."
+    check("t1b: prose unchanged", clean_screenplay(prose) == prose)
+
+
 def t2_render_filters():
     print("t2: ffmpeg filter graphs")
     kb = vrd._ken_burns_filter(0, 90, 1920, 1080, 0.12, 30)
@@ -150,7 +169,7 @@ def t5_missing_image_fallback():
 
 
 if __name__ == "__main__":
-    for fn in (t1_prompts, t2_render_filters, t3_subtitles,
+    for fn in (t1_prompts, t1b_clean_screenplay, t2_render_filters, t3_subtitles,
                t4_render_roundtrip, t5_missing_image_fallback):
         fn()
     print()

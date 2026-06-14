@@ -51,6 +51,49 @@ def _job_log(job_dir, text):
         pass
 
 
+_HR_RE = re.compile(r"^[-=_*~]{3,}$")                  # --- / *** rule lines
+_BRACKET_HEADER_RE = re.compile(r"^\[.*\]$")           # [PHẦN 1 – 0:10-0:30]
+# A short label ending with ":" (Narrator:, Caster:, Khán giả hô vang:). \w under
+# Python str regex already includes Vietnamese letters.
+_SPEAKER_RE = re.compile(r"^[\w][\w .]{0,28}:$", re.UNICODE)
+_INLINE_PARENS = re.compile(r"\([^)]*\)")
+_INLINE_SPEAKER = re.compile(r'^[\w][\w .]{0,24}:\s+(?=["“\w])', re.UNICODE)
+
+
+def clean_screenplay(text):
+    """Strip non-spoken screenplay scaffolding so only the narration/dialogue is
+    read aloud + split into scenes. Removes: section headers ([MỞ ĐẦU – 0:00],
+    bold-wrapped *titles*/*on-screen text*), horizontal rules, stage directions in
+    (parentheses), speaker labels (Narrator:/Caster:…), markdown *_` emphasis, and
+    surrounding quotes. Safe on plain prose (nothing matches → unchanged)."""
+    out = []
+    for raw in (text or "").replace("\r\n", "\n").split("\n"):
+        line = raw.strip()
+        if not line:
+            out.append("")                                # keep paragraph breaks
+            continue
+        # A whole line wrapped in *bold* = title / header / on-screen text → not spoken.
+        bold_line = len(line) > 2 and line[0] == "*" and line[-1] == "*"
+        s = re.sub(r"[*_`]+", "", line).strip()           # drop markdown emphasis
+        if not s or _HR_RE.match(s) or _BRACKET_HEADER_RE.match(s) or bold_line:
+            continue
+        # Full stage-direction line, or inline parentheticals, in (parentheses).
+        if s.startswith("("):
+            s = _INLINE_PARENS.sub("", s).strip()
+            if not s:
+                continue
+        else:
+            s = _INLINE_PARENS.sub("", s).strip()
+        if not s or _SPEAKER_RE.match(s):                 # bare "Narrator:" label
+            continue
+        s = _INLINE_SPEAKER.sub("", s)                    # inline "Narrator: ..." prefix
+        s = s.strip().strip('"“”').strip()
+        if s:
+            out.append(s)
+    cleaned = "\n".join(out)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
 def _ascii_slug(name, fallback):
     """An ASCII-only, filesystem-safe slug (strips Vietnamese diacritics). The
     output MP4/SRT names must be ASCII: a YouTube-title job name carries accents,
@@ -158,7 +201,11 @@ def _run_job(job_id, script, params):
     log = lambda m: _job_log(job_dir, m)  # noqa: E731
     try:
         _set_job(job_id, status="running", stage="Đang chia kịch bản…", progress=2)
-        chunks = voice_pipeline.parse_script(script)
+        cleaned = clean_screenplay(script)
+        if cleaned and cleaned != script.strip():
+            log("Đã lọc kịch bản (bỏ tiêu đề mục / chỉ dẫn cảnh / nhãn người nói / "
+                "timestamp) — chỉ giữ lời thoại để đọc.")
+        chunks = voice_pipeline.parse_script(cleaned or script)
         if not chunks:
             raise RuntimeError("Không tách được nội dung nào để dựng cảnh.")
         n = len(chunks)

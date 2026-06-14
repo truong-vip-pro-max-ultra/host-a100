@@ -118,6 +118,16 @@ lặp → đổ vào ô kịch bản. Không cài thì nút bị mờ, tự nh�
 
 ---
 
+## Kịch bản dạng phim (tự lọc)
+
+Nếu dán kịch bản kiểu phim/storyboard, `video_pipeline.clean_screenplay` tự **lọc
+sạch trước khi chia cảnh** — chỉ giữ lời narrator/thoại để đọc + dựng cảnh. Bỏ:
+tiêu đề mục `[MỞ ĐẦU – 0:00-0:10]`, dòng tiêu đề/chữ-trên-màn-hình bọc `*…*`,
+đường kẻ `---`, chỉ dẫn cảnh trong `(ngoặc)`, nhãn người nói (`Narrator:`,
+`Caster:`, `Khán giả hô vang:`…), dấu nhấn `*_\``, và dấu nháy bao quanh. An toàn
+với văn xuôi thường (không khớp luật nào → giữ nguyên). Job log ghi "Đã lọc kịch
+bản…" khi có cắt.
+
 ## Phong cách ảnh
 
 Dropdown "Phong cách ảnh" có đủ nhóm: **Ảnh/điện ảnh** (cinematic, realistic,
