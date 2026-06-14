@@ -998,6 +998,29 @@ def voice_job_delete(job_id):
     return redirect(url_for("tool_clone_voice"))
 
 
+@app.route("/tools/voice/jobs/bulk-delete", methods=["POST"])
+def voice_jobs_bulk_delete():
+    # "all" wipes every job; otherwise delete the checked ids. The page posts via
+    # fetch and refreshes its own list, so return JSON (redirect = no-JS fallback).
+    wants_json = (request.headers.get("X-Requested-With") == "fetch"
+                  or "application/json" in request.headers.get("Accept", ""))
+    if request.form.get("all") == "1":
+        ids = [j["id"] for j in voice_pipeline.list_jobs()]
+    else:
+        ids = []
+        for raw in request.form.getlist("ids"):
+            try:
+                ids.append(int(raw))
+            except (TypeError, ValueError):
+                continue
+    deleted = sum(1 for jid in ids if voice_pipeline.delete_job(jid))
+    if wants_json:
+        return jsonify({"ok": True, "deleted": deleted})
+    flash(f"Đã xoá {deleted} tác vụ." if deleted else "Không có tác vụ nào được xoá.",
+          "success" if deleted else "warning")
+    return redirect(url_for("tool_clone_voice"))
+
+
 # --------------------------------------------------------------------------- #
 # API farm — manage long-running LLM servers and the keys that gate the public
 # /v1/* proxy. These management pages stay behind the session login (owner UI);

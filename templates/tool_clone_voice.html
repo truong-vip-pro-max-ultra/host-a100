@@ -168,16 +168,29 @@
 
     <!-- Jobs -->
     <div class="card"><div class="card-body">
-      <div class="d-flex justify-content-between align-items-center mb-2">
+      <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
         <h5 class="card-title mb-0"><i class="bi bi-music-note-list"></i> Tác vụ giọng đọc</h5>
-        <span class="small text-muted">tự cập nhật</span>
+        <div class="d-flex align-items-center gap-2">
+          <button type="button" class="btn btn-sm btn-outline-danger" id="delSelBtn"
+                  onclick="bulkDelete(false)" disabled>
+            <i class="bi bi-trash"></i> Xoá đã chọn (<span id="selCount">0</span>)</button>
+          <button type="button" class="btn btn-sm btn-outline-danger" id="delAllBtn"
+                  onclick="bulkDelete(true)">
+            <i class="bi bi-trash3"></i> Xoá tất cả</button>
+        </div>
       </div>
       <div class="table-responsive">
-      <table class="table table-sm align-middle mb-0" style="min-width:560px">
-        <thead><tr><th>#</th><th>Tên</th><th style="min-width:150px">Tiến trình</th><th>Trạng thái</th><th></th></tr></thead>
+      <table class="table table-sm align-middle mb-0" style="min-width:600px">
+        <thead><tr>
+          <th style="width:1%"><input type="checkbox" class="form-check-input" id="selAll"
+                                      onclick="toggleAll(this)" title="Chọn tất cả"></th>
+          <th>#</th><th>Tên</th><th style="min-width:150px">Tiến trình</th>
+          <th>Trạng thái</th><th></th></tr></thead>
         <tbody id="jobBody">
         {% for j in jobs %}
           <tr id="vjob-{{ j.id }}">
+            <td><input type="checkbox" class="form-check-input job-cb" value="{{ j.id }}"
+                       onclick="updateSel()"></td>
             <td>{{ j.id }}</td>
             <td class="small">{{ j.name }}</td>
             <td>
@@ -206,7 +219,7 @@
             </td>
           </tr>
         {% else %}
-          <tr id="noJob"><td colspan="5" class="text-muted">Chưa có tác vụ nào.</td></tr>
+          <tr id="noJob"><td colspan="6" class="text-muted">Chưa có tác vụ nào.</td></tr>
         {% endfor %}
         </tbody>
       </table>
@@ -429,6 +442,7 @@ function makeJobRow(id, name) {
   const tr = document.createElement('tr');
   tr.id = 'vjob-' + id;
   tr.innerHTML =
+    '<td><input type="checkbox" class="form-check-input job-cb" value="' + id + '" onclick="updateSel()"></td>' +
     '<td>' + id + '</td>' +
     '<td class="small">' + (name || '') + '</td>' +
     '<td><div class="progress" style="height:6px">' +
@@ -446,7 +460,50 @@ function makeJobRow(id, name) {
         'data-confirm="Xoá tác vụ #' + id + '?"><button class="btn btn-sm btn-outline-danger" title="Xoá">×</button></form>' +
     '</td>';
   document.getElementById('jobBody').prepend(tr);
+  updateSel();
 }
+
+// ---- multi-select + bulk delete -----------------------------------------
+function selectedIds() {
+  return Array.from(document.querySelectorAll('.job-cb:checked')).map(c => c.value);
+}
+function updateSel() {
+  const n = selectedIds().length;
+  document.getElementById('selCount').textContent = n;
+  document.getElementById('delSelBtn').disabled = n === 0;
+  const all = document.querySelectorAll('.job-cb');
+  const selAll = document.getElementById('selAll');
+  if (selAll) selAll.checked = all.length > 0 && n === all.length;
+}
+function toggleAll(box) {
+  document.querySelectorAll('.job-cb').forEach(c => { c.checked = box.checked; });
+  updateSel();
+}
+function bulkDelete(all) {
+  const ids = selectedIds();
+  if (!all && ids.length === 0) return;
+  const msg = all ? 'Xoá TẤT CẢ tác vụ giọng đọc?' : ('Xoá ' + ids.length + ' tác vụ đã chọn?');
+  if (!confirm(msg)) return;
+  const body = new FormData();
+  if (all) body.append('all', '1');
+  else ids.forEach(id => body.append('ids', id));
+  fetch('{{ url_for("voice_jobs_bulk_delete") }}', {
+    method: 'POST', headers: { 'X-Requested-With': 'fetch' }, body,
+  })
+    .then(r => r.json())
+    .then(d => {
+      const removeIds = all ? Array.from(document.querySelectorAll('.job-cb')).map(c => c.value) : ids;
+      removeIds.forEach(id => { const row = document.getElementById('vjob-' + id); if (row) row.remove(); });
+      if (!document.querySelector('#jobBody tr')) {
+        document.getElementById('jobBody').innerHTML =
+          '<tr id="noJob"><td colspan="6" class="text-muted">Chưa có tác vụ nào.</td></tr>';
+      }
+      updateSel();
+      toast('Đã xoá ' + (d.deleted || 0) + ' tác vụ.', 'success');
+    })
+    .catch(() => toast('Lỗi khi xoá.', 'danger'));
+}
+window.toggleAll = toggleAll; window.updateSel = updateSel; window.bulkDelete = bulkDelete;
 
 function pollJobs() {
   fetch('{{ url_for("voice_jobs_json") }}')
