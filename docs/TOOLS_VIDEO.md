@@ -271,6 +271,7 @@ DETACHED restart app**. Chỉ khi đổi `--image-model`/model/quant/env của G
 | `UnicodeEncodeError: 'latin-1' codec` khi tải model | Login node chạy locale C → `print()` chữ có dấu crash *trước khi* tải. Thêm `PYTHONIOENCODING=utf-8` và dùng thông báo không dấu (xem mục Cài đặt 2). |
 | Lệnh tải "không hiện gì" | Đã dán nguyên placeholder `<env-omnivoice>` (dấu `<`/`>` bị shell hiểu là redirect) hoặc thêm `!` ở đầu. Dùng khối tự-dò-env ở mục Cài đặt 2. |
 | Nhân vật bị nhân đôi (twin) / lỗi tay / nhoè | Triệu chứng của SDXL-Turbo (bỏ qua negative + gen 1024×576). Đảm bảo `image_model` là **RealVisXL Lightning** (xem `/health`), gen ở 1344×768. Cảnh lỗi lẻ → bấm **Tạo lại** (seed mới). |
+| `Input type (c10::Half) and bias type (float) should be the same` → mọi ảnh ra nền phẳng | Pipe lẫn dtype: `variant="fp16"` để lại một thành phần (hay VAE) ở fp32. `ImageEngine.load()` đã **ép cả pipe về fp16** sau khi load (`pipe.to(dtype)`). Cần `git pull` + **tạo lại server**. |
 | Cảnh đầu rất chậm | Bình thường — GPU đang lazy-load SDXL vào VRAM. Các cảnh sau nhanh. |
 | Prompt ra tiếng Anh chung chung | Không có LLM API farm → rule-based. Bật một API-farm server để có prompt cụ thể hơn. |
 | OOM khi vừa chạy ảnh vừa chạy giọng | SDXL + OmniVoice cùng card. Giảm batch ảnh/giọng, hoặc dùng card ≥40GB. |

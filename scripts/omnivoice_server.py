@@ -573,6 +573,22 @@ class ImageEngine:
                     pipe = AutoPipelineForText2Image.from_pretrained(
                         self.model_id, torch_dtype=dtype)
             pipe = pipe.to(self._device)
+            # Force a UNIFORM dtype across every submodule. With variant="fp16", a
+            # merge like RealVisXL_V5.0_Lightning often ships ONE component (commonly
+            # the VAE) without an fp16 file, so diffusers loads it in fp32 → a mixed-
+            # precision pipe that crashes at the first conv with "Input type
+            # (c10::Half) and bias type (float) should be the same". Re-casting the
+            # whole pipe to `dtype` makes precision consistent.
+            try:
+                pipe.to(dtype)
+            except Exception:
+                for _m in ("unet", "vae", "text_encoder", "text_encoder_2"):
+                    comp = getattr(pipe, _m, None)
+                    if comp is not None:
+                        try:
+                            comp.to(dtype)
+                        except Exception:
+                            pass
             # Lightning/LCM merges need a TRAILING-timestep scheduler to look right at
             # few steps (Euler-trailing = the SDXL-Lightning recommended setup; no
             # torchsde dependency unlike DPM++ SDE).
