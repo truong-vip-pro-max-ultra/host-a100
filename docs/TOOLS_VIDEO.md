@@ -247,12 +247,22 @@ scenes.json). Vì manifest lưu **basename**, ảnh tải lên (cùng tên file)
 
 | Env / field | Mặc định | Ý nghĩa | Đổi cần gì |
 |---|---|---|---|
-| `HOSTA100_IMAGE_MODEL` | `stabilityai/sdxl-turbo` | Model text-to-image GPU lazy-load | recreate server |
+| `HOSTA100_IMAGE_MODEL` | `SG161222/RealVisXL_V5.0_Lightning` | Model text-to-image GPU lazy-load | recreate server |
 | `HOSTA100_IMAGE_MAX_BATCH` | `4` | Mặc định cho field "Batch ảnh" | restart app |
 | (UI) Batch ảnh | = IMAGE_MAX_BATCH | Số ảnh gen **song song** trên GPU mỗi lần | không |
 | (UI) Batch giọng | = OMNI_MAX_BATCH | Số đoạn giọng nạp GPU mỗi lần | không |
-| (UI) Số bước ảnh | `4` | Steps SDXL (Turbo: 1–4; style vẽ tăng nhẹ) | không |
+| (UI) **Chất lượng ảnh** | `Nhanh` (cfg 1.0) | CFG image model: 1.0 = CFG **off** (bỏ negative, ~2× nhanh); 1.5 = CFG **on** (negative bật, ~2× chậm) | không |
+| (UI) Số bước ảnh | `6` | Steps (Lightning 5–8; Turbo 1–4; style vẽ tăng nhẹ) | không |
 | (UI) Số bước giọng | `16` | num_step OmniVoice | không |
+
+> **Tốc độ gen ảnh — vì sao Lightning chậm hơn Turbo.** 3 hệ số NHÂN nhau:
+> độ phân giải 1024×576→**1344×768 (~1.75×)**, steps 4→**6 (1.5×)**, và **CFG**: bật
+> negative = mỗi bước chạy UNet **2 lần (2×)** ⇒ tổng ~5× chậm/ảnh. Turbo tắt CFG +
+> gen bẹt nên "vù vù" nhưng mới bị twin. Muốn nhanh lại: chọn **Chất lượng ảnh =
+> Nhanh** (cfg 1.0, tắt CFG) → ~2× nhanh, **vẫn hết twin** nhờ bucket 1344×768 +
+> model (chỉ mất khả năng dùng negative). `image_cfg` chảy route→start_job→params→
+> item `cfg`; server `ImageEngine._prep` (lightning) đọc `cfg` → `guidance_scale`,
+> `guidance<=1` ⇒ diffusers tắt CFG. **Thuần login-side** (server đã nhận `cfg`).
 
 Login-side (pipeline/render/UI/routes/prompt) đổi gì cũng chỉ cần **git pull +
 DETACHED restart app**. Phải **recreate server** khi: đổi `--image-model`/model/

@@ -189,11 +189,23 @@
         </div>
         <div class="row g-2">
           <div class="col-6 mb-2">
+            <label class="form-label">Chất lượng ảnh</label>
+            <select class="form-select" name="image_cfg">
+              <option value="1.0" selected>Nhanh (~2×) — bỏ negative</option>
+              <option value="1.5">Đẹp — bật negative chống lỗi</option>
+            </select>
+            <div class="form-text"><b>Nhanh</b> tắt CFG → gen nhanh gần gấp đôi (vẫn
+              hết twin nhờ độ phân giải + model). <b>Đẹp</b> bật negative (chống nhân
+              đôi/lỗi tay) nhưng mỗi bước chạy UNet 2 lần nên chậm ~2×.</div>
+          </div>
+          <div class="col-6 mb-2">
             <label class="form-label">Số bước ảnh</label>
             <input type="number" class="form-control" name="image_steps" min="1" max="50"
                    value="6">
             <div class="form-text">RealVisXL Lightning: 5–8 là đẹp. (Turbo cũ: 1–4.)</div>
           </div>
+        </div>
+        <div class="row g-2">
           <div class="col-6 mb-2">
             <label class="form-label">Số bước giọng</label>
             <select class="form-select" name="num_step">

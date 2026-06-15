@@ -1091,6 +1091,7 @@ def video_job_submit():
             fps=f.get("fps", "30"),
             ken_burns=f.get("ken_burns") is not None,
             image_steps=f.get("image_steps", "6"),
+            image_cfg=f.get("image_cfg", "1.0"),
             image_batch=f.get("image_batch", ""),
             voice_batch=f.get("voice_batch", ""),
             voice_speed=f.get("voice_speed", "1.0"),

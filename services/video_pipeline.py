@@ -172,7 +172,8 @@ def _set_job(job_id, **fields):
 def start_job(name, script, profile_name="", language="vi", voice_seed=0,
               num_step=16, style="cinematic", use_llm=True, width=1920,
               height=1080, fps=30, ken_burns=True, image_steps=6,
-              image_batch=None, voice_batch=None, music_path="", voice_speed=1.0):
+              image_batch=None, voice_batch=None, music_path="", voice_speed=1.0,
+              image_cfg=1.0):
     """Create a video_jobs row + kick off the render thread. Validates that a GPU
     server is ready, ffmpeg exists, and the script is non-empty."""
     script = (script or "").strip()
@@ -198,6 +199,10 @@ def start_job(name, script, profile_name="", language="vi", voice_seed=0,
         ib = max(1, int(image_batch)) if image_batch else config.IMAGE_MAX_BATCH
         vb = max(1, int(voice_batch)) if voice_batch else None
         voice_speed = float(voice_speed)
+        # CFG for the image model. 1.0 = no classifier-free guidance (fast, the
+        # negative prompt is ignored — fine, the resolution bucket + model handle
+        # twins); >1 = CFG on (negative bites, ~2× slower). Clamp to a sane range.
+        image_cfg = max(1.0, min(float(image_cfg), 8.0))
     except (TypeError, ValueError):
         raise ValueError("Tham số số (seed/steps/kích thước/batch/tốc độ) không hợp lệ.")
     if not (0.5 <= voice_speed <= 2.0):
@@ -210,7 +215,7 @@ def start_job(name, script, profile_name="", language="vi", voice_seed=0,
         "width": width, "height": height, "fps": fps,
         "ken_burns": bool(ken_burns), "image_steps": image_steps,
         "image_batch": ib, "voice_batch": vb, "music_path": music_path or "",
-        "voice_speed": voice_speed,
+        "voice_speed": voice_speed, "image_cfg": image_cfg,
     }
     name = (name or "video").strip()[:128]
     job_id = db.execute(
@@ -416,7 +421,8 @@ def regenerate_scene_image(job_id, idx, prompt=None, negative=None, seed=None):
     scene = scenes[idx]
     params = _job_params(job)
     w = int(params.get("width", 1920)); h = int(params.get("height", 1080))
-    steps = int(params.get("image_steps", 4))
+    steps = int(params.get("image_steps", 6))
+    cfg = float(params.get("image_cfg", 1.0) or 1.0)
     prompt = (prompt or "").strip() or scene.get("prompt", "")
     negative = (negative or "").strip() or scene.get("negative") or video_prompts.DEFAULT_NEGATIVE
     # No explicit seed → reroll with a fresh random one (re-using the stored seed +
@@ -434,7 +440,7 @@ def regenerate_scene_image(job_id, idx, prompt=None, negative=None, seed=None):
 
     def _work():
         item = {"prompt": prompt, "negative": negative, "out_path": out,
-                "seed": seed, "width": w, "height": h, "steps": steps}
+                "seed": seed, "width": w, "height": h, "steps": steps, "cfg": cfg}
         try:
             res = _generate_images(host, port, [item])
             r = (res or [{}])[0] or {}
@@ -557,7 +563,8 @@ def _run_job(job_id, script, params):
             items = [{"prompt": prompts[i]["prompt"],
                       "negative": prompts[i]["negative"],
                       "out_path": img_paths[i], "seed": prompts[i]["seed"],
-                      "width": w, "height": h, "steps": steps} for i in grp]
+                      "width": w, "height": h, "steps": steps,
+                      "cfg": params.get("image_cfg", 1.0)} for i in grp]
             t0 = time.time()
             results = _generate_images(host, port, items)
             ok = sum(1 for r in results if (r or {}).get("ok"))
