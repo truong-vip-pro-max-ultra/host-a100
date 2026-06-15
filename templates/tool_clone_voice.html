@@ -149,9 +149,15 @@
             server</b>. Tự lùi về đọc từng đoạn nếu model không batch được.</div>
         </div>
 
-        <button class="btn btn-primary mt-1" id="jobSubmitBtn">
-          <i class="bi bi-play-fill"></i> Tạo MP3</button>
-        <div class="form-text">Cần một server giọng nói đang <b>sẵn sàng</b> bên dưới.</div>
+        <div class="d-flex gap-2 mt-1">
+          <button class="btn btn-primary" id="jobSubmitBtn">
+            <i class="bi bi-play-fill"></i> Tạo MP3</button>
+          <button type="button" class="btn btn-outline-secondary" id="resetCfgBtn"
+                  title="Đưa mọi tuỳ chọn về mặc định">
+            <i class="bi bi-arrow-counterclockwise"></i> Khôi phục cài đặt</button>
+        </div>
+        <div class="form-text">Cần một server giọng nói đang <b>sẵn sàng</b> bên dưới.
+          Các tuỳ chọn được <b>tự lưu</b> cho lần sau.</div>
       </form>
     </div></div>
 
@@ -433,6 +439,26 @@ if (spd) {
   const lab = document.getElementById('spdVal');
   const sync = () => lab.textContent = parseFloat(spd.value).toFixed(2) + '×';
   spd.addEventListener('input', sync); sync();
+}
+
+// Persist the config knobs across reloads (NOT the text body or output name).
+// If any voice-design field was restored non-empty, expand its collapse so the
+// user sees the remembered choices.
+if (window.FormStore) {
+  const expandVD = () => {
+    const vd = document.getElementById('voiceDesign');
+    const set = ['vd_gender', 'vd_age', 'vd_pitch'].some(
+      n => (document.querySelector('#jobForm [name="' + n + '"]') || {}).value)
+      || (document.getElementById('vdWhisper') || {}).checked;
+    if (vd && set && window.bootstrap) bootstrap.Collapse.getOrCreateInstance(vd).show();
+  };
+  FormStore.bind('#jobForm', 'hosta100:voiceForm', { skip: ['name', 'text'], onRestore: expandVD });
+  const resetBtn = document.getElementById('resetCfgBtn');
+  if (resetBtn) resetBtn.addEventListener('click', function () {
+    const ask = window.confirmModal ? confirmModal('Khôi phục mọi tuỳ chọn về mặc định?')
+      : Promise.resolve(window.confirm('Khôi phục mọi tuỳ chọn về mặc định?'));
+    ask.then(ok => { if (ok) { FormStore.reset('#jobForm'); toast('Đã khôi phục cài đặt mặc định.', 'success'); } });
+  });
 }
 
 const ST = {

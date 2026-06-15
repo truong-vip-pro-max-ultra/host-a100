@@ -226,10 +226,15 @@
           <label class="form-check-label" for="kenBurns">Hiệu ứng slow-zoom (Ken Burns)</label>
         </div>
 
-        <button class="btn btn-primary mt-1" id="jobSubmitBtn">
-          <i class="bi bi-camera-reels"></i> Dựng video</button>
+        <div class="d-flex gap-2 mt-1">
+          <button class="btn btn-primary" id="jobSubmitBtn">
+            <i class="bi bi-camera-reels"></i> Dựng video</button>
+          <button type="button" class="btn btn-outline-secondary" id="resetCfgBtn"
+                  title="Đưa mọi tuỳ chọn về mặc định">
+            <i class="bi bi-arrow-counterclockwise"></i> Khôi phục cài đặt</button>
+        </div>
         <div class="form-text">Cần một server GPU đang <b>sẵn sàng</b> (tab Clone giọng nói).
-          Server đó lo cả ảnh lẫn giọng.</div>
+          Server đó lo cả ảnh lẫn giọng. Các tuỳ chọn được <b>tự lưu</b> cho lần sau.</div>
       </form>
     </div></div>
 
@@ -428,6 +433,18 @@ if (vspd) {
   const lbl = document.getElementById('vspdVal');
   const show = () => { lbl.textContent = parseFloat(vspd.value).toFixed(2) + '×'; };
   vspd.addEventListener('input', show); show();
+}
+
+// Persist the config knobs across reloads (NOT the script body or output name).
+// Bound after the resolution/slider listeners so restoring fires them too.
+if (window.FormStore) {
+  FormStore.bind('#jobForm', 'hosta100:videoForm', { skip: ['name', 'script'] });
+  const resetBtn = document.getElementById('resetCfgBtn');
+  if (resetBtn) resetBtn.addEventListener('click', function () {
+    const ask = window.confirmModal ? confirmModal('Khôi phục mọi tuỳ chọn về mặc định?')
+      : Promise.resolve(window.confirm('Khôi phục mọi tuỳ chọn về mặc định?'));
+    ask.then(ok => { if (ok) { FormStore.reset('#jobForm'); toast('Đã khôi phục cài đặt mặc định.', 'success'); } });
+  });
 }
 
 function makeJobRow(id, name) {

@@ -421,6 +421,75 @@
   }
   window.confirmModal = confirmModal; window.toast = toast;
 
+  // ---- FormStore: persist a form's settings in localStorage -------------
+  // Remembers the chosen config fields of a form across reloads and exposes a
+  // "restore defaults" reset. Excludes file inputs, textareas, hidden/submit
+  // buttons and any name in opts.skip (or a [data-no-store] field) — so the
+  // big script/text body and per-job name aren't remembered, only the knobs.
+  var FormStore = (function(){
+    function eligible(form, skip){
+      return Array.prototype.filter.call(
+        form.querySelectorAll('select, input'),
+        function(el){
+          var t = (el.type || '').toLowerCase();
+          if (['file','submit','button','reset','hidden','password'].indexOf(t) !== -1) return false;
+          if (!el.name || el.disabled) return false;
+          if (el.dataset.noStore !== undefined) return false;
+          if (skip.indexOf(el.name) !== -1) return false;
+          return true;
+        });
+    }
+    function keyOf(el){ return el.name + (el.type === 'radio' ? (':' + el.value) : ''); }
+    function getVal(el){ return (el.type === 'checkbox' || el.type === 'radio') ? !!el.checked : el.value; }
+    function setVal(el, v){
+      if (el.type === 'checkbox' || el.type === 'radio') el.checked = !!v;
+      else el.value = v;
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    function snapshot(form, skip){
+      var o = {};
+      eligible(form, skip).forEach(function(el){ o[keyOf(el)] = getVal(el); });
+      return o;
+    }
+    function apply(form, skip, data){
+      if (!data) return;
+      eligible(form, skip).forEach(function(el){
+        var k = keyOf(el);
+        if (Object.prototype.hasOwnProperty.call(data, k)) setVal(el, data[k]);
+      });
+    }
+    function bind(formOrSel, key, opts){
+      var form = typeof formOrSel === 'string' ? document.querySelector(formOrSel) : formOrSel;
+      if (!form) return null;
+      opts = opts || {};
+      var skip = opts.skip || [];
+      var defaults = snapshot(form, skip);          // page-rendered defaults
+      var saved = null;
+      try { saved = JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) {}
+      if (saved) apply(form, skip, saved);
+      function save(){
+        try { localStorage.setItem(key, JSON.stringify(snapshot(form, skip))); } catch (e) {}
+      }
+      form.addEventListener('change', save);
+      form.addEventListener('input', save);
+      var api = { save: save, restored: !!saved, reset: function(){
+        apply(form, skip, defaults);
+        try { localStorage.removeItem(key); } catch (e) {}
+        if (typeof opts.onReset === 'function') opts.onReset();
+      } };
+      form.__store = api;
+      if (typeof opts.onRestore === 'function' && saved) opts.onRestore();
+      return api;
+    }
+    function reset(formOrSel){
+      var form = typeof formOrSel === 'string' ? document.querySelector(formOrSel) : formOrSel;
+      if (form && form.__store) form.__store.reset();
+    }
+    return { bind: bind, reset: reset };
+  })();
+  window.FormStore = FormStore;
+
   // ---- helpers ----------------------------------------------------------
   function spin(btn){
     if (!btn || btn.disabled) return;
