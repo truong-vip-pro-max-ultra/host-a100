@@ -98,7 +98,7 @@ VIDEO_OUTPUTS_DIR = os.path.join(DATA_DIR, "video-outputs")
 # VRAM — fits comfortably alongside OmniVoice on the A100-40GB / L40S. Must be
 # present in the shared HF cache (OMNI_HF_HOME) — download on the login node
 # first (compute nodes have no internet). Override with HOSTA100_IMAGE_MODEL.
-IMAGE_MODEL_ID = os.environ.get("HOSTA100_IMAGE_MODEL", "stabilityai/sdxl-turbo")
+IMAGE_MODEL_ID = os.environ.get("HOSTA100_IMAGE_MODEL", "SG161222/RealVisXL_V5.0_Lightning")
 # How many scene images to ask for in ONE /generate_image_batch HTTP request.
 # The server renders them one-at-a-time (a single 1024px SDXL image already
 # saturates the GPU), but grouping cuts per-request HTTP latency and lets the

@@ -71,25 +71,33 @@ không bắt buộc.
 Compute node không có internet, nên phải tải sẵn về `OMNI_HF_HOME`
 (`host-a100-data/hf-cache`) trên login node:
 
+Model ảnh **mặc định = `SG161222/RealVisXL_V5.0_Lightning`** (SDXL realism, ít lỗi
+nhân đôi/tay hơn nhiều SDXL-Turbo). Tải **toàn bộ layout diffusers** (không lọc
+pattern — repo có subfolder unet/vae/text_encoder):
+
 ```bash
 cd <app>            # ~/LeeHoang_/ollama/app/host-a100
 HF_HOME="$PWD/host-a100-data/hf-cache" \
   host-a100-data/envs/<env-omnivoice>/bin/python -c \
   "from huggingface_hub import snapshot_download; \
-   snapshot_download('stabilityai/sdxl-turbo', \
-   allow_patterns=['*.json','*.txt','*fp16*','*.safetensors'])"
+   snapshot_download('SG161222/RealVisXL_V5.0_Lightning')"
 ```
 
-> Nếu model bạn chọn không có biến thể `fp16` riêng, `ImageEngine` tự thử lại không
-> `variant="fp16"`. Đổi model qua env `HOSTA100_IMAGE_MODEL` (vd
-> `stabilityai/stable-diffusion-xl-base-1.0`).
+> `ImageEngine` thử `variant='fp16'` trước, không có thì tự lùi về bản thường.
+> Đổi model qua env `HOSTA100_IMAGE_MODEL`. Engine tự nhận diện loại model:
+> **turbo/sdxs** (1–4 step, CFG 0, **bỏ qua negative**); **lightning/lcm/hyper**
+> (4–8 step, CFG ~1.5, **DÙNG negative**, scheduler Euler-trailing); còn lại = full
+> SDXL (≈24 step, CFG 7, negative). Model SDXL gen ở **bucket tỉ lệ chuẩn**
+> (1344×768 cho 16:9, 768×1344 cho 9:16) thay vì 1024×576 — đây là cách hết lỗi
+> **nhân đôi nhân vật** (twin) trên khung ngang.
 
 ### 3. Recreate server voice
 
 Nhánh `--image-model` được thêm vào `_build_cmd`/batch script → **server voice cũ
 phải được tạo lại** mới có khả năng gen ảnh. Vào tab **Clone giọng nói**: dừng + xoá
 server cũ, tạo server mới (cùng env-omnivoice). `/health` lúc này có
-`image_model` = `stabilityai/sdxl-turbo`.
+`image_model` = `SG161222/RealVisXL_V5.0_Lightning` (hoặc model bạn đặt qua env).
+**Đổi model cũng phải tạo lại server** (model id truyền lúc khởi động).
 
 ### 4. ffmpeg trên login node
 

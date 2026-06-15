@@ -472,8 +472,12 @@ class OmniEngine:
 # voice-only user never pays its VRAM.
 # --------------------------------------------------------------------------- #
 DEFAULT_IMAGE_MODEL = "stabilityai/sdxl-turbo"
-# Distilled models: 1-4 steps, NO classifier-free guidance, negative ignored.
-_TURBO_HINTS = ("turbo", "lcm", "lightning", "lightni", "sdxs")
+# Turbo/SDXS: 1-4 steps, NO classifier-free guidance, negative ignored.
+_TURBO_HINTS = ("turbo", "sdxs")
+# Lightning/LCM/Hyper: few-step BUT keep a small CFG (so the negative prompt still
+# works) + a trailing-timestep Euler scheduler. Far better anatomy than turbo while
+# staying fast — the right home for RealVisXL_V5.0_Lightning, SDXL-Lightning, etc.
+_LIGHTNING_HINTS = ("lightning", "lightni", "lcm", "hyper")
 
 
 class ImageEngine:
@@ -494,6 +498,14 @@ class ImageEngine:
     def _is_turbo(self):
         return any(h in self.model_id.lower() for h in _TURBO_HINTS)
 
+    @property
+    def _is_lightning(self):
+        return any(h in self.model_id.lower() for h in _LIGHTNING_HINTS)
+
+    @property
+    def _is_xl(self):
+        return "xl" in self.model_id.lower()
+
     def _base_res(self):
         mid = self.model_id.lower()
         if "xl" in mid:
@@ -502,10 +514,19 @@ class ImageEngine:
             return 512
         return 768
 
+    # SDXL was trained on these ~1MP aspect buckets; generating OFF-bucket (e.g. the
+    # old 1024×576) is the #1 cause of DUPLICATED/twin subjects and bad anatomy.
+    _SDXL_BUCKETS = ((1024, 1024), (1152, 896), (896, 1152), (1216, 832),
+                     (832, 1216), (1344, 768), (768, 1344), (1536, 640), (640, 1536))
+
     def _target_size(self, w, h):
-        """Scale W×H to the model's native sweet spot (keeps aspect, multiples of
-        8). Bigger than native makes diffusion repeat/duplicate content; the
-        video renderer upscales to 1080p with lanczos anyway."""
+        """Map W×H to the model's native sweet spot (multiples of 8). For full/
+        Lightning SDXL, snap to the closest trained aspect bucket (≈1MP) so the
+        model stops cloning subjects on wide frames; the renderer upscales to 1080p
+        with lanczos anyway. Turbo/non-XL keep the simple longest-side cap."""
+        if self._is_xl and not self._is_turbo:
+            ar = (w / h) if h else 1.0
+            return min(self._SDXL_BUCKETS, key=lambda b: abs((b[0] / b[1]) - ar))
         cap = self._base_res()
         longest = max(w, h)
         if longest <= cap:
@@ -552,6 +573,17 @@ class ImageEngine:
                     pipe = AutoPipelineForText2Image.from_pretrained(
                         self.model_id, torch_dtype=dtype)
             pipe = pipe.to(self._device)
+            # Lightning/LCM merges need a TRAILING-timestep scheduler to look right at
+            # few steps (Euler-trailing = the SDXL-Lightning recommended setup; no
+            # torchsde dependency unlike DPM++ SDE).
+            if self._is_lightning:
+                try:
+                    from diffusers import EulerDiscreteScheduler
+                    pipe.scheduler = EulerDiscreteScheduler.from_config(
+                        pipe.scheduler.config, timestep_spacing="trailing")
+                    print("[image] lightning scheduler: Euler (trailing).", flush=True)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[image] lightning scheduler swap skipped: {exc}", flush=True)
             # Big-VRAM card → keep resident (skip the memory-saving brakes). Only
             # on a tight card pay the speed cost of slicing/tiling/offload.
             if not self._high_vram and self._device == "cuda":
@@ -589,6 +621,12 @@ class ImageEngine:
                                  int(item.get("height", 576) or 576))
         if self._is_turbo:
             steps, guidance, neg = max(1, min(int(item.get("steps", 4) or 4), 4)), 0.0, None
+        elif self._is_lightning:
+            # Few-step but CFG>1 so the negative prompt still bites (anti-duplicate /
+            # anti-bad-hands). RealVisXL_V5.0_Lightning sweet spot ≈ 4-8 steps, CFG ~1.5.
+            steps = max(4, min(int(item.get("steps", 6) or 6), 12))
+            guidance = float(item.get("cfg", 1.5) or 1.5)
+            neg = (item.get("negative") or "") or None
         else:
             steps = max(1, int(item.get("steps", 24) or 24))
             guidance = float(item.get("cfg", 7.0) or 7.0)

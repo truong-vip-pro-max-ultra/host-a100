@@ -138,9 +138,12 @@ def _style_hint(style_preset):
 DEFAULT_NEGATIVE = (
     "lowres, low quality, worst quality, blurry, out of focus, bad anatomy, "
     "bad proportions, bad hands, extra fingers, missing fingers, fused fingers, "
-    "deformed, disfigured, mutated, malformed, ugly, duplicate, cloned, cropped, "
-    "out of frame, text, words, letters, caption, watermark, signature, logo, "
-    "jpeg artifacts, oversaturated, washed out, grainy, poorly drawn"
+    "malformed hands, mutated hands, extra limbs, extra arms, extra legs, "
+    "deformed, disfigured, mutated, malformed, ugly, "
+    "duplicate, cloned, cloned face, twins, two heads, multiple heads, "
+    "extra person, extra people, mirrored, conjoined, "
+    "cropped, out of frame, text, words, letters, caption, watermark, signature, "
+    "logo, jpeg artifacts, oversaturated, washed out, grainy, poorly drawn"
 )
 
 # mood -> (keywords VN+EN, style tokens)

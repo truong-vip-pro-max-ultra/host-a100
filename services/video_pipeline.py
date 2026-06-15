@@ -171,7 +171,7 @@ def _set_job(job_id, **fields):
 # --------------------------------------------------------------------------- #
 def start_job(name, script, profile_name="", language="vi", voice_seed=0,
               num_step=16, style="cinematic", use_llm=True, width=1920,
-              height=1080, fps=30, ken_burns=True, image_steps=4,
+              height=1080, fps=30, ken_burns=True, image_steps=6,
               image_batch=None, voice_batch=None, music_path="", voice_speed=1.0):
     """Create a video_jobs row + kick off the render thread. Validates that a GPU
     server is ready, ffmpeg exists, and the script is non-empty."""
