@@ -255,8 +255,10 @@ scenes.json). Vì manifest lưu **basename**, ảnh tải lên (cùng tên file)
 | (UI) Số bước giọng | `16` | num_step OmniVoice | không |
 
 Login-side (pipeline/render/UI/routes/prompt) đổi gì cũng chỉ cần **git pull +
-DETACHED restart app**. Chỉ khi đổi `--image-model`/model/quant/env của GPU mới cần
-**recreate server**.
+DETACHED restart app**. Phải **recreate server** khi: đổi `--image-model`/model/
+quant/env GPU, **HOẶC sửa code trong `scripts/omnivoice_server.py`** (engine ảnh/
+giọng chạy trên node GPU — tiến trình SLURM đang chạy đã nạp model vào VRAM, `git
+pull` không cập nhật nó; phải Dừng + tạo server mới).
 
 ---
 
@@ -287,5 +289,7 @@ DETACHED restart app**. Chỉ khi đổi `--image-model`/model/quant/env của G
   (chia/prompt rule-based, filter graph Ken Burns + audio, SRT/ASS, render MP4 thật,
   fallback ảnh thiếu).
 - Deploy: sửa trên Mac → commit `main` → push → `git pull` trên server → **DETACHED
-  restart** app (xem quy trình ở README / memory). Nhánh ảnh trong
-  `omnivoice_server.py` là file repo → cần git pull RỒI recreate server voice.
+  restart** app (xem quy trình ở README / memory). **Nếu lần sửa đụng tới
+  `scripts/omnivoice_server.py`** (engine ảnh/giọng) thì sau git pull phải **recreate
+  server voice** — tiến trình GPU đang chạy không tự đọc code mới (đã nạp model vào
+  VRAM). Sửa thuần login-side thì chỉ restart app là đủ.

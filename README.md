@@ -91,6 +91,20 @@ $env:HOSTA100_DATA_DIR = "$PWD\_data"; python app.py
 The GPU panel and CUDA checks degrade gracefully when `nvidia-smi` / PyTorch
 are absent.
 
+### Deploy + when to recreate a GPU server
+
+Deploy = commit to `main` → push → `git pull` on the login node → **DETACHED**
+app restart. The GPU servers (OmniVoice TTS / image gen, API-farm LLM) are
+**separate SLURM processes**, so:
+
+- **Login-side change** (`app.py`, `services/*`, `templates/*`, ffmpeg) → just
+  `git pull` + restart the app.
+- **GPU-side change** — editing `scripts/omnivoice_server.py` (the TTS/image
+  engine), or changing the image model / quant / env → **recreate the server**
+  from the Clone giọng nói tab (stop the old one, start a new one). A running
+  server has already loaded its model into VRAM and will **not** pick up the new
+  code on `git pull`; only a fresh server runs the updated `omnivoice_server.py`.
+
 ## Security model
 
 - Every model/env/job name is validated against a strict whitelist; uploaded

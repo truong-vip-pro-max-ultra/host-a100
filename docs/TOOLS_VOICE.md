@@ -187,9 +187,15 @@ mặc định khoá theo `(seed, instruct)`.
 ## Vận hành / lưu ý
 
 - **Triển khai thay đổi code** = push → `git pull` trên server → **restart
-  DETACHED app** (giống mọi thay đổi khác). `omnivoice_server.py` đi theo git
-  nên `git pull` là đủ; **không cần** recreate server cho thay đổi phía login
-  (pipeline/UI). Recreate server chỉ khi đổi model/env.
+  DETACHED app**. QUY TẮC quan trọng về việc có phải **tạo lại server (recreate)**
+  hay không:
+  - Sửa phía **login** (`app.py`, `services/*`, `templates/*`, ffmpeg) → chỉ cần
+    `git pull` + **restart app**. KHÔNG cần recreate.
+  - Sửa **`scripts/omnivoice_server.py`** (code chạy TRÊN node GPU), HOẶC đổi
+    model / env / quant → **PHẢI recreate server**. Server là một tiến trình
+    SLURM đã nạp sẵn model vào VRAM; `git pull` KHÔNG cập nhật tiến trình đang
+    chạy — phải Dừng server cũ rồi tạo server mới thì nó mới đọc code mới + nạp
+    lại model. (Đây là lý do bản vá engine ảnh chỉ ăn sau khi recreate.)
 - **Auto-resubmit + circuit breaker**: hệt API farm — server chết liên tục
   <60s sau khi ready 3 lần → ngắt, báo `config.ALERT_WEBHOOK` (nếu đặt). Thường
   do thiếu weights trong HF cache hoặc OOM.
@@ -218,9 +224,11 @@ nhiễu — audio TTS vốn sạch; nhiễu mép đoạn đã tự khử. Pipeli
 `denoise=afftdn` nhưng mặc định tắt, không lộ ra UI.)
 
 **Chỗ nào đổi thì cần gì:**
-- Đổi `OMNI_MAX_BATCH` / model / env → **recreate server giọng nói** (nằm trong
-  batch script lúc sbatch).
-- Đổi pipeline/UI/ffmpeg/CPU-mem-default → chỉ cần `git pull` + **restart app**.
+- Đổi `OMNI_MAX_BATCH` / model / env, hoặc sửa **code trong
+  `scripts/omnivoice_server.py`** (engine ảnh/giọng) → **recreate server giọng nói**
+  (tiến trình SLURM đang chạy không tự cập nhật khi git pull).
+- Đổi pipeline/UI/ffmpeg/CPU-mem-default (login-side) → chỉ cần `git pull` +
+  **restart app**.
 
 ## Troubleshooting
 
