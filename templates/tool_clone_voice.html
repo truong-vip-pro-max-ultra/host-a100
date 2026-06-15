@@ -455,8 +455,9 @@ if (window.FormStore) {
   FormStore.bind('#jobForm', 'hosta100:voiceForm', { skip: ['name', 'text'], onRestore: expandVD });
   const resetBtn = document.getElementById('resetCfgBtn');
   if (resetBtn) resetBtn.addEventListener('click', function () {
-    const ask = window.confirmModal ? confirmModal('Khôi phục mọi tuỳ chọn về mặc định?')
-      : Promise.resolve(window.confirm('Khôi phục mọi tuỳ chọn về mặc định?'));
+    const cmsg = 'Khôi phục mọi tuỳ chọn về mặc định?';
+    const copts = { title: 'Khôi phục cài đặt', okText: 'Khôi phục', variant: 'secondary', icon: 'arrow-counterclockwise' };
+    const ask = window.confirmModal ? confirmModal(cmsg, copts) : Promise.resolve(window.confirm(cmsg));
     ask.then(ok => { if (ok) { FormStore.reset('#jobForm'); toast('Đã khôi phục cài đặt mặc định.', 'success'); } });
   });
 }

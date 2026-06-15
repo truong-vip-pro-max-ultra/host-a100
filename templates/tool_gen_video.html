@@ -441,8 +441,9 @@ if (window.FormStore) {
   FormStore.bind('#jobForm', 'hosta100:videoForm', { skip: ['name', 'script'] });
   const resetBtn = document.getElementById('resetCfgBtn');
   if (resetBtn) resetBtn.addEventListener('click', function () {
-    const ask = window.confirmModal ? confirmModal('Khôi phục mọi tuỳ chọn về mặc định?')
-      : Promise.resolve(window.confirm('Khôi phục mọi tuỳ chọn về mặc định?'));
+    const cmsg = 'Khôi phục mọi tuỳ chọn về mặc định?';
+    const copts = { title: 'Khôi phục cài đặt', okText: 'Khôi phục', variant: 'secondary', icon: 'arrow-counterclockwise' };
+    const ask = window.confirmModal ? confirmModal(cmsg, copts) : Promise.resolve(window.confirm(cmsg));
     ask.then(ok => { if (ok) { FormStore.reset('#jobForm'); toast('Đã khôi phục cài đặt mặc định.', 'success'); } });
   });
 }
@@ -793,7 +794,8 @@ window.pickSceneImage = pickSceneImage;
 
 function regenScene(id, idx) {
   const msg = 'Tạo lại ảnh cảnh ' + (idx + 1) + ' trên GPU (seed mới)?';
-  const ask = window.confirmModal ? confirmModal(msg) : Promise.resolve(window.confirm(msg));
+  const opts = { title: 'Tạo lại ảnh', okText: 'Tạo lại', variant: 'primary', icon: 'arrow-repeat' };
+  const ask = window.confirmModal ? confirmModal(msg, opts) : Promise.resolve(window.confirm(msg));
   ask.then(ok => {
     if (!ok) return;
     fetch('/tools/video/jobs/' + id + '/scene/' + idx + '/regenerate', {
@@ -814,7 +816,8 @@ function rerenderVideo() {
   const id = storyOpenId;
   const msg = 'Dựng lại video #' + id + ' với các ảnh hiện tại? '
     + '(chỉ chạy ffmpeg, không tạo lại ảnh/giọng trên GPU)';
-  const ask = window.confirmModal ? confirmModal(msg) : Promise.resolve(window.confirm(msg));
+  const opts = { title: 'Dựng lại video', okText: 'Dựng lại', variant: 'success', icon: 'camera-reels' };
+  const ask = window.confirmModal ? confirmModal(msg, opts) : Promise.resolve(window.confirm(msg));
   ask.then(ok => {
     if (!ok) return;
     const btn = document.getElementById('rerenderBtn');

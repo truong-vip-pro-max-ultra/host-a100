@@ -394,28 +394,67 @@
     nativeST(function(){ el.classList.remove('show'); nativeST(function(){ el.remove(); }, 320); }, 3600);
   }
 
-  function confirmModal(message){
+  // confirmModal(message, opts?) — opts: {title, okText, variant ('danger'|
+  // 'primary'|…), icon (bootstrap-icon name)}. Defaults are delete-styled so the
+  // many data-confirm delete forms keep working; non-delete callers pass opts.
+  function confirmModal(message, opts){
     var el = document.getElementById('confirmModal');
     // Fallback to the native dialog if the modal/bootstrap isn't available.
     if (!el || !window.bootstrap || !bootstrap.Modal){
       return Promise.resolve(window.confirm(message));
     }
+    opts = opts || {};
     return new Promise(function(resolve){
       el.querySelector('.cm-body').textContent = message;
+      var titleEl = el.querySelector('.modal-title');
+      if (titleEl) titleEl.textContent = opts.title || 'Xác nhận xoá';
+      var icEl = el.querySelector('.cm-ic i');
+      if (icEl) icEl.className = 'bi bi-' + (opts.icon || 'trash3-fill');
+      var icBox = el.querySelector('.cm-ic');
+      if (icBox){
+        var grad = { danger: '135deg,#ef4444,#f97316', primary: '135deg,#3b82f6,#2563eb',
+          success: '135deg,#22c55e,#16a34a', secondary: '135deg,#64748b,#475569',
+          warning: '135deg,#f59e0b,#f97316' }[opts.variant || 'danger'] || '135deg,#ef4444,#f97316';
+        icBox.style.background = 'linear-gradient(' + grad + ')';
+      }
       var okBtn = el.querySelector('.cm-ok');
+      okBtn.textContent = opts.okText || 'Xoá';
+      okBtn.className = 'btn cm-ok btn-' + (opts.variant || 'danger');
       var modal = bootstrap.Modal.getOrCreateInstance(el);
       var done = false;
       function settle(v){
         if (done) return; done = true;
         okBtn.removeEventListener('click', onOk);
         el.removeEventListener('hidden.bs.modal', onHide);
-        modal.hide(); resolve(v);
+        el.style.zIndex = '';
+        modal.hide();
+        // If this confirm was stacked over another open modal, Bootstrap strips
+        // body.modal-open on close — re-add it so the modal underneath stays
+        // scrollable/interactive.
+        if (document.querySelector('.modal.show')) document.body.classList.add('modal-open');
+        resolve(v);
       }
       function onOk(){ settle(true); }
       function onHide(){ settle(false); }   // X / Huỷ / backdrop / Esc
       okBtn.addEventListener('click', onOk);
       el.addEventListener('hidden.bs.modal', onHide);
       modal.show();
+      // Stacked over another modal? This element sits EARLIER in the DOM than page
+      // modals that get moved to <body>, so at equal z-index it would render
+      // BEHIND them — lift it (and the top backdrop) above whatever's open.
+      var others = Array.prototype.filter.call(
+        document.querySelectorAll('.modal.show'), function(m){ return m !== el; });
+      if (others.length){
+        var top = 1055;
+        others.forEach(function(m){
+          var z = parseInt(window.getComputedStyle(m).zIndex, 10) || 1055;
+          if (z > top) top = z;
+        });
+        el.style.zIndex = (top + 20);
+        var bds = document.querySelectorAll('.modal-backdrop');
+        var bd = bds[bds.length - 1];
+        if (bd) bd.style.zIndex = (top + 10);
+      }
       nativeST(function(){ okBtn.focus(); }, 200);
     });
   }
