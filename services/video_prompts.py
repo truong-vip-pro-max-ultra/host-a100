@@ -81,6 +81,60 @@ _NO_ANCHOR_PRESETS = frozenset({"cartoon_doodle", "stick_figure"})
 _STYLE_FIRST_PRESETS = frozenset({"stick_figure"})
 _STYLE_FIRST_LEAD = {"stick_figure": "a simple black stick figure line drawing of"}
 
+# A SHORT style anchor placed at the VERY FRONT of every prompt. CLIP only reads
+# ~77 tokens, and a rich 40-60-word subject alone fills that — so the look tokens
+# appended at the END (the preset / house base) get truncated away and SDXL drifts
+# (e.g. a "cinematic" scene rendering as a cartoon). Leading with a compact medium
+# tag guarantees the chosen look survives truncation and dominates the image.
+_STYLE_LEAD = {
+    "cinematic": "cinematic film still, photorealistic, photographic",
+    "realistic": "photorealistic photograph, ultra realistic, lifelike",
+    "documentary": "documentary photograph, photojournalistic, realistic",
+    "3d": "3D Pixar-style CGI render",
+    "anime": "anime key visual, cel shaded",
+    "comic": "comic book illustration, bold ink outlines",
+    "oil_painting": "oil painting, painterly brushstrokes",
+    "watercolor": "watercolor painting",
+    "pencil_sketch": "pencil graphite sketch, black and white",
+    "colored_pencil": "colored pencil drawing",
+    "ink_drawing": "pen and ink line art, black and white",
+    "cartoon_doodle": "flat vector cartoon doodle illustration",
+}
+
+# Extra negatives that ACTIVELY reject the wrong medium. The biggest reported bug
+# was a "cinematic"/photo style drifting to cartoon — so the photoreal group bans
+# every illustrated look, and the illustrated/3D group bans photorealism, so the
+# model can't wander across style families.
+_ANTI_DRAWING = ("cartoon, anime, comic, illustration, drawing, painting, sketch, "
+                 "3d render, cgi, cel shading, flat color, render, video game, anime screencap")
+_ANTI_PHOTO = "photorealistic, realistic photo, photograph, 3d render"
+_STYLE_NEGATIVE = {
+    "cinematic": _ANTI_DRAWING,
+    "realistic": _ANTI_DRAWING,
+    "documentary": _ANTI_DRAWING,
+    "anime": _ANTI_PHOTO,
+    "comic": _ANTI_PHOTO,
+    "3d": "flat 2d, photograph, realistic photo",
+}
+
+# Photoreal families — the LLM is told to keep the described content real (no
+# cartoon/fantasy-cartoon characters) so even the SUBJECT matter stays on-medium.
+_PHOTO_STYLES = frozenset({"cinematic", "realistic", "documentary"})
+
+
+def _style_hint(style_preset):
+    """A one-line medium hint injected into the LLM instruction so the rewritten
+    scene matches the target look (e.g. photoreal styles should describe real,
+    physically-plausible scenes, never cartoon characters)."""
+    if style_preset in _PHOTO_STYLES:
+        return ("\nMEDIUM: these scenes are rendered as REAL photographs / live-action "
+                "film frames. Describe real, physically-plausible people, places and "
+                "objects — never cartoon, anime or illustrated characters.")
+    if style_preset in {"anime", "comic", "3d", "cartoon_doodle"}:
+        return ("\nMEDIUM: these scenes are rendered as stylised illustration/animation, "
+                "so describe expressive, character-driven scenes (no photographic detail).")
+    return ""
+
 DEFAULT_NEGATIVE = (
     "lowres, low quality, worst quality, blurry, out of focus, bad anatomy, "
     "bad proportions, bad hands, extra fingers, missing fingers, fused fingers, "
@@ -206,8 +260,9 @@ def build_prompt(subject, anchor, mood_style, style_preset, negative):
     subject = re.sub(r"\s+", " ", (subject or "")).strip().strip('"“”')
     style_first = style_preset in _STYLE_FIRST_PRESETS
     # style-first presets must let the style win (keep the subject short); normal
-    # presets allow a long, richly detailed subject (a 60-word EN prompt ≈ 380 chars).
-    cap = 110 if style_first else 380
+    # presets allow a richly detailed subject but leave room for the front style
+    # anchor + trailing detail to fit CLIP's ~77 tokens (a 50-word EN prompt ≈ 320).
+    cap = 110 if style_first else 320
     if len(subject) > cap:
         subject = subject[:cap].rsplit(" ", 1)[0]
     if not subject:
@@ -224,10 +279,17 @@ def build_prompt(subject, anchor, mood_style, style_preset, negative):
             subject = f"{lead} {subject[0].lower()}{subject[1:]}"
         parts = [subject, preset, anchor_part, mood_part, base]
     else:
-        parts = [subject, anchor_part, mood_part, preset, base]
+        # Front-load a compact style anchor so the chosen look survives CLIP's
+        # ~77-token truncation; the richer preset/base detail trails the subject.
+        lead = _STYLE_LEAD.get(style_preset, "")
+        parts = [lead, subject, anchor_part, mood_part, preset, base]
     positive = ", ".join(p for p in parts if p)
     positive = re.sub(r"\s*,\s*,\s*", ", ", positive).strip(" ,")
-    return positive, (negative or DEFAULT_NEGATIVE)
+    neg = negative or DEFAULT_NEGATIVE
+    extra_neg = _STYLE_NEGATIVE.get(style_preset)
+    if extra_neg:
+        neg = f"{extra_neg}, {neg}"
+    return positive, neg
 
 
 # --------------------------------------------------------------------------- #
@@ -429,17 +491,18 @@ def _parse_prompt_list(out, n):
     return result if hits else []
 
 
-def llm_visual_prompts(texts, timeout=180, simple=False, on_log=None):
+def llm_visual_prompts(texts, timeout=180, simple=False, on_log=None, style_hint=""):
     """Rewrite ALL narration lines in ONE LLM call (the API-farm server runs
     --parallel 1, so one batched request is far faster than N parallel ones that
     just queue server-side). Returns a list aligned with ``texts`` (each item is
     the rewritten prompt or "" → the caller translates that scene), or [] on total
     failure → the caller falls back to rule-based + translation. ``simple`` keeps
-    each scene to the bare subject + one action (stick-figure / minimal styles)."""
+    each scene to the bare subject + one action (stick-figure / minimal styles).
+    ``style_hint`` nudges the rewrite to match the target medium (photo vs drawn)."""
     texts = [(t or "").strip() for t in texts]
     if not texts or serve_service is None:
         return []
-    instruction = _LLM_BATCH_INSTRUCTION
+    instruction = _LLM_BATCH_INSTRUCTION + (style_hint or "")
     if simple:
         instruction += ("\nIMPORTANT: keep EACH scene VERY simple — name only the "
                         "main subject(s) and ONE clear action. No detailed scenery, "
@@ -556,13 +619,14 @@ def build_prompts(chunks, style_preset="cinematic", negative="", use_llm=True,
         # one call; a failed/partial group just leaves those scenes "" → translated.
         simple = (style_preset in _STYLE_FIRST_PRESETS
                   or style_preset in _DRAWING_PRESETS)
+        hint = _style_hint(style_preset)
         ngrp = (len(chunks) + _LLM_PROMPT_BATCH - 1) // _LLM_PROMPT_BATCH
         _log(f"  ➤ viết prompt ảnh bằng LLM API farm ({len(chunks)} cảnh, "
              f"{ngrp} lượt × ≤{_LLM_PROMPT_BATCH})…")
         t0 = time.time()
         for s in range(0, len(chunks), _LLM_PROMPT_BATCH):
             sub = chunks[s:s + _LLM_PROMPT_BATCH]
-            res = llm_visual_prompts(sub, simple=simple, on_log=on_log)
+            res = llm_visual_prompts(sub, simple=simple, on_log=on_log, style_hint=hint)
             for k, v in enumerate(res or []):
                 visuals[s + k] = v
             n_ok = sum(1 for v in visuals[s:s + len(sub)] if v)

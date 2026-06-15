@@ -29,6 +29,18 @@
               background-size:400% 100%; animation:shimmer 1.4s ease infinite;
               width:100%; height:100%; }
   @keyframes shimmer { 0%{background-position:100% 0} 100%{background-position:0 0} }
+  .scene-thumb .scene-busy { position:absolute; inset:0; z-index:3; display:flex;
+                 flex-direction:column; align-items:center; justify-content:center;
+                 gap:.3rem; background:rgba(0,0,0,.55); color:#fff; font-size:.75rem; }
+  .scene-thumb .scene-err { position:absolute; bottom:.4rem; right:.4rem; z-index:3;
+                 font-size:.68rem; padding:.1rem .4rem; border-radius:.4rem;
+                 background:rgba(176,42,55,.9); color:#fff; }
+  .scene-thumb.edited::after { content:"đã sửa"; position:absolute; top:.4rem; right:.4rem;
+                 z-index:2; font-size:.62rem; padding:.1rem .4rem; border-radius:1rem;
+                 background:rgba(25,135,84,.9); color:#fff; }
+  .scene-actions { display:flex; gap:.3rem; margin-top:.4rem; }
+  .scene-actions .btn { --bs-btn-padding-y:.1rem; --bs-btn-padding-x:.4rem;
+                 --bs-btn-font-size:.7rem; flex:1; }
 </style>
 
 {% set JST = {
@@ -325,10 +337,17 @@
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
-        <div class="d-flex justify-content-end mb-2">
-          <button type="button" class="btn btn-sm btn-outline-secondary"
-                  onclick="if(window.storyReload)window.storyReload()" title="Làm mới">
-            <i class="bi bi-arrow-clockwise"></i> Làm mới</button>
+        <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+          <span class="small text-muted">Bấm <b>Đổi ảnh</b> để thay ảnh tải lên, hoặc
+            <b>Tạo lại</b> để gen lại trên GPU — rồi <b>Dựng lại video</b>.</span>
+          <div class="d-flex gap-2">
+            <button type="button" class="btn btn-sm btn-success" id="rerenderBtn"
+                    onclick="rerenderVideo()" title="Dựng lại MP4 với ảnh đã đổi (không chạy lại GPU)">
+              <i class="bi bi-camera-reels"></i> Dựng lại video</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary"
+                    onclick="if(window.storyReload)window.storyReload()" title="Làm mới">
+              <i class="bi bi-arrow-clockwise"></i> Làm mới</button>
+          </div>
         </div>
         <div id="storyEmpty" class="text-muted small d-none">Chưa có ảnh nào — chờ
           bước tạo ảnh chạy xong.</div>
@@ -353,6 +372,9 @@
     </div>
   </div>
 </div>
+
+<!-- Hidden file input reused for every scene's "Đổi ảnh" upload -->
+<input type="file" id="sceneUpload" accept="image/*" class="d-none">
 
 <!-- Log modal -->
 <div class="modal fade" id="logModal" tabindex="-1" aria-hidden="true">
@@ -617,24 +639,49 @@ window.showJobLog = showJobLog;
 const URL_SCENES = '{{ url_for("video_job_scenes", job_id=0) }}';
 const URL_IMG = '{{ url_for("video_job_image", job_id=0, idx=0) }}';
 function scenesUrl(id){ return URL_SCENES.replace('/0/', '/' + id + '/'); }
-function imgUrl(id, idx){ return URL_IMG.replace('/0/', '/' + id + '/').replace(/\/0$/, '/' + idx); }
+function imgUrl(id, idx, ver){
+  const u = URL_IMG.replace('/0/', '/' + id + '/').replace(/\/0$/, '/' + idx);
+  return u + (ver ? ('?v=' + ver) : '');
+}
 
 function esc(s){ const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 
+// A signature of everything that affects how a thumb looks → repaint only on change.
+function sceneSig(s){ return (s.image ? 1 : 0) + '|' + (s.ver || 0) + '|' + (s.gen || ''); }
+
 function storyThumb(id, s) {
-  return '<span class="scene-num">Cảnh ' + s.i + '</span>' + (s.image
-    ? '<img loading="lazy" src="' + imgUrl(id, s.i - 1) + '" alt="Cảnh ' + s.i +
+  let inner = s.image
+    ? '<img loading="lazy" src="' + imgUrl(id, s.i - 1, s.ver) + '" alt="Cảnh ' + s.i +
       '" onclick="lightbox(this,' + id + ',' + s.i + ')">'
     : '<div class="skeleton"></div><span class="scene-wait position-absolute">' +
-      '<i class="bi bi-hourglass-split"></i><br>đang tạo…</span>');
+      '<i class="bi bi-hourglass-split"></i><br>đang tạo…</span>';
+  let overlay = '';
+  if (s.gen === 'busy') {
+    overlay = '<span class="scene-busy"><span class="spinner-border spinner-border-sm"></span>' +
+      'đang tạo lại…</span>';
+  } else if (s.gen === 'err') {
+    overlay = '<span class="scene-err" title="' + esc(s.error) + '">' +
+      '<i class="bi bi-exclamation-triangle"></i> lỗi</span>';
+  }
+  return '<span class="scene-num">Cảnh ' + s.i + '</span>' + inner + overlay;
 }
 function storyCell(id, s) {
+  const edited = s.edited ? ' edited' : '';
   return '<div class="col-6 col-md-4 col-lg-3" data-scene="' + s.i + '">' +
       '<div class="scene-card">' +
-        '<div class="scene-thumb">' + storyThumb(id, s) + '</div>' +
+        '<div class="scene-thumb' + edited + '" data-sig="' + sceneSig(s) + '">' +
+          storyThumb(id, s) + '</div>' +
         '<div class="scene-body">' +
           '<div class="scene-text" title="' + esc(s.text) + '">' + esc(s.text) + '</div>' +
           '<div class="scene-prompt" title="' + esc(s.prompt) + '">' + esc(s.prompt) + '</div>' +
+          '<div class="scene-actions">' +
+            '<button type="button" class="btn btn-outline-primary" ' +
+              'onclick="pickSceneImage(' + id + ',' + (s.i - 1) + ')" title="Tải ảnh thay thế">' +
+              '<i class="bi bi-upload"></i> Đổi ảnh</button>' +
+            '<button type="button" class="btn btn-outline-secondary" ' +
+              'onclick="regenScene(' + id + ',' + (s.i - 1) + ')" title="Tạo lại ảnh trên GPU">' +
+              '<i class="bi bi-arrow-repeat"></i> Tạo lại</button>' +
+          '</div>' +
         '</div>' +
       '</div></div>';
 }
@@ -650,8 +697,9 @@ function showStoryboard(id) {
   empty.classList.add('d-none');
   bootstrap.Modal.getOrCreateInstance(document.getElementById('storyModal')).show();
 
-  // Idempotent + INCREMENTAL: only swap a scene's skeleton → image when it becomes
-  // ready (no full innerHTML rebuild → no flicker, no scroll jump). Runs every poll.
+  // Idempotent + INCREMENTAL: only repaint a scene's thumb when its signature
+  // (image / version / gen-state) changes (no full innerHTML rebuild → no flicker,
+  // no scroll jump, keeps the action buttons). Runs every poll.
   function paint(scenes) {
     document.getElementById('storyCount').textContent =
       scenes.length ? (scenes.filter(s => s.image).length + '/' + scenes.length + ' ảnh') : '';
@@ -663,7 +711,13 @@ function showStoryboard(id) {
     }
     scenes.forEach(function (s) {
       const thumb = grid.querySelector('[data-scene="' + s.i + '"] .scene-thumb');
-      if (thumb && s.image && !thumb.querySelector('img')) thumb.innerHTML = storyThumb(id, s);
+      if (!thumb) return;
+      const sig = sceneSig(s);
+      if (thumb.dataset.sig !== sig) {
+        thumb.dataset.sig = sig;
+        thumb.innerHTML = storyThumb(id, s);
+        thumb.classList.toggle('edited', !!s.edited);
+      }
     });
   }
   function load() {
@@ -675,12 +729,16 @@ function showStoryboard(id) {
         if (storyOpenId !== id) return;            // modal was closed / switched
         const scenes = d.scenes || [];
         paint(scenes);
-        if (scenes.length && scenes.every(s => s.image) && storyTimer) {
-          clearInterval(storyTimer); storyTimer = null;   // all done → stop polling
-        }
+        // Keep polling while any scene is still rendering OR being regenerated.
+        const settled = scenes.length && scenes.every(s => s.image && s.gen !== 'busy');
+        if (settled && storyTimer) { clearInterval(storyTimer); storyTimer = null; }
       }).catch(() => {});
   }
   window.storyReload = load;   // manual "Làm mới" button
+  // Re-arm polling after an edit (upload / regenerate) even if it had settled.
+  window.storyPoke = function () {
+    if (storyOpenId === id) { load(); if (!storyTimer) storyTimer = setInterval(load, 2000); }
+  };
   load();
   if (storyTimer) clearInterval(storyTimer);
   storyTimer = setInterval(load, 2000);
@@ -690,6 +748,73 @@ function showStoryboard(id) {
   }, { once: true });
 }
 window.showStoryboard = showStoryboard;
+
+// ---- per-scene image edits + re-render ----------------------------------
+function pickSceneImage(id, idx) {
+  const inp = document.getElementById('sceneUpload');
+  inp.dataset.jobId = id; inp.dataset.idx = idx; inp.value = '';
+  inp.click();
+}
+document.getElementById('sceneUpload').addEventListener('change', function () {
+  const f = this.files && this.files[0];
+  if (!f) return;
+  const id = this.dataset.jobId, idx = parseInt(this.dataset.idx, 10);
+  const body = new FormData(); body.append('image', f);
+  if (window.Loader) Loader.start();
+  fetch('/tools/video/jobs/' + id + '/scene/' + idx + '/image', {
+    method: 'POST', headers: { 'X-Requested-With': 'fetch' }, body,
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) { toast('Đã đổi ảnh cảnh ' + (idx + 1) + '.', 'success'); if (window.storyPoke) storyPoke(); }
+      else toast(d.error || 'Không đổi được ảnh.', 'danger');
+    })
+    .catch(() => toast('Lỗi kết nối.', 'danger'))
+    .finally(() => { if (window.Loader) Loader.done(); });
+});
+window.pickSceneImage = pickSceneImage;
+
+function regenScene(id, idx) {
+  const msg = 'Tạo lại ảnh cảnh ' + (idx + 1) + ' trên GPU (seed mới)?';
+  const ask = window.confirmModal ? confirmModal(msg) : Promise.resolve(window.confirm(msg));
+  ask.then(ok => {
+    if (!ok) return;
+    fetch('/tools/video/jobs/' + id + '/scene/' + idx + '/regenerate', {
+      method: 'POST', headers: { 'X-Requested-With': 'fetch' }, body: new FormData(),
+    })
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok) { toast('Đang tạo lại ảnh cảnh ' + (idx + 1) + '…', 'info'); if (window.storyPoke) storyPoke(); }
+        else toast(d.error || 'Không tạo lại được.', 'danger');
+      })
+      .catch(() => toast('Lỗi kết nối.', 'danger'));
+  });
+}
+window.regenScene = regenScene;
+
+function rerenderVideo() {
+  if (storyOpenId == null) return;
+  const id = storyOpenId;
+  const msg = 'Dựng lại video #' + id + ' với các ảnh hiện tại? '
+    + '(chỉ chạy ffmpeg, không tạo lại ảnh/giọng trên GPU)';
+  const ask = window.confirmModal ? confirmModal(msg) : Promise.resolve(window.confirm(msg));
+  ask.then(ok => {
+    if (!ok) return;
+    const btn = document.getElementById('rerenderBtn');
+    btnBusy(btn, 'Đang gửi…');
+    fetch('/tools/video/jobs/' + id + '/rerender', {
+      method: 'POST', headers: { 'X-Requested-With': 'fetch' }, body: new FormData(),
+    })
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok) toast('Đang dựng lại video — theo dõi ở bảng tác vụ.', 'success');
+        else toast(d.error || 'Không dựng lại được.', 'danger');
+      })
+      .catch(() => toast('Lỗi kết nối.', 'danger'))
+      .finally(() => btnReset(btn));
+  });
+}
+window.rerenderVideo = rerenderVideo;
 
 function lightbox(imgEl, id, sceneNo) {
   const card = imgEl.closest('.scene-card');

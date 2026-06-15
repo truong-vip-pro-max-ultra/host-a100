@@ -168,9 +168,80 @@ def t5_missing_image_fallback():
     check("t5: mp4 still rendered", os.path.exists(mp4) and os.path.getsize(mp4) > 1024)
 
 
+def t6_style_lock():
+    print("t6: style lock (front-loaded look + anti-cross-style negatives)")
+    cine = vpr.build_prompts(["Một người lính giữa chiến trường khói lửa."],
+                             style_preset="cinematic", use_llm=False)[0]
+    check("t6: cinematic look leads prompt",
+          cine["prompt"].startswith("cinematic film still"), cine["prompt"][:60])
+    check("t6: cinematic bans cartoon", "cartoon" in cine["negative"])
+    anime = vpr.build_prompts(["x"], style_preset="anime", use_llm=False)[0]
+    check("t6: anime bans photorealism", "photorealistic" in anime["negative"])
+    stick = vpr.build_prompts(["x"], style_preset="stick_figure", use_llm=False)[0]
+    check("t6: stick-figure still style-first", "stick figure" in stick["prompt"])
+    check("t6: photo style hint set", "REAL photographs" in vpr._style_hint("cinematic"))
+    check("t6: drawn style no photo hint", vpr._style_hint("watercolor") == "")
+
+
+def t7_manifest_rerender():
+    print("t7: manifest roundtrip + re-render from disk (needs ffmpeg)")
+    if not _ffmpeg_ok():
+        print("  [SKIP] ffmpeg not found on PATH")
+        return
+    import json
+    import subprocess
+    import time
+    from services import storage_service as db
+    from services import video_pipeline as vp
+    from utils import file_utils
+    db.init_db()
+    os.makedirs(config.VIDEO_OUTPUTS_DIR, exist_ok=True)
+    params = json.dumps({"width": 320, "height": 180, "fps": 24, "voice_speed": 1.0,
+                         "ken_burns": True})
+    jid = db.execute(
+        "INSERT INTO video_jobs (name,status,progress,stage,params,created_at) "
+        "VALUES (?,?,?,?,?,?)", ("rr", "done", 100, "x", params, db.now()), commit=True)
+    jd = file_utils.safe_join(config.VIDEO_OUTPUTS_DIR, str(jid))
+    os.makedirs(jd, exist_ok=True)
+    db.execute("UPDATE video_jobs SET logs_path=? WHERE id=?", (jd, jid), commit=True)
+    scenes = []
+    for i, color in enumerate(("blue", "green")):
+        img = os.path.join(jd, f"img_{i:04d}.png")
+        wav = os.path.join(jd, f"voice_{i:04d}.wav")
+        _mk_png(img, 320, 180, color)
+        _mk_wav(wav, 300, 2.0)
+        scenes.append({"text": f"canh {i + 1}", "image_path": img,
+                       "audio_path": wav, "duration": 2.0})
+    vp._write_manifest(jd, scenes, {"width": 320, "height": 180, "fps": 24,
+                                    "ken_burns": True, "voice_speed": 1.0}, "rr.mp4")
+    m = vp._read_manifest(jd)
+    check("t7: manifest stores basenames",
+          bool(m) and m["scenes"][0]["image"] == "img_0000.png")
+    rs, cfg, _sp = vp._build_render_scenes({"logs_path": jd, "params": params}, m)
+    check("t7: render scenes rebuilt", len(rs) == 2 and cfg["width"] == 320)
+    vp.rerender_job(jid)
+    job = vp.get_job(jid)
+    for _ in range(80):
+        time.sleep(0.5)
+        job = vp.get_job(jid)
+        if job["status"] in ("done", "error"):
+            break
+    check("t7: re-render done", job["status"] == "done", job.get("error"))
+    out = job.get("output_path")
+    check("t7: mp4 produced", bool(out) and os.path.exists(out)
+          and os.path.getsize(out) > 1024)
+    if out and os.path.exists(out):
+        streams = subprocess.run(
+            [config.ffprobe_path(), "-v", "error", "-show_entries",
+             "stream=codec_type", "-of", "csv=p=0", out],
+            capture_output=True, text=True).stdout
+        check("t7: has video+audio", "video" in streams and "audio" in streams, streams)
+
+
 if __name__ == "__main__":
     for fn in (t1_prompts, t1b_clean_screenplay, t2_render_filters, t3_subtitles,
-               t4_render_roundtrip, t5_missing_image_fallback):
+               t4_render_roundtrip, t5_missing_image_fallback, t6_style_lock,
+               t7_manifest_rerender):
         fn()
     print()
     if FAILS:

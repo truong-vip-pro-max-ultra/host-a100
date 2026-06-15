@@ -165,6 +165,40 @@ sketch; **người que** đưa style lên đầu prompt + ép cảnh đơn giả
 cầu viết cảnh tối giản cho các style này). Logic ở `services/video_prompts.py`
 (`_DRAWING_PRESETS`, `_NO_MOOD_PRESETS`, `_NO_ANCHOR_PRESETS`, `_STYLE_FIRST_PRESETS`).
 
+**Khoá phong cách (vì sao "điện ảnh" có lúc ra hoạt hình).** CLIP của SDXL chỉ đọc
+~77 token đầu; prompt subject 40–60 từ đã lấp gần hết → token style ở CUỐI bị cắt,
+model mất hướng và tự ý vẽ hoạt hình. Cách khắc phục, áp cho MỌI style:
+- **Đưa nhãn medium ngắn lên ĐẦU prompt** (`_STYLE_LEAD`), vd cinematic =
+  `"cinematic film still, photorealistic, photographic, …"` → cái nhìn sống sót qua
+  cắt token và lấn át toàn ảnh. Subject hạ cap còn ~320 ký tự để vừa khung.
+- **Negative chống lạc medium** (`_STYLE_NEGATIVE`): nhóm ảnh thật cấm
+  `cartoon, anime, illustration, drawing, 3d render, cgi, …`; nhóm vẽ/anime/3D cấm
+  `photorealistic, realistic photo, …`.
+- **Gợi ý medium cho LLM** (`_style_hint`): style ảnh thật → "describe REAL,
+  physically-plausible scenes — never cartoon characters" (truyền vào prompt batch).
+
+## Sửa ảnh từng cảnh + Dựng lại video (không chạy lại GPU)
+
+Mở **Ảnh các cảnh** (icon 🖼) của một job đã xong. Mỗi thẻ cảnh có 2 nút:
+- **Đổi ảnh** — tải lên ảnh thay thế. Ảnh được ffmpeg chuẩn hoá về đúng độ phân giải
+  job (scale-increase + crop center → `img_XXXX.png`), nên không cần đúng tỉ lệ.
+- **Tạo lại** — gen lại ảnh cảnh đó trên GPU với **seed ngẫu nhiên mới** (giữ prompt
+  cũ → reroll). Chạy nền; lưới hiển thị `đang tạo lại…` → ảnh mới (tự cache-bust theo
+  `ver` = mtime). Cần một server GPU đang sẵn sàng.
+
+Sau khi đổ/tạo lại ảnh, bấm **Dựng lại video** → chỉ chạy **ffmpeg trên login node**
+(không tạo lại ảnh/giọng), tái dùng `img_XXXX.png` + `voice_XXXX.wav` đã có. Tiến
+trình theo dõi ngay ở bảng tác vụ như render thường.
+
+Cơ chế: lúc render lần đầu, pipeline ghi `manifest.json` (text + basename ảnh/giọng +
+duration mỗi cảnh + render cfg + tên MP4). `rerender_job` đọc manifest và dựng lại
+(job cũ không có manifest → dựng lại bằng cách đo độ dài wav qua ffprobe +
+scenes.json). Vì manifest lưu **basename**, ảnh tải lên (cùng tên file) được dùng tự
+động. Hàm: `replace_scene_image`, `regenerate_scene_image`, `rerender_job`,
+`_write_manifest`/`_read_manifest`/`_build_render_scenes` trong
+`services/video_pipeline.py`; route `/tools/video/jobs/<id>/scene/<idx>/image`,
+`…/regenerate`, `…/rerender`.
+
 ## Vắt GPU + dựng nhanh
 
 - **True GPU batching cho ảnh:** `ImageEngine.generate_batch` chạy NHIỀU prompt trong

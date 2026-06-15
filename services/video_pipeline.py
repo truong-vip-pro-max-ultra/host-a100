@@ -17,6 +17,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -83,7 +84,11 @@ def get_scenes(job_id):
     for s in scenes:
         idx = int(s.get("i", 0)) - 1
         img = os.path.join(job_dir, f"img_{idx:04d}.png")
-        s["image"] = idx >= 0 and os.path.exists(img) and os.path.getsize(img) > 256
+        ok = idx >= 0 and os.path.exists(img) and os.path.getsize(img) > 256
+        s["image"] = ok
+        # A version stamp (image mtime) so the UI can cache-bust the thumbnail and
+        # auto-refresh it the moment a scene is re-uploaded or regenerated.
+        s["ver"] = int(os.path.getmtime(img)) if ok else 0
     return scenes
 
 
@@ -244,6 +249,260 @@ def _generate_images(host, port, items, timeout=3600):
 
 
 # --------------------------------------------------------------------------- #
+# Per-scene edits + re-render (no GPU re-run — just swap an image, redo ffmpeg)
+# --------------------------------------------------------------------------- #
+# scenes.json is read-modify-written from a few places (regenerate threads, the
+# upload route); serialise those updates so two edits can't clobber each other.
+_SCENES_LOCK = threading.Lock()
+
+
+def _job_params(job):
+    try:
+        return json.loads(job.get("params") or "{}")
+    except (TypeError, ValueError):
+        return {}
+
+
+def _read_scenes_raw(job_dir):
+    try:
+        with open(os.path.join(job_dir, "scenes.json"), encoding="utf-8") as fh:
+            return (json.load(fh) or {}).get("scenes") or []
+    except (OSError, ValueError):
+        return []
+
+
+def _update_scene(job_dir, idx, **fields):
+    """Atomically merge ``fields`` into the scene whose 1-based index is idx+1."""
+    with _SCENES_LOCK:
+        scenes = _read_scenes_raw(job_dir)
+        for s in scenes:
+            if int(s.get("i", 0)) - 1 == idx:
+                s.update(fields)
+                break
+        _write_scenes(job_dir, scenes)
+
+
+def _manifest_path(job_dir):
+    return os.path.join(job_dir, "manifest.json")
+
+
+def _write_manifest(job_dir, scenes, render_cfg, out_name):
+    """Persist everything ffmpeg needs to rebuild the MP4 from the files already on
+    disk (image/voice basenames + per-scene duration), so a re-render touches no
+    GPU. Stored as basenames so the dir stays relocatable and a swapped image file
+    (same name) is picked up automatically."""
+    payload = {
+        "scenes": [{"text": s.get("text", ""),
+                    "image": os.path.basename(s.get("image_path") or "") or None,
+                    "audio": os.path.basename(s.get("audio_path") or "") or None,
+                    "duration": float(s.get("duration") or 0.0)} for s in scenes],
+        "render": dict(render_cfg or {}),
+        "out_name": out_name,
+    }
+    try:
+        path = _manifest_path(job_dir)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _probe_duration(path):
+    """Audio length in seconds via ffprobe, or 0.0 if unknown."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            [config.ffprobe_path(), "-v", "error", "-show_entries",
+             "format=duration", "-of", "default=nw=1:nk=1", str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
+        return max(0.0, float((out.stdout or "0").strip() or 0))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
+def _build_render_scenes(job, manifest=None):
+    """The list of render scenes ({text,image_path,audio_path,duration}) + the
+    render config, rebuilt from the manifest when present, else reconstructed from
+    scenes.json + the wavs on disk (so older jobs without a manifest still work)."""
+    job_dir = job["logs_path"]
+    params = _job_params(job)
+    if manifest and manifest.get("scenes"):
+        speed = float((manifest.get("render") or {}).get("voice_speed", 1.0)) or 1.0
+        scenes = []
+        for m in manifest["scenes"]:
+            img = os.path.join(job_dir, m["image"]) if m.get("image") else ""
+            wav = os.path.join(job_dir, m["audio"]) if m.get("audio") else ""
+            scenes.append({
+                "text": m.get("text", ""),
+                "image_path": img if img and os.path.exists(img) else "",
+                "audio_path": wav if wav and os.path.exists(wav) else "",
+                "duration": float(m.get("duration") or 0.0)})
+        render_cfg = manifest.get("render") or {}
+        return scenes, render_cfg, speed
+    # Fallback: rebuild from scenes.json text + measured wav durations.
+    speed = float(params.get("voice_speed", 1.0)) or 1.0
+    raw = _read_scenes_raw(job_dir)
+    scenes = []
+    for s in raw:
+        idx = int(s.get("i", 0)) - 1
+        img = os.path.join(job_dir, f"img_{idx:04d}.png")
+        wav = os.path.join(job_dir, f"voice_{idx:04d}.wav")
+        has_wav = os.path.exists(wav) and os.path.getsize(wav) > 256
+        raw_dur = _probe_duration(wav) if has_wav else 0.0
+        dur = (raw_dur / speed) if raw_dur > 0 else max(2.5, len(s.get("text", "")) / 16.0)
+        scenes.append({"text": s.get("text", ""),
+                       "image_path": img if os.path.exists(img) else "",
+                       "audio_path": wav if has_wav else "",
+                       "duration": dur})
+    render_cfg = {"width": params.get("width", 1920), "height": params.get("height", 1080),
+                  "fps": params.get("fps", 30), "ken_burns": params.get("ken_burns", True),
+                  "music_path": params.get("music_path", ""), "voice_speed": speed}
+    return scenes, render_cfg, speed
+
+
+def replace_scene_image(job_id, idx, src_path):
+    """Swap scene ``idx``'s image with the uploaded file. Re-encodes through ffmpeg
+    to a PNG sized to the job's resolution (validates it's a real image, strips any
+    bad metadata, matches the aspect the renderer expects). Returns the new mtime."""
+    import subprocess
+    job = get_job(job_id)
+    if not job or not job.get("logs_path"):
+        raise ValueError("Không tìm thấy tác vụ.")
+    job_dir = job["logs_path"]
+    n = len(_read_scenes_raw(job_dir))
+    if not (0 <= idx < n):
+        raise ValueError("Cảnh không hợp lệ.")
+    params = _job_params(job)
+    w = int(params.get("width", 1920)); h = int(params.get("height", 1080))
+    out = os.path.join(job_dir, f"img_{idx:04d}.png")
+    if not file_utils.is_within(config.VIDEO_OUTPUTS_DIR, out):
+        raise ValueError("Đường dẫn không hợp lệ.")
+    tmp = out + ".upload.png"
+    vf = (f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+          f"crop={w}:{h},setsar=1")
+    cmd = [config.ffmpeg_path(), "-y", "-hide_banner", "-nostdin", "-i", str(src_path),
+           "-vf", vf, "-frames:v", "1", tmp]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, errors="replace", timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"Không xử lý được ảnh: {exc}")
+    if proc.returncode != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) < 256:
+        raise ValueError("File tải lên không phải ảnh hợp lệ.")
+    os.replace(tmp, out)
+    _update_scene(job_dir, idx, image=True, gen="ok", error="", edited=True)
+    _job_log(job_dir, f"• Đã thay ảnh cảnh {idx + 1} bằng ảnh tải lên.")
+    return int(os.path.getmtime(out))
+
+
+def regenerate_scene_image(job_id, idx, prompt=None, negative=None, seed=None):
+    """Re-generate scene ``idx``'s image on the GPU (optionally with an edited
+    prompt/seed). Runs in a background thread; the storyboard poll shows gen=busy →
+    ok/err. Returns nothing useful synchronously — raises only on bad input / no GPU."""
+    job = get_job(job_id)
+    if not job or not job.get("logs_path"):
+        raise ValueError("Không tìm thấy tác vụ.")
+    job_dir = job["logs_path"]
+    scenes = _read_scenes_raw(job_dir)
+    if not (0 <= idx < len(scenes)):
+        raise ValueError("Cảnh không hợp lệ.")
+    endpoint = voice_service.resolve_endpoint()
+    if not endpoint:
+        raise ValueError("Chưa có server GPU sẵn sàng — hãy khởi động ở tab Clone "
+                         "giọng nói trước.")
+    host, port = endpoint
+    scene = scenes[idx]
+    params = _job_params(job)
+    w = int(params.get("width", 1920)); h = int(params.get("height", 1080))
+    steps = int(params.get("image_steps", 4))
+    prompt = (prompt or "").strip() or scene.get("prompt", "")
+    negative = (negative or "").strip() or scene.get("negative") or video_prompts.DEFAULT_NEGATIVE
+    # No explicit seed → reroll with a fresh random one (re-using the stored seed +
+    # prompt would just reproduce the SAME image, defeating the point of "Tạo lại").
+    try:
+        seed = int(seed) if seed is not None and str(seed).strip() != "" \
+            else random.randint(0, 2 ** 31 - 1)
+    except (TypeError, ValueError):
+        seed = random.randint(0, 2 ** 31 - 1)
+    if not prompt:
+        raise ValueError("Prompt trống.")
+    out = os.path.join(job_dir, f"img_{idx:04d}.png")
+    _update_scene(job_dir, idx, prompt=prompt, negative=negative, seed=seed,
+                  gen="busy", error="")
+
+    def _work():
+        item = {"prompt": prompt, "negative": negative, "out_path": out,
+                "seed": seed, "width": w, "height": h, "steps": steps}
+        try:
+            res = _generate_images(host, port, [item])
+            r = (res or [{}])[0] or {}
+            if r.get("ok") and os.path.exists(out) and os.path.getsize(out) > 256:
+                _update_scene(job_dir, idx, image=True, gen="ok", error="", edited=True)
+                _job_log(job_dir, f"• Đã tạo lại ảnh cảnh {idx + 1} trên GPU.")
+            else:
+                err = r.get("error") or "không tạo được ảnh"
+                _update_scene(job_dir, idx, gen="err", error=str(err))
+                _job_log(job_dir, f"! Tạo lại ảnh cảnh {idx + 1} lỗi: {err}")
+        except Exception as exc:  # noqa: BLE001
+            _update_scene(job_dir, idx, gen="err", error=str(exc))
+            _job_log(job_dir, f"! Tạo lại ảnh cảnh {idx + 1} lỗi: {exc}")
+
+    threading.Thread(target=_work, daemon=True).start()
+
+
+def rerender_job(job_id):
+    """Rebuild the MP4 from the images/voices already on disk (ffmpeg only, no GPU).
+    Used after the user swaps one or more scene images. Runs in a background thread
+    and drives the same status/progress fields the job list polls."""
+    job = get_job(job_id)
+    if not job or not job.get("logs_path"):
+        raise ValueError("Không tìm thấy tác vụ.")
+    if job.get("status") == "running":
+        raise ValueError("Tác vụ đang chạy — đợi xong rồi hãy dựng lại.")
+    if not config.ffmpeg_available():
+        raise ValueError("Không tìm thấy ffmpeg trên login node.")
+    job_dir = job["logs_path"]
+    manifest = _read_manifest(job_dir)
+    scenes, render_cfg, _speed = _build_render_scenes(job, manifest)
+    if not any(s.get("text", "").strip() for s in scenes):
+        raise ValueError("Không còn dữ liệu cảnh để dựng lại (tác vụ quá cũ?).")
+    out_name = (manifest or {}).get("out_name") \
+        or f"{_ascii_slug(job['name'], f'video_{job_id}')}.mp4"
+    out_mp4 = os.path.join(job_dir, out_name)
+
+    def _work():
+        log = lambda m: _job_log(job_dir, m)  # noqa: E731
+        try:
+            _set_job(job_id, status="running", stage="Đang dựng lại video…",
+                     progress=5, error="")
+            log("↻ Dựng lại video từ ảnh/giọng đã có (không chạy lại GPU).")
+            mp4, srt = video_render.render(
+                scenes, job_dir, out_mp4, render=render_cfg, on_log=log,
+                on_stage=lambda m: _set_job(job_id, stage=m),
+                on_progress=lambda p: _set_job(
+                    job_id, progress=5 + int(max(0.0, min(1.0, p)) * 95)))
+            _set_job(job_id, status="done", stage="Hoàn tất (đã dựng lại)",
+                     progress=100, output_path=mp4, srt_path=srt, finished_at=db.now())
+            log(f"✓ MP4 (dựng lại): {mp4}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"LỖI khi dựng lại: {exc}")
+            _set_job(job_id, status="error", stage="Lỗi dựng lại", error=str(exc),
+                     finished_at=db.now())
+
+    threading.Thread(target=_work, daemon=True).start()
+
+
+def _read_manifest(job_dir):
+    try:
+        with open(_manifest_path(job_dir), encoding="utf-8") as fh:
+            return json.load(fh) or {}
+    except (OSError, ValueError):
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # Run
 # --------------------------------------------------------------------------- #
 def _run_job(job_id, script, params):
@@ -274,9 +533,12 @@ def _run_job(job_id, script, params):
             use_llm=params.get("use_llm", True), on_log=log)
 
         # Storyboard: record each scene's text + image prompt now (images not yet
-        # ready) so the UI can show them filling in as the GPU renders.
+        # ready) so the UI can show them filling in as the GPU renders. The negative
+        # + seed are kept so a single scene can be regenerated on the GPU later.
         scene_meta = [{"i": i + 1, "text": chunks[i],
-                       "prompt": prompts[i]["prompt"], "image": False}
+                       "prompt": prompts[i]["prompt"],
+                       "negative": prompts[i]["negative"], "seed": prompts[i]["seed"],
+                       "image": False}
                       for i in range(n)]
         _write_scenes(job_dir, scene_meta)
 
@@ -368,6 +630,9 @@ def _run_job(job_id, script, params):
                       "ken_burns": params.get("ken_burns", True),
                       "music_path": params.get("music_path", ""),
                       "voice_speed": speed}
+        # Persist a render manifest so the video can be RE-rendered later (after the
+        # user swaps a scene image) without re-running any GPU work — only ffmpeg.
+        _write_manifest(job_dir, scenes, render_cfg, os.path.basename(out_mp4))
         mp4, srt = video_render.render(
             scenes, job_dir, out_mp4, render=render_cfg,
             on_log=log,

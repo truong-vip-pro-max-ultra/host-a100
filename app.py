@@ -1177,6 +1177,53 @@ def video_job_image(job_id, idx):
                                as_attachment=False)
 
 
+@app.route("/tools/video/jobs/<int:job_id>/scene/<int:idx>/image", methods=["POST"])
+def video_scene_replace_image(job_id, idx):
+    """Swap one scene's image with an uploaded file (no GPU). The renderer reuses
+    the same img_XXXX.png, so a later 'dựng lại' picks the new picture up."""
+    f = request.files.get("image")
+    if not f or not f.filename:
+        return jsonify({"ok": False, "error": "Chưa chọn ảnh."}), 400
+    tmp = os.path.join(tempfile.gettempdir(), f"vid_up_{uuid.uuid4().hex}")
+    try:
+        f.save(tmp)
+        ver = video_pipeline.replace_scene_image(job_id, idx, tmp)
+        return jsonify({"ok": True, "ver": ver})
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+@app.route("/tools/video/jobs/<int:job_id>/scene/<int:idx>/regenerate", methods=["POST"])
+def video_scene_regenerate(job_id, idx):
+    """Re-generate one scene's image on the GPU (optionally with an edited prompt).
+    Returns immediately; the storyboard poll surfaces gen=busy → ok/err."""
+    try:
+        video_pipeline.regenerate_scene_image(
+            job_id, idx,
+            prompt=request.form.get("prompt"),
+            negative=request.form.get("negative"),
+            seed=request.form.get("seed"))
+        return jsonify({"ok": True, "busy": True})
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+@app.route("/tools/video/jobs/<int:job_id>/rerender", methods=["POST"])
+def video_job_rerender(job_id):
+    """Rebuild the MP4 from existing images/voices (ffmpeg only). Tracked by the
+    same job-list polling as a normal render."""
+    try:
+        video_pipeline.rerender_job(job_id)
+        return jsonify({"ok": True})
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
 @app.route("/tools/video/jobs/<int:job_id>/delete", methods=["POST"])
 def video_job_delete(job_id):
     if video_pipeline.delete_job(job_id):
