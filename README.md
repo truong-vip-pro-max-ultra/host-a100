@@ -138,10 +138,18 @@ ffmpeg assembly. Quick setup:
 1. Add `diffusers` to the OmniVoice env (re-pins `transformers==5.3.0`, leaves
    torch untouched) — upload `scripts/requirements-video-image.txt` via the
    Môi trường tab, or `pip install "diffusers>=0.30.0" "transformers==5.3.0"`.
-2. Pre-download the image model into the shared HF cache on the login node:
-   `snapshot_download("stabilityai/sdxl-turbo", allow_patterns=["*.json","*.txt","*fp16*","*.safetensors"])`
-   with `HF_HOME=$PWD/host-a100-data/hf-cache`.
-3. **Recreate** the voice server (the `--image-model` branch is new).
+2. Pre-download the image model into the shared HF cache on the login node
+   (default = `SG161222/RealVisXL_V5.0_Lightning`, SDXL realism — far fewer
+   duplicated-character / bad-hand artifacts than SDXL-Turbo):
+   `snapshot_download("SG161222/RealVisXL_V5.0_Lightning")` with
+   `HF_HOME=$PWD/host-a100-data/hf-cache`. **The login node runs a C locale**, so
+   set `PYTHONIOENCODING=utf-8` and keep any `print()` ASCII-only or it crashes
+   with `UnicodeEncodeError: latin-1` before downloading (full command in
+   [docs/TOOLS_VIDEO.md](docs/TOOLS_VIDEO.md)).
+3. **Recreate** the voice server (the `--image-model` branch is new; changing the
+   model also needs a recreate). `ImageEngine` auto-detects turbo (no negative) vs
+   lightning/lcm (few-step, CFG ~1.5, negative ON) vs full SDXL, and snaps SDXL to
+   its trained aspect buckets (16:9 → 1344×768) to avoid the twin artifact.
 4. *(Optional)* `pip install -U yt-dlp` in the app's python (login node) to enable
    the **"Lấy kịch bản từ YouTube"** box — paste a video URL and its subtitles drop
    into the script editor.

@@ -76,12 +76,28 @@ nhân đôi/tay hơn nhiều SDXL-Turbo). Tải **toàn bộ layout diffusers** 
 pattern — repo có subfolder unet/vae/text_encoder):
 
 ```bash
-cd <app>            # ~/LeeHoang_/ollama/app/host-a100
-HF_HOME="$PWD/host-a100-data/hf-cache" \
-  host-a100-data/envs/<env-omnivoice>/bin/python -c \
-  "from huggingface_hub import snapshot_download; \
-   snapshot_download('SG161222/RealVisXL_V5.0_Lightning')"
+cd ~/LeeHoang_/ollama/app/host-a100
+# auto-pick the env that has huggingface_hub (no placeholder to fill in)
+for p in host-a100-data/envs/*/bin/python; do
+  if "$p" -c "import huggingface_hub" 2>/dev/null; then PY="$p"; break; fi
+done
+echo "Dùng python: $PY"
+# PYTHONIOENCODING=utf-8 is REQUIRED: the login node runs a C/POSIX locale, so a
+# plain print() of any Vietnamese/non-latin-1 text crashes with
+# 'UnicodeEncodeError: latin-1 codec can't encode…' BEFORE the download starts.
+HF_HOME="$PWD/host-a100-data/hf-cache" PYTHONIOENCODING=utf-8 \
+"$PY" - <<'PY'
+import os
+os.environ.pop("HF_HUB_OFFLINE", None)          # ensure NOT offline while fetching
+from huggingface_hub import snapshot_download
+print(">> Downloading SG161222/RealVisXL_V5.0_Lightning ...", flush=True)
+print(">> DONE. Saved at:", snapshot_download("SG161222/RealVisXL_V5.0_Lightning"))
+PY
 ```
+
+> **Đừng** thêm `!` ở đầu lệnh (đó là cú pháp ô chat, không phải shell server) và
+> **đừng** dán placeholder `<env-omnivoice>` — dấu `<`/`>` bị shell hiểu là chuyển
+> hướng file nên lệnh không chạy gì cả.
 
 > `ImageEngine` thử `variant='fp16'` trước, không có thì tự lùi về bản thường.
 > Đổi model qua env `HOSTA100_IMAGE_MODEL`. Engine tự nhận diện loại model:
@@ -252,6 +268,9 @@ DETACHED restart app**. Chỉ khi đổi `--image-model`/model/quant/env của G
 | Job lỗi `image engine không bật` | Server tạo trước khi có nhánh ảnh → recreate server. |
 | Ảnh ra nền phẳng (màu tối) | Request ảnh lỗi (xem job.log). Thường: thiếu `diffusers` trong env, hoặc chưa tải weights về HF cache, hoặc OOM → giảm batch ảnh. |
 | `Cannot find … offline` trong server.log | Chưa tải weights model ảnh về `OMNI_HF_HOME` trên login node. |
+| `UnicodeEncodeError: 'latin-1' codec` khi tải model | Login node chạy locale C → `print()` chữ có dấu crash *trước khi* tải. Thêm `PYTHONIOENCODING=utf-8` và dùng thông báo không dấu (xem mục Cài đặt 2). |
+| Lệnh tải "không hiện gì" | Đã dán nguyên placeholder `<env-omnivoice>` (dấu `<`/`>` bị shell hiểu là redirect) hoặc thêm `!` ở đầu. Dùng khối tự-dò-env ở mục Cài đặt 2. |
+| Nhân vật bị nhân đôi (twin) / lỗi tay / nhoè | Triệu chứng của SDXL-Turbo (bỏ qua negative + gen 1024×576). Đảm bảo `image_model` là **RealVisXL Lightning** (xem `/health`), gen ở 1344×768. Cảnh lỗi lẻ → bấm **Tạo lại** (seed mới). |
 | Cảnh đầu rất chậm | Bình thường — GPU đang lazy-load SDXL vào VRAM. Các cảnh sau nhanh. |
 | Prompt ra tiếng Anh chung chung | Không có LLM API farm → rule-based. Bật một API-farm server để có prompt cụ thể hơn. |
 | OOM khi vừa chạy ảnh vừa chạy giọng | SDXL + OmniVoice cùng card. Giảm batch ảnh/giọng, hoặc dùng card ≥40GB. |
