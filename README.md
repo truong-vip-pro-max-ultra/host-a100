@@ -105,6 +105,19 @@ app restart. The GPU servers (OmniVoice TTS / image gen, API-farm LLM) are
   server has already loaded its model into VRAM and will **not** pick up the new
   code on `git pull`; only a fresh server runs the updated `omnivoice_server.py`.
 
+## Dashboard
+
+The dashboard live-refreshes (background AJAX of `/dashboard/fragment`, no
+full-page reload) and shows GPU/CPU/RAM/disk, per-model free-GPU counts scoped to
+the `main-gpu` partition, top processes, and recent jobs (clickable → live log
+popup). Under SLURM it also renders a **"Hàng đợi SLURM"** card from one
+read-only `squeue` call (`utils/gpu.slurm_queue()`): your own jobs in detail
+(state, GPU count, time used/limit, node, a Vietnamese-glossed wait reason) plus
+cluster congestion counts (running/pending and how many request a GPU). Pending
+start times are labelled a pessimistic worst-case ("muộn nhất ≤") — they read
+days out while the job usually starts far sooner. The card disappears when
+`squeue` is absent (local dev).
+
 ## Security model
 
 - Every model/env/job name is validated against a strict whitelist; uploaded
