@@ -176,6 +176,7 @@ def _dashboard_context():
         slurm_gres=config.SLURM_GRES,
         slurm_partition=config.SLURM_PARTITION,
         gpu_models=gpu.slurm_gpu_models(config.SLURM_PARTITION or None) or [],
+        slurm_queue=gpu.slurm_queue(config.SLURM_PARTITION or None),
     )
 
 

@@ -133,6 +133,71 @@
   </div>
 </div>
 
+{% if slurm_queue and slurm_queue.me %}
+<div class="card mt-3"><div class="card-body">
+  <h5 class="card-title mb-2"><i class="bi bi-list-ol text-primary"></i> Hàng đợi SLURM
+    <span class="form-text ms-1">— job GPU của bạn &amp; mức độ đông của cụm</span></h5>
+
+  <div class="small mb-3">
+    Partition <code>{{ slurm_queue.partition or 'cả cụm' }}</code>:
+    <span class="badge bg-success">{{ slurm_queue.running_total }} đang chạy</span>
+    <span class="badge bg-warning text-dark">{{ slurm_queue.pending_total }} đang chờ</span>
+    <span class="text-muted ms-1">— xin GPU:
+      <strong>{{ slurm_queue.running_gpu }}</strong> chạy /
+      <strong>{{ slurm_queue.pending_gpu }}</strong> chờ</span>
+  </div>
+
+  {% if slurm_queue.mine %}
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-2">
+      <thead><tr>
+        <th>Job</th><th>Trạng thái</th><th class="text-end">GPU</th>
+        <th>Thời gian</th><th>Node</th><th>Lý do chờ / Dự kiến chạy</th>
+      </tr></thead>
+      <tbody>
+      {% for j in slurm_queue.mine %}
+        <tr>
+          <td><span class="text-muted small">{{ j.id }}</span><br>
+            <strong class="small">{{ j.name }}</strong></td>
+          <td>
+            {% if j.st == 'R' %}<span class="badge bg-success">Đang chạy</span>
+            {% elif j.st == 'PD' %}<span class="badge bg-warning text-dark">Đang chờ</span>
+            {% else %}<span class="badge bg-secondary">{{ j.state }}</span>{% endif %}
+          </td>
+          <td class="text-end">{{ j.gpu or '—' }}</td>
+          <td class="small text-nowrap">{{ j.time_used }}{% if j.time_limit and j.time_limit not in ('UNLIMITED', '') %}
+            <span class="text-muted">/ {{ j.time_limit }}</span>{% endif %}</td>
+          <td class="small">{{ j.node or '—' }}</td>
+          <td class="small">
+            {% if j.st == 'R' %}
+              <span class="text-success">đang chạy</span>
+            {% else %}
+              {% if j.reason_vi %}<div>{{ j.reason_vi }}</div>{% endif %}
+              {% if j.start_est %}
+                <div class="text-muted" title="SLURM tính theo trường hợp xấu nhất (giả định mọi job chạy hết walltime). Thực tế thường chạy SỚM HƠN nhiều — đừng coi là giờ chạy thật.">
+                  <i class="bi bi-clock"></i> muộn nhất ≤ {{ j.start_est }}
+                  <i class="bi bi-info-circle text-muted"></i></div>
+              {% endif %}
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="form-text">
+    “Dự kiến chạy” là mốc <strong>muộn nhất</strong> SLURM ước tính (giả định mọi job
+    dùng hết thời gian) — thực tế thường chạy <strong>sớm hơn nhiều</strong>, cứ để job
+    chờ là nó tự nhảy vào khi có GPU trống. Trần của bạn: tối đa <strong>2 GPU</strong>
+    chạy cùng lúc (QOS <code>students</code>).
+  </div>
+  {% else %}
+  <p class="text-muted small mb-0">Bạn (<code>{{ slurm_queue.me }}</code>) không có job
+    nào trong hàng đợi.</p>
+  {% endif %}
+</div></div>
+{% endif %}
+
 <div class="row g-3 mt-0">
   <div class="col-lg-6">
     <div class="card h-100"><div class="card-body">

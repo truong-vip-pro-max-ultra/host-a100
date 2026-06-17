@@ -5,6 +5,7 @@ All calls use a fixed argument list (never shell=True) so there is no way for
 user input to influence the command. If nvidia-smi is missing (e.g. local dev
 on a non-GPU box) the helpers degrade gracefully.
 """
+import getpass
 import glob
 import os
 import re
@@ -202,6 +203,119 @@ def raw_nvidia_smi():
         return out.stdout or out.stderr or "(no output)"
     except Exception as exc:  # noqa: BLE001 - report any failure to the UI
         return f"Failed to run nvidia-smi: {exc}"
+
+
+# squeue Reason → a short Vietnamese gloss for the dashboard. Unknown reasons are
+# shown verbatim (accuracy over guessing). The long "reserved for higher priority
+# partitions" message and the "ReqNodeNotAvail,..." variants are matched by prefix.
+_REASON_VI = {
+    "Priority": "Chờ tới lượt (xếp hàng — cụm đông)",
+    "Resources": "Chờ GPU/tài nguyên trống",
+    "QOSMaxGRESPerUser": "CHẠM TRẦN GPU của bạn (quota 2 GPU)",
+    "QOSMaxJobsPerUserLimit": "Chạm trần số job của bạn",
+    "QOSGrpGRES": "Chạm trần GPU của nhóm",
+    "AssocGrpGRES": "Chạm trần GPU của nhóm",
+    "Dependency": "Chờ job phụ thuộc chạy xong",
+    "JobArrayTaskLimit": "Giới hạn job array",
+    "BeginTime": "Chờ tới giờ hẹn chạy",
+    "None": "",
+    "": "",
+}
+
+
+def _gpu_count_tres(field):
+    """Sum GPU counts in a squeue TRES-per-node field (`%b`), which — unlike the
+    sinfo Gres field `_gpu_count_any` handles — may be UNTYPED (`gres:gpu:1`) as
+    well as typed (`gres:gpu:ampere:2`), comma-separated."""
+    return sum(int(n) for n in re.findall(r"gpu:(?:[^:,]+:)?(\d+)", field or ""))
+
+
+def _reason_vi(reason):
+    """Translate a squeue Reason to Vietnamese; fall back to the raw string."""
+    r = (reason or "").strip()
+    if r in _REASON_VI:
+        return _REASON_VI[r]
+    if r.startswith("ReqNodeNotAvail"):
+        return "Node yêu cầu chưa sẵn sàng (down/bận)"
+    if "reserved for jobs in higher priority" in r or "DOWN, DRAINED" in r:
+        return "Node cần dùng đang down/được giữ cho job khác"
+    return r
+
+
+def slurm_queue(partition=None, me=None):
+    """Detailed SLURM queue for the dashboard's "Hàng đợi" card.
+
+    ONE read-only `squeue` call (fixed argv, never shell=True) over `partition`.
+    We split out the current user's jobs (detailed — for monitoring our GPU
+    servers) and summarise the rest as congestion context. Returns None when
+    `squeue` is unavailable (e.g. local dev box).
+
+    Each job dict: id, name, user, state ('RUNNING'/'PENDING'/…), st ('R'/'PD'/…),
+    reason (raw), reason_vi (gloss), gpu (int), is_gpu, time_used, time_limit,
+    node, start_est (estimated start for PD; '' when N/A), mine (bool).
+
+    ACCURACY NOTE (matches what bit us in practice): `start_est` is SLURM's
+    PESSIMISTIC worst-case — it assumes every running job uses its FULL walltime,
+    so it routinely reads days out while the job actually starts far sooner. The
+    template labels it as a "muộn nhất" upper bound; never present it as a real ETA.
+    """
+    squeue = shutil.which("squeue")
+    if not squeue:
+        return None
+    if me is None:
+        try:
+            me = getpass.getuser()
+        except Exception:  # noqa: BLE001
+            me = os.environ.get("USER", "")
+    # %S = expected start time (estimate for PENDING jobs), %b = TRES_PER_NODE.
+    fmt = "%i|%j|%u|%T|%r|%b|%M|%l|%N|%S"
+    cmd = [squeue, "-h", "-o", fmt]
+    if partition:
+        cmd += ["-p", partition]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except Exception:  # noqa: BLE001
+        return None
+
+    mine = []
+    pending = running = pending_gpu = running_gpu = 0
+    for line in out.stdout.splitlines():
+        parts = line.split("|")
+        if len(parts) < 10:
+            continue
+        jid, name, user, state, reason, gres, tused, tlimit, node, start = \
+            (p.strip() for p in parts[:10])
+        if not jid:
+            continue
+        gpu_n = _gpu_count_tres(gres)
+        is_gpu = gpu_n > 0
+        if state == "PENDING":
+            pending += 1
+            pending_gpu += is_gpu
+        elif state == "RUNNING":
+            running += 1
+            running_gpu += is_gpu
+        if user != me:
+            continue  # only keep our own jobs in detail; others feed the counts
+        mine.append(dict(
+            id=jid, name=name, user=user, state=state,
+            st={"RUNNING": "R", "PENDING": "PD"}.get(state, (state[:2] or "?")),
+            reason=reason, reason_vi=_reason_vi(reason),
+            gpu=gpu_n, is_gpu=is_gpu,
+            time_used=tused, time_limit=tlimit,
+            node=node if node and node != "(null)" else "",
+            start_est="" if start in ("", "N/A", "(null)") else start,
+            mine=True,
+        ))
+
+    # Running first, then pending, then by job id — the order you want to scan.
+    mine.sort(key=lambda j: (j["state"] != "RUNNING", j["id"]))
+    return dict(
+        me=me, mine=mine,
+        pending_total=pending, running_total=running,
+        pending_gpu=pending_gpu, running_gpu=running_gpu,
+        partition=partition or "",
+    )
 
 
 def gpu_summary():
