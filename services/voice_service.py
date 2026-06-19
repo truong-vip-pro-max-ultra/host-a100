@@ -396,12 +396,16 @@ exec "$PY" {args_quoted} --port "$PORT"
     return script
 
 
-# OmniVoice's diffusion sampling + tokenize + multi-GB weight load have real
-# CPU-side cost, and many clusters default a job to 1 CPU / a tiny RAM slice,
-# which throttles an otherwise-idle L40S. Request a sensible amount unless the
-# operator pinned explicit values in config. L40S nodes have plenty of CPUs.
-_VOICE_DEFAULT_CPUS = "8"
-_VOICE_DEFAULT_MEM = "32G"
+# OmniVoice's diffusion sampling + tokenize + multi-GB weight load have some
+# CPU-side cost, but the actual generation is GPU-bound, so a small CPU/RAM slice
+# barely slows it. We deliberately ask for LITTLE here because this cluster's GPU
+# nodes are usually CPU-saturated: a free GPU typically sits next to only 0-2 idle
+# CPUs (other GPU jobs grabbed the rest). Asking 8 CPU made the voice server queue
+# behind a "Priority" wait for hours even with GPUs free; asking 2 lets it slot
+# into those free-GPU+2-CPU gaps and start almost immediately. Override per
+# deployment with HOSTA100_SLURM_CPUS / _MEM (global) if a node has CPUs to spare.
+_VOICE_DEFAULT_CPUS = "2"
+_VOICE_DEFAULT_MEM = "16G"
 
 
 def _sbatch_flags(server_id, server_dir, slurm_out, gpu_model, time_limit):
