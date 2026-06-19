@@ -112,6 +112,19 @@ def get_scenes(job_id):
         # A version stamp (image mtime) so the UI can cache-bust the thumbnail and
         # auto-refresh it the moment a scene is re-uploaded or regenerated.
         s["ver"] = int(os.path.getmtime(img)) if ok else 0
+        # A scene can instead carry an uploaded VIDEO (vid_XXXX.mp4). Reconcile its
+        # existence + version stamp; fall back to image if the file went missing.
+        vid = os.path.join(job_dir, f"vid_{idx:04d}.mp4")
+        vok = idx >= 0 and os.path.exists(vid) and os.path.getsize(vid) > 1024
+        kind = s.get("kind", "image")
+        if kind == "video" and not vok:
+            kind = "image"
+        s["kind"] = kind
+        s["video"] = vok
+        s["vver"] = int(os.path.getmtime(vid)) if vok else 0
+        s["video_audio"] = bool(s.get("video_audio"))
+        s["vaud"] = bool(s.get("vaud"))            # does the video have a sound track
+        s["video_dur"] = float(s.get("video_dur") or 0.0)
     return scenes
 
 
@@ -121,6 +134,17 @@ def scene_image_path(job_id, idx):
     if not job or not job.get("logs_path"):
         return None
     p = os.path.join(job["logs_path"], f"img_{int(idx):04d}.png")
+    if file_utils.is_within(config.VIDEO_OUTPUTS_DIR, p) and os.path.exists(p):
+        return p
+    return None
+
+
+def scene_video_path(job_id, idx):
+    """Absolute path to a scene's uploaded MP4 if it exists inside the job dir."""
+    job = get_job(job_id)
+    if not job or not job.get("logs_path"):
+        return None
+    p = os.path.join(job["logs_path"], f"vid_{int(idx):04d}.mp4")
     if file_utils.is_within(config.VIDEO_OUTPUTS_DIR, p) and os.path.exists(p):
         return p
     return None
@@ -351,10 +375,49 @@ def _probe_duration(path):
         return 0.0
 
 
+def _has_audio_stream(path):
+    """True if the media file has at least one audio stream (so the 'tiếng nền'
+    toggle can be meaningfully offered / mixed)."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            [config.ffprobe_path(), "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=index", "-of", "csv=p=0", str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
+        return bool((out.stdout or "").strip())
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _overlay_videos(scenes, job_dir):
+    """Patch in per-scene uploaded videos (which live in scenes.json, NOT the
+    render manifest written at the first render). For a video scene the on-screen
+    duration becomes max(narration, video) — a video longer than the voice plays
+    in full; a shorter one freezes on its last frame until the voice ends ('kệ')."""
+    by_idx = {}
+    for s in _read_scenes_raw(job_dir):
+        by_idx[int(s.get("i", 0)) - 1] = s
+    for k, sc in enumerate(scenes):
+        raw = by_idx.get(k)
+        if not raw or raw.get("kind") != "video":
+            continue
+        vid = os.path.join(job_dir, f"vid_{k:04d}.mp4")
+        if not (os.path.exists(vid) and os.path.getsize(vid) > 1024):
+            continue
+        vdur = _probe_duration(vid)
+        sc["video_path"] = vid
+        sc["video_audio"] = bool(raw.get("video_audio"))
+        sc["video_has_audio"] = bool(raw.get("vaud"))
+        if vdur > 0:
+            sc["duration"] = max(float(sc.get("duration") or 0.0), vdur)
+    return scenes
+
+
 def _build_render_scenes(job, manifest=None):
-    """The list of render scenes ({text,image_path,audio_path,duration}) + the
-    render config, rebuilt from the manifest when present, else reconstructed from
-    scenes.json + the wavs on disk (so older jobs without a manifest still work)."""
+    """The list of render scenes ({text,image_path,audio_path,duration} + optional
+    video_path/video_audio) + the render config, rebuilt from the manifest when
+    present, else reconstructed from scenes.json + the wavs on disk (so older jobs
+    without a manifest still work)."""
     job_dir = job["logs_path"]
     params = _job_params(job)
     if manifest and manifest.get("scenes"):
@@ -369,7 +432,7 @@ def _build_render_scenes(job, manifest=None):
                 "audio_path": wav if wav and os.path.exists(wav) else "",
                 "duration": float(m.get("duration") or 0.0)})
         render_cfg = manifest.get("render") or {}
-        return scenes, render_cfg, speed
+        return _overlay_videos(scenes, job_dir), render_cfg, speed
     # Fallback: rebuild from scenes.json text + measured wav durations.
     speed = float(params.get("voice_speed", 1.0)) or 1.0
     raw = _read_scenes_raw(job_dir)
@@ -388,7 +451,7 @@ def _build_render_scenes(job, manifest=None):
     render_cfg = {"width": params.get("width", 1920), "height": params.get("height", 1080),
                   "fps": params.get("fps", 30), "ken_burns": params.get("ken_burns", True),
                   "music_path": params.get("music_path", ""), "voice_speed": speed}
-    return scenes, render_cfg, speed
+    return _overlay_videos(scenes, job_dir), render_cfg, speed
 
 
 def replace_scene_image(job_id, idx, src_path):
@@ -421,9 +484,82 @@ def replace_scene_image(job_id, idx, src_path):
     if proc.returncode != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) < 256:
         raise ValueError("File tải lên không phải ảnh hợp lệ.")
     os.replace(tmp, out)
-    _update_scene(job_dir, idx, image=True, gen="ok", error="", edited=True)
+    # Switching back to a still: drop any uploaded video for this scene so the
+    # renderer uses the image again.
+    _update_scene(job_dir, idx, image=True, kind="image", video=False,
+                  video_audio=False, gen="ok", error="", edited=True)
+    _remove_scene_video(job_dir, idx)
     _job_log(job_dir, f"• Đã thay ảnh cảnh {idx + 1} bằng ảnh tải lên.")
     return int(os.path.getmtime(out))
+
+
+def _remove_scene_video(job_dir, idx):
+    """Best-effort delete of a scene's uploaded video file (when it reverts to an
+    image / a new image is generated)."""
+    try:
+        os.remove(os.path.join(job_dir, f"vid_{idx:04d}.mp4"))
+    except OSError:
+        pass
+
+
+def replace_scene_video(job_id, idx, src_path, keep_audio=False):
+    """Attach an uploaded VIDEO to scene ``idx`` (instead of a still image).
+    Re-encodes through ffmpeg to an H.264/AAC MP4 sized to the job resolution
+    (validates it's a real video, normalises codecs, caps overly long uploads),
+    records its duration + whether it has a sound track, and flips the scene to
+    ``kind='video'``. Returns {ver, dur, vaud}. The background sound defaults OFF."""
+    import subprocess
+    job = get_job(job_id)
+    if not job or not job.get("logs_path"):
+        raise ValueError("Không tìm thấy tác vụ.")
+    job_dir = job["logs_path"]
+    n = len(_read_scenes_raw(job_dir))
+    if not (0 <= idx < n):
+        raise ValueError("Cảnh không hợp lệ.")
+    params = _job_params(job)
+    w = int(params.get("width", 1920)); h = int(params.get("height", 1080))
+    out = os.path.join(job_dir, f"vid_{idx:04d}.mp4")
+    if not file_utils.is_within(config.VIDEO_OUTPUTS_DIR, out):
+        raise ValueError("Đường dẫn không hợp lệ.")
+    tmp = out + ".upload.mp4"
+    vf = (f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+          f"crop={w}:{h},setsar=1")
+    # Cap at 10 min so a huge upload can't tie up the login node forever.
+    cmd = [config.ffmpeg_path(), "-y", "-hide_banner", "-nostdin", "-t", "600",
+           "-i", str(src_path), "-vf", vf, "-pix_fmt", "yuv420p",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+           "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", tmp]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, errors="replace", timeout=900)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"Không xử lý được video: {exc}")
+    if proc.returncode != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) < 1024:
+        raise ValueError("File tải lên không phải video hợp lệ.")
+    os.replace(tmp, out)
+    dur = _probe_duration(out)
+    vaud = _has_audio_stream(out)
+    _update_scene(job_dir, idx, kind="video", video=True,
+                  video_audio=bool(keep_audio) and vaud, vaud=vaud,
+                  video_dur=dur, gen="ok", error="", edited=True)
+    _job_log(job_dir, f"• Đã gắn video ({dur:.1f}s, "
+             f"{'có' if vaud else 'không'} tiếng nền) cho cảnh {idx + 1}.")
+    return {"ver": int(os.path.getmtime(out)), "dur": dur, "vaud": vaud}
+
+
+def set_scene_video_audio(job_id, idx, on):
+    """Toggle whether a video scene keeps its own background sound in the build."""
+    job = get_job(job_id)
+    if not job or not job.get("logs_path"):
+        raise ValueError("Không tìm thấy tác vụ.")
+    job_dir = job["logs_path"]
+    scenes = _read_scenes_raw(job_dir)
+    if not (0 <= idx < len(scenes)):
+        raise ValueError("Cảnh không hợp lệ.")
+    s = scenes[idx]
+    if on and not s.get("vaud"):
+        raise ValueError("Video này không có tiếng nền.")
+    _update_scene(job_dir, idx, video_audio=bool(on))
 
 
 def regenerate_scene_image(job_id, idx, prompt=None, negative=None, seed=None):
@@ -469,7 +605,9 @@ def regenerate_scene_image(job_id, idx, prompt=None, negative=None, seed=None):
             res = _generate_images(host, port, [item])
             r = (res or [{}])[0] or {}
             if r.get("ok") and os.path.exists(out) and os.path.getsize(out) > 256:
-                _update_scene(job_dir, idx, image=True, gen="ok", error="", edited=True)
+                _update_scene(job_dir, idx, image=True, kind="image", video=False,
+                              video_audio=False, gen="ok", error="", edited=True)
+                _remove_scene_video(job_dir, idx)
                 _job_log(job_dir, f"• Đã tạo lại ảnh cảnh {idx + 1} trên GPU.")
             else:
                 err = r.get("error") or "không tạo được ảnh"

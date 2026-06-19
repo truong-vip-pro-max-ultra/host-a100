@@ -14,6 +14,12 @@
   .scene-thumb img { width:100%; height:100%; object-fit:cover; display:block;
                      transition:transform .25s ease; }
   .scene-thumb:hover img { transform:scale(1.05); }
+  .scene-thumb video { width:100%; height:100%; object-fit:cover; display:block;
+                       background:#000; }
+  .scene-thumb.has-video { cursor:default; }
+  .scene-thumb .scene-vidtag { position:absolute; top:.4rem; right:.4rem; z-index:2;
+                 font-size:.62rem; padding:.1rem .4rem; border-radius:1rem;
+                 background:rgba(13,110,253,.9); color:#fff; }
   .scene-thumb .scene-num { position:absolute; top:.4rem; left:.4rem; z-index:2;
                  font-size:.72rem; padding:.15rem .45rem; border-radius:1rem;
                  background:rgba(0,0,0,.65); color:#fff; backdrop-filter:blur(2px); }
@@ -38,9 +44,11 @@
   .scene-thumb.edited::after { content:"đã sửa"; position:absolute; top:.4rem; right:.4rem;
                  z-index:2; font-size:.62rem; padding:.1rem .4rem; border-radius:1rem;
                  background:rgba(25,135,84,.9); color:#fff; }
-  .scene-actions { display:flex; gap:.3rem; margin-top:.4rem; }
+  .scene-actions { display:flex; gap:.3rem; margin-top:.4rem; flex-wrap:wrap; }
   .scene-actions .btn { --bs-btn-padding-y:.1rem; --bs-btn-padding-x:.4rem;
-                 --bs-btn-font-size:.7rem; flex:1; }
+                 --bs-btn-font-size:.7rem; flex:1 1 30%; }
+  .scene-aud { margin-top:.4rem; padding-top:.35rem; border-top:1px dashed var(--bs-border-color); }
+  .scene-aud .form-check-label { font-size:.72rem; }
 </style>
 
 {% set JST = {
@@ -368,8 +376,10 @@
       </div>
       <div class="modal-body">
         <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
-          <span class="small text-muted">Bấm <b>Đổi ảnh</b> để thay ảnh tải lên, hoặc
-            <b>Tạo lại</b> để gen lại trên GPU — rồi <b>Dựng lại video</b>.</span>
+          <span class="small text-muted">Bấm <b>Đổi ảnh</b> để thay ảnh, <b>Đổi video</b>
+            để thay cảnh bằng video tải lên (bật/tắt tiếng nền), hoặc <b>Tạo lại</b>
+            để gen lại trên GPU — rồi <b>Dựng lại video</b>. Video dài hơn giọng đọc
+            sẽ phát hết; ngắn hơn thì giữ khung cuối tới khi đọc xong.</span>
           <div class="d-flex gap-2">
             <button type="button" class="btn btn-sm btn-success" id="rerenderBtn"
                     onclick="rerenderVideo()" title="Dựng lại MP4 với ảnh đã đổi (không chạy lại GPU)">
@@ -403,8 +413,9 @@
   </div>
 </div>
 
-<!-- Hidden file input reused for every scene's "Đổi ảnh" upload -->
+<!-- Hidden file inputs reused for every scene's "Đổi ảnh" / "Đổi video" upload -->
 <input type="file" id="sceneUpload" accept="image/*" class="d-none">
+<input type="file" id="sceneUploadVideo" accept="video/*" class="d-none">
 
 <!-- Log modal -->
 <div class="modal fade" id="logModal" tabindex="-1" aria-hidden="true">
@@ -766,18 +777,34 @@ function imgUrl(id, idx, ver){
   const u = URL_IMG.replace('/0/', '/' + id + '/').replace(/\/0$/, '/' + idx);
   return u + (ver ? ('?v=' + ver) : '');
 }
+function svidUrl(id, idx, ver){
+  return '/tools/video/jobs/' + id + '/scene/' + idx + '/video.mp4'
+    + (ver ? ('?v=' + ver) : '');
+}
 
 function esc(s){ const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 
-// A signature of everything that affects how a thumb looks → repaint only on change.
-function sceneSig(s){ return (s.image ? 1 : 0) + '|' + (s.ver || 0) + '|' + (s.gen || ''); }
+// A signature of everything that affects how a CELL looks → repaint only on change.
+// (Not video_audio: that toggle lives outside the thumb and is reflected instantly.)
+function sceneSig(s){
+  return (s.kind || 'image') + '|' + (s.image ? 1 : 0) + '|' + (s.ver || 0) +
+    '|' + (s.video ? 1 : 0) + '|' + (s.vver || 0) + '|' + (s.gen || '');
+}
 
 function storyThumb(id, s) {
-  let inner = s.image
-    ? '<img loading="lazy" src="' + imgUrl(id, s.i - 1, s.ver) + '" alt="Cảnh ' + s.i +
-      '" onclick="lightbox(this,' + id + ',' + s.i + ')">'
-    : '<div class="skeleton"></div><span class="scene-wait position-absolute">' +
+  const isVideo = s.kind === 'video' && s.video;
+  let inner;
+  if (isVideo) {
+    inner = '<video src="' + svidUrl(id, s.i - 1, s.vver) + '" preload="metadata" ' +
+      'muted loop playsinline controls></video>' +
+      '<span class="scene-vidtag"><i class="bi bi-camera-video"></i> video</span>';
+  } else if (s.image) {
+    inner = '<img loading="lazy" src="' + imgUrl(id, s.i - 1, s.ver) + '" alt="Cảnh ' + s.i +
+      '" onclick="lightbox(this,' + id + ',' + s.i + ')">';
+  } else {
+    inner = '<div class="skeleton"></div><span class="scene-wait position-absolute">' +
       '<i class="bi bi-hourglass-split"></i><br>đang tạo…</span>';
+  }
   let overlay = '';
   if (s.gen === 'busy') {
     overlay = '<span class="scene-busy"><span class="spinner-border spinner-border-sm"></span>' +
@@ -788,11 +815,25 @@ function storyThumb(id, s) {
   }
   return '<span class="scene-num">Cảnh ' + s.i + '</span>' + inner + overlay;
 }
+function sceneAudioSwitch(id, s) {
+  if (!(s.kind === 'video' && s.video)) return '';
+  const idx = s.i - 1;
+  const id_ = 'aud_' + id + '_' + s.i;
+  const dis = s.vaud ? '' : ' disabled';
+  const chk = s.video_audio ? ' checked' : '';
+  const lbl = s.vaud ? 'Bật tiếng nền video' : 'Video không có tiếng nền';
+  return '<div class="form-check form-switch scene-aud">' +
+    '<input class="form-check-input" type="checkbox" role="switch" id="' + id_ + '"' +
+      chk + dis + ' onchange="toggleSceneAudio(' + id + ',' + idx + ',this.checked)">' +
+    '<label class="form-check-label" for="' + id_ + '">' + lbl + '</label></div>';
+}
 function storyCell(id, s) {
   const edited = s.edited ? ' edited' : '';
-  return '<div class="col-6 col-md-4 col-lg-3" data-scene="' + s.i + '">' +
+  const hasVideo = s.kind === 'video' && s.video ? ' has-video' : '';
+  return '<div class="col-6 col-md-4 col-lg-3" data-scene="' + s.i +
+      '" data-sig="' + sceneSig(s) + '">' +
       '<div class="scene-card">' +
-        '<div class="scene-thumb' + edited + '" data-sig="' + sceneSig(s) + '">' +
+        '<div class="scene-thumb' + edited + hasVideo + '">' +
           storyThumb(id, s) + '</div>' +
         '<div class="scene-body">' +
           '<div class="scene-text" title="' + esc(s.text) + '">' + esc(s.text) + '</div>' +
@@ -800,11 +841,15 @@ function storyCell(id, s) {
           '<div class="scene-actions">' +
             '<button type="button" class="btn btn-outline-primary" ' +
               'onclick="pickSceneImage(' + id + ',' + (s.i - 1) + ')" title="Tải ảnh thay thế">' +
-              '<i class="bi bi-upload"></i> Đổi ảnh</button>' +
+              '<i class="bi bi-image"></i> Đổi ảnh</button>' +
+            '<button type="button" class="btn btn-outline-info" ' +
+              'onclick="pickSceneVideo(' + id + ',' + (s.i - 1) + ')" title="Tải video thay cảnh này">' +
+              '<i class="bi bi-camera-video"></i> Đổi video</button>' +
             '<button type="button" class="btn btn-outline-secondary" ' +
               'onclick="regenScene(' + id + ',' + (s.i - 1) + ')" title="Tạo lại ảnh trên GPU">' +
               '<i class="bi bi-arrow-repeat"></i> Tạo lại</button>' +
           '</div>' +
+          sceneAudioSwitch(id, s) +
         '</div>' +
       '</div></div>';
 }
@@ -825,22 +870,21 @@ function showStoryboard(id) {
   // no scroll jump, keeps the action buttons). Runs every poll.
   function paint(scenes) {
     document.getElementById('storyCount').textContent =
-      scenes.length ? (scenes.filter(s => s.image).length + '/' + scenes.length + ' ảnh') : '';
+      scenes.length ? (scenes.filter(s => s.image || s.video).length + '/' +
+                       scenes.length + ' cảnh') : '';
     if (!scenes.length) { grid.innerHTML = ''; empty.classList.remove('d-none'); return; }
     empty.classList.add('d-none');
     if (grid.querySelectorAll('[data-scene]').length !== scenes.length) {
       grid.innerHTML = scenes.map(s => storyCell(id, s)).join('');   // first / structure change
       return;
     }
+    // Rebuild a whole cell only when its signature changes (image↔video switch,
+    // new version, regen state) — keeps the action buttons + audio toggle in sync
+    // without flicker. Iterating over `scenes` (not live DOM) makes outerHTML-swap safe.
     scenes.forEach(function (s) {
-      const thumb = grid.querySelector('[data-scene="' + s.i + '"] .scene-thumb');
-      if (!thumb) return;
-      const sig = sceneSig(s);
-      if (thumb.dataset.sig !== sig) {
-        thumb.dataset.sig = sig;
-        thumb.innerHTML = storyThumb(id, s);
-        thumb.classList.toggle('edited', !!s.edited);
-      }
+      const cell = grid.querySelector('[data-scene="' + s.i + '"]');
+      if (!cell) return;
+      if (cell.dataset.sig !== sceneSig(s)) cell.outerHTML = storyCell(id, s);
     });
   }
   function load() {
@@ -853,7 +897,8 @@ function showStoryboard(id) {
         const scenes = d.scenes || [];
         paint(scenes);
         // Keep polling while any scene is still rendering OR being regenerated.
-        const settled = scenes.length && scenes.every(s => s.image && s.gen !== 'busy');
+        const settled = scenes.length &&
+          scenes.every(s => (s.image || s.video) && s.gen !== 'busy');
         if (settled && storyTimer) { clearInterval(storyTimer); storyTimer = null; }
       }).catch(() => {});
   }
@@ -896,6 +941,49 @@ document.getElementById('sceneUpload').addEventListener('change', function () {
     .finally(() => { if (window.Loader) Loader.done(); });
 });
 window.pickSceneImage = pickSceneImage;
+
+// ---- per-scene VIDEO upload + background-sound toggle --------------------
+function pickSceneVideo(id, idx) {
+  const inp = document.getElementById('sceneUploadVideo');
+  inp.dataset.jobId = id; inp.dataset.idx = idx; inp.value = '';
+  inp.click();
+}
+document.getElementById('sceneUploadVideo').addEventListener('change', function () {
+  const f = this.files && this.files[0];
+  if (!f) return;
+  const id = this.dataset.jobId, idx = parseInt(this.dataset.idx, 10);
+  const body = new FormData(); body.append('video', f); body.append('keep_audio', '0');
+  if (window.Loader) Loader.start();
+  toast('Đang xử lý video cảnh ' + (idx + 1) + '… (có thể mất một lúc)', 'info');
+  fetch('/tools/video/jobs/' + id + '/scene/' + idx + '/video', {
+    method: 'POST', headers: { 'X-Requested-With': 'fetch' }, body,
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        toast('Đã gắn video cho cảnh ' + (idx + 1) + ' (tiếng nền mặc định tắt).', 'success');
+        if (window.storyPoke) storyPoke();
+      } else toast(d.error || 'Không đổi được video.', 'danger');
+    })
+    .catch(() => toast('Lỗi kết nối.', 'danger'))
+    .finally(() => { if (window.Loader) Loader.done(); });
+});
+window.pickSceneVideo = pickSceneVideo;
+
+function toggleSceneAudio(id, idx, on) {
+  const body = new FormData(); body.append('on', on ? '1' : '0');
+  fetch('/tools/video/jobs/' + id + '/scene/' + idx + '/video-audio', {
+    method: 'POST', headers: { 'X-Requested-With': 'fetch' }, body,
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) toast((on ? 'Bật' : 'Tắt') + ' tiếng nền video cảnh ' + (idx + 1) +
+        ' — nhớ Dựng lại video.', 'success');
+      else toast(d.error || 'Không đổi được.', 'danger');
+    })
+    .catch(() => toast('Lỗi kết nối.', 'danger'));
+}
+window.toggleSceneAudio = toggleSceneAudio;
 
 function regenScene(id, idx) {
   const msg = 'Tạo lại ảnh cảnh ' + (idx + 1) + ' trên GPU (seed mới)?';

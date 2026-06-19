@@ -1217,6 +1217,50 @@ def video_scene_regenerate(job_id, idx):
         return jsonify({"ok": False, "error": str(exc)}), 400
 
 
+@app.route("/tools/video/jobs/<int:job_id>/scene/<int:idx>/video", methods=["POST"])
+def video_scene_replace_video(job_id, idx):
+    """Attach an uploaded video to one scene (instead of the still image). The
+    background sound is kept only if 'keep_audio' is set (default off)."""
+    f = request.files.get("video")
+    if not f or not f.filename:
+        return jsonify({"ok": False, "error": "Chưa chọn video."}), 400
+    keep_audio = request.form.get("keep_audio") in ("1", "true", "on")
+    tmp = os.path.join(tempfile.gettempdir(), f"vid_up_{uuid.uuid4().hex}")
+    try:
+        f.save(tmp)
+        info = video_pipeline.replace_scene_video(job_id, idx, tmp,
+                                                  keep_audio=keep_audio)
+        return jsonify({"ok": True, **info})
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+@app.route("/tools/video/jobs/<int:job_id>/scene/<int:idx>/video.mp4")
+def video_scene_video_file(job_id, idx):
+    path = video_pipeline.scene_video_path(job_id, idx)
+    if not path:
+        abort(404)
+    return send_from_directory(os.path.dirname(path), os.path.basename(path),
+                               as_attachment=False)
+
+
+@app.route("/tools/video/jobs/<int:job_id>/scene/<int:idx>/video-audio",
+           methods=["POST"])
+def video_scene_video_audio(job_id, idx):
+    """Toggle whether a video scene keeps its background sound in the build."""
+    on = request.form.get("on") in ("1", "true", "on")
+    try:
+        video_pipeline.set_scene_video_audio(job_id, idx, on)
+        return jsonify({"ok": True, "on": on})
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
 @app.route("/tools/video/jobs/<int:job_id>/rerender", methods=["POST"])
 def video_job_rerender(job_id):
     """Rebuild the MP4 from existing images/voices (ffmpeg only). Tracked by the

@@ -60,6 +60,10 @@ DEFAULT_RENDER = {
     "ken_burns_intensity": 0.12,
     "music_volume": 0.12,
     "music_path": "",
+    # When a scene's source is an uploaded VIDEO (not a still) and its background
+    # audio is kept, the video's own sound is mixed UNDER the narration at this
+    # gain (the narration stays on top). 1.0 = full, 0 = silent.
+    "video_bg_volume": 0.7,
     # Narration reading speed (pitch-preserved atempo): >1 faster, <1 slower. The
     # scene durations are pre-scaled by 1/speed in the pipeline, so the picture +
     # subtitles follow the audio exactly.
@@ -113,14 +117,44 @@ def _ken_burns_filter(index, frames, w, h, intensity, fps):
 
 
 def _render_scene_clip(scene, index, out, r, work_dir, sub_name=None):
-    """Render one scene's clip: still → Ken Burns + fade, and BURN that scene's
-    subtitle here (``sub_name`` = an .ass file in work_dir timed 0..dur). Burning
-    per-clip parallelises the (single-threaded) libass work across all clip
-    workers, so the final pass can stream-COPY the video instead of re-encoding
-    the whole movie just to burn subs — that was the slow 'Ghép hoàn thiện' step."""
+    """Render one scene's clip: still → Ken Burns + fade (or an uploaded VIDEO clip,
+    scaled/cropped to frame), and BURN that scene's subtitle here (``sub_name`` =
+    an .ass file in work_dir timed 0..dur). Burning per-clip parallelises the
+    (single-threaded) libass work across all clip workers, so the final pass can
+    stream-COPY the video instead of re-encoding the whole movie just to burn subs
+    — that was the slow 'Ghép hoàn thiện' step. The clip is always silent (``-an``):
+    audio (narration + optional video background) is rebuilt in the final pass."""
     fps = int(r["fps"])
     dur = max(0.8, float(scene.get("duration") or 0.0))
     frames = max(1, int(round(dur * fps)))
+    fd = min(float(r["transition_duration"]), dur / 3.0)
+    fade = (f"fade=t=in:st=0:d={fd:.3f},"
+            f"fade=t=out:st={max(0, dur - fd):.3f}:d={fd:.3f}")
+
+    vid = scene.get("video_path") or ""
+    is_video = bool(vid) and Path(vid).exists()
+    if is_video:
+        # An uploaded video scene: scale/crop to frame, normalise the fps, and hold
+        # the last frame (tpad clone) if the clip is shorter than the scene's
+        # duration — then -t trims to exactly `dur`. No Ken Burns (it already moves).
+        # `dur` is max(narration, video) upstream, so a video longer than the voice
+        # plays in full; a shorter one freezes on its last frame until the voice ends.
+        vf = (f"scale={r['width']}:{r['height']}:force_original_aspect_ratio="
+              f"increase:flags=lanczos,crop={r['width']}:{r['height']},"
+              f"fps={fps},tpad=stop_mode=clone:stop_duration={dur:.3f},"
+              f"setsar=1,{fade}")
+        if sub_name:
+            vf += f",subtitles={sub_name}"
+        vf += ",format=yuv420p"
+        args = ["-i", str(vid), "-filter_complex", f"[0:v]{vf}[v]", "-map", "[v]",
+                "-t", f"{dur:.3f}", "-r", str(fps),
+                "-c:v", "libx264", "-preset", r.get("clip_preset", "veryfast"),
+                "-crf", str(r["crf"]), "-pix_fmt", "yuv420p", "-an", str(out)]
+        rc, log = _run_ffmpeg(args, cwd=work_dir)
+        if rc != 0 or not Path(out).exists():
+            raise RuntimeError(f"ffmpeg dựng cảnh {index + 1} (video) lỗi: "
+                               f"{(log or '')[-300:]}")
+        return out
 
     img = scene.get("image_path") or ""
     if not img or not Path(img).exists():
@@ -135,9 +169,7 @@ def _render_scene_clip(scene, index, out, r, work_dir, sub_name=None):
               f"increase:flags=lanczos,crop={r['width']}:{r['height']},"
               f"unsharp=5:5:0.8:5:5:0.0,setsar=1")
 
-    fd = min(float(r["transition_duration"]), dur / 3.0)
-    vf += (f",fade=t=in:st=0:d={fd:.3f},"
-           f"fade=t=out:st={max(0, dur - fd):.3f}:d={fd:.3f}")
+    vf += f",{fade}"
     # Burn this scene's subtitle (relative name + cwd=work_dir avoids the
     # subtitles= path-escaping pitfalls). Runs inside the existing per-clip encode.
     if sub_name:
@@ -195,7 +227,12 @@ def _atempo_chain(speed):
     return [f"atempo={f:.6f}" for f in factors]
 
 
-def _voice_concat_filters(scenes, start_idx, speed=1.0):
+def _voice_concat_filters(scenes, start_idx, speed=1.0, bg_map=None, bg_volume=0.7):
+    """Build the per-scene narration segments → one gapless ``[voc]`` track. When a
+    scene appears in ``bg_map`` (k → ffmpeg input index of an uploaded video that
+    keeps its background sound), that video's audio is trimmed/padded to the scene
+    duration, ducked to ``bg_volume`` and mixed UNDER the narration for that scene."""
+    bg_map = bg_map or {}
     lead_trim = (f"silenceremove=start_periods=1:start_threshold="
                  f"{_NARRATION_SILENCE_DB}:start_silence={_NARRATION_EDGE_KEEP}:"
                  f"detection=peak,")
@@ -208,6 +245,8 @@ def _voice_concat_filters(scenes, start_idx, speed=1.0):
         idx = start_idx + k
         dur = max(0.8, float(s.get("duration") or 0.0))
         fade_out_st = max(0.0, dur - _DECLICK_FADE)
+        has_bg = k in bg_map
+        voice_out = f"vv{k}" if has_bg else f"a{k}"
         chain = (
             "aresample=async=1,"
             "aformat=sample_rates=48000:channel_layouts=stereo,"
@@ -217,7 +256,22 @@ def _voice_concat_filters(scenes, start_idx, speed=1.0):
             f"afade=t=in:st=0:d={_DECLICK_FADE},"
             f"afade=t=out:st={fade_out_st:.3f}:d={_DECLICK_FADE}"
         )
-        lines.append(f"[{idx}:a]{chain}[a{k}]")
+        lines.append(f"[{idx}:a]{chain}[{voice_out}]")
+        if has_bg:
+            bg_in = bg_map[k]
+            # The video's own sound, locked to the scene duration and ducked, then
+            # mixed under the narration (normalize=0 keeps the narration loud).
+            bg_chain = (
+                "aresample=async=1,"
+                "aformat=sample_rates=48000:channel_layouts=stereo,"
+                f"apad,atrim=0:{dur:.3f},asetpts=N/SR/TB,"
+                f"volume={float(bg_volume):.3f},"
+                f"afade=t=in:st=0:d={_DECLICK_FADE},"
+                f"afade=t=out:st={fade_out_st:.3f}:d={_DECLICK_FADE}"
+            )
+            lines.append(f"[{bg_in}:a]{bg_chain}[bg{k}]")
+            lines.append(f"[vv{k}][bg{k}]amix=inputs=2:duration=first:"
+                         f"dropout_transition=0:normalize=0[a{k}]")
         labels.append(f"[a{k}]")
     lines.append(f"{''.join(labels)}concat=n={len(scenes)}:v=0:a=1[voc]")
     return lines
@@ -446,15 +500,29 @@ def render(scenes, work_dir, out_path, render=None, subtitle=None,
               concat_file.name]
     inputs += _audio_inputs(scenes, work_dir)   # inputs 1..n
     audio_start = 1
+    next_idx = audio_start + n
 
     music = r.get("music_path") or ""
     has_music = bool(music) and Path(music).exists()
     if has_music:
         inputs += ["-stream_loop", "-1", "-i", str(music)]
-        music_idx = audio_start + n
+        music_idx = next_idx
+        next_idx += 1
 
-    filters = list(_voice_concat_filters(scenes, audio_start,
-                                         speed=float(r.get("voice_speed", 1.0))))
+    # Uploaded-video scenes that keep their background sound become extra audio
+    # inputs (mixed under the narration per scene by _voice_concat_filters).
+    bg_map = {}
+    for k, s in enumerate(scenes):
+        vid = s.get("video_path") or ""
+        if (s.get("video_audio") and s.get("video_has_audio")
+                and vid and Path(vid).exists()):
+            inputs += ["-i", _rel(vid, work_dir)]
+            bg_map[k] = next_idx
+            next_idx += 1
+
+    filters = list(_voice_concat_filters(
+        scenes, audio_start, speed=float(r.get("voice_speed", 1.0)),
+        bg_map=bg_map, bg_volume=float(r.get("video_bg_volume", 0.7))))
     if has_music:
         filters.append(f"[{music_idx}:a]volume={r['music_volume']}[mus]")
         filters.append("[voc][mus]amix=inputs=2:duration=first:normalize=0[mix]")
