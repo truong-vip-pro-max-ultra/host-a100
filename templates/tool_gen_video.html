@@ -49,6 +49,11 @@
                  --bs-btn-font-size:.7rem; flex:1 1 30%; }
   .scene-aud { margin-top:.4rem; padding-top:.35rem; border-top:1px dashed var(--bs-border-color); }
   .scene-aud .form-check-label { font-size:.72rem; }
+  .scene-upload { gap:.45rem !important; }
+  .scene-upload .su-bar { width:80%; height:6px; border-radius:3px;
+                 background:rgba(255,255,255,.25); overflow:hidden; }
+  .scene-upload .su-fill { height:100%; background:#0d6efd; width:0;
+                 transition:width .15s ease; }
 </style>
 
 {% set JST = {
@@ -882,6 +887,7 @@ function showStoryboard(id) {
     // new version, regen state) — keeps the action buttons + audio toggle in sync
     // without flicker. Iterating over `scenes` (not live DOM) makes outerHTML-swap safe.
     scenes.forEach(function (s) {
+      if (uploadingScenes.has(uploadKey(id, s.i - 1))) return;  // keep upload overlay
       const cell = grid.querySelector('[data-scene="' + s.i + '"]');
       if (!cell) return;
       if (cell.dataset.sig !== sceneSig(s)) cell.outerHTML = storyCell(id, s);
@@ -943,6 +949,38 @@ document.getElementById('sceneUpload').addEventListener('change', function () {
 window.pickSceneImage = pickSceneImage;
 
 // ---- per-scene VIDEO upload + background-sound toggle --------------------
+// Scenes currently uploading a video (key = "<jobId>:<idx>"). While a scene is in
+// here, paint() leaves its cell alone so the live progress overlay isn't wiped, and
+// "Dựng lại video" is blocked (the server is still re-encoding → the new clip isn't
+// on disk yet, so rebuilding now would still use the old image).
+const uploadingScenes = new Set();
+function uploadKey(id, idx) { return id + ':' + idx; }
+
+function sceneThumbEl(idx) {
+  const cell = document.getElementById('storyGrid')
+    .querySelector('[data-scene="' + (idx + 1) + '"]');
+  return cell ? cell.querySelector('.scene-thumb') : null;
+}
+function showSceneUploadOverlay(idx, pct, label) {
+  const thumb = sceneThumbEl(idx);
+  if (!thumb) return;
+  let ov = thumb.querySelector('.scene-upload');
+  if (!ov) { ov = document.createElement('div'); ov.className = 'scene-busy scene-upload';
+    thumb.appendChild(ov); }
+  ov.innerHTML = (pct < 100)
+    ? '<div class="su-bar"><div class="su-fill" style="width:' + pct + '%"></div></div>' +
+      '<div>' + label + ' ' + pct + '%</div>'
+    : '<span class="spinner-border spinner-border-sm"></span><div>' + label + '</div>';
+}
+function clearSceneUploadOverlay(idx) {
+  const thumb = sceneThumbEl(idx);
+  if (thumb) { const ov = thumb.querySelector('.scene-upload'); if (ov) ov.remove(); }
+}
+function syncRerenderEnabled() {
+  const btn = document.getElementById('rerenderBtn');
+  if (btn) btn.disabled = uploadingScenes.size > 0;
+}
+
 function pickSceneVideo(id, idx) {
   const inp = document.getElementById('sceneUploadVideo');
   inp.dataset.jobId = id; inp.dataset.idx = idx; inp.value = '';
@@ -952,22 +990,45 @@ document.getElementById('sceneUploadVideo').addEventListener('change', function 
   const f = this.files && this.files[0];
   if (!f) return;
   const id = this.dataset.jobId, idx = parseInt(this.dataset.idx, 10);
-  const body = new FormData(); body.append('video', f); body.append('keep_audio', '0');
-  if (window.Loader) Loader.start();
-  toast('Đang xử lý video cảnh ' + (idx + 1) + '… (có thể mất một lúc)', 'info');
-  fetch('/tools/video/jobs/' + id + '/scene/' + idx + '/video', {
-    method: 'POST', headers: { 'X-Requested-With': 'fetch' }, body,
-  })
-    .then(r => r.json())
-    .then(d => {
-      if (d.ok) {
-        toast('Đã gắn video cho cảnh ' + (idx + 1) + ' (tiếng nền mặc định tắt).', 'success');
-        if (window.storyPoke) storyPoke();
-      } else toast(d.error || 'Không đổi được video.', 'danger');
-    })
-    .catch(() => toast('Lỗi kết nối.', 'danger'))
-    .finally(() => { if (window.Loader) Loader.done(); });
+  uploadVideoForScene(id, idx, f);
 });
+function uploadVideoForScene(id, idx, file) {
+  const key = uploadKey(id, idx);
+  uploadingScenes.add(key);
+  syncRerenderEnabled();
+  showSceneUploadOverlay(idx, 0, 'Đang tải lên');
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/tools/video/jobs/' + id + '/scene/' + idx + '/video');
+  xhr.setRequestHeader('X-Requested-With', 'fetch');
+  // Real upload % (the file leaving the browser)…
+  xhr.upload.onprogress = function (e) {
+    if (e.lengthComputable)
+      showSceneUploadOverlay(idx, Math.round(e.loaded / e.total * 100), 'Đang tải lên');
+  };
+  // …then the server re-encodes to MP4 (no % available) — show a spinner so the
+  // user knows NOT to rebuild yet.
+  xhr.upload.onload = function () {
+    showSceneUploadOverlay(idx, 100, 'Đang xử lý video trên máy chủ…');
+  };
+  xhr.onload = function () {
+    uploadingScenes.delete(key); syncRerenderEnabled();
+    let d = {}; try { d = JSON.parse(xhr.responseText); } catch (e) {}
+    if (xhr.status >= 200 && xhr.status < 300 && d.ok) {
+      toast('Đã gắn video cho cảnh ' + (idx + 1) + ' (tiếng nền mặc định tắt). '
+        + 'Bấm “Dựng lại video” để ghép.', 'success');
+      if (window.storyPoke) storyPoke();   // repaints the cell → shows the <video>
+    } else {
+      clearSceneUploadOverlay(idx);
+      toast((d && d.error) || ('Không đổi được video (HTTP ' + xhr.status + ').'), 'danger');
+    }
+  };
+  xhr.onerror = function () {
+    uploadingScenes.delete(key); syncRerenderEnabled(); clearSceneUploadOverlay(idx);
+    toast('Lỗi kết nối khi tải video.', 'danger');
+  };
+  const body = new FormData(); body.append('video', file); body.append('keep_audio', '0');
+  xhr.send(body);
+}
 window.pickSceneVideo = pickSceneVideo;
 
 function toggleSceneAudio(id, idx, on) {

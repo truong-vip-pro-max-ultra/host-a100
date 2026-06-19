@@ -646,6 +646,12 @@ def rerender_job(job_id):
             _set_job(job_id, status="running", stage="Đang dựng lại video…",
                      progress=5, error="")
             log("↻ Dựng lại video từ ảnh/giọng đã có (không chạy lại GPU).")
+            nvid = sum(1 for s in scenes if s.get("video_path"))
+            if nvid:
+                naud = sum(1 for s in scenes
+                           if s.get("video_path") and s.get("video_audio"))
+                log(f"  → {nvid} cảnh dùng video tải lên "
+                    f"({naud} cảnh bật tiếng nền).")
             mp4, srt = video_render.render(
                 scenes, job_dir, out_mp4, render=render_cfg, on_log=log,
                 on_stage=lambda m: _set_job(job_id, stage=m),
