@@ -83,6 +83,15 @@ OMNI_BATCH_ENABLED = os.environ.get("HOSTA100_OMNI_BATCH", "1")  # "0" = off
 # script runs it with the env's python on the compute node.
 OMNI_SERVER_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "scripts", "omnivoice_server.py")
+# Stage the env to the compute node's LOCAL disk before importing torch/omnivoice.
+# Importing a multi-GB venv straight off the shared NFS is brutally slow on this
+# cluster (~9 min: torch ~2 min + omnivoice ~9 min of metadata "stat storm"),
+# which is why the server looked like it "hung at loading". Running the SAME env
+# from node-local /tmp drops the import to ~4s. run.sh extracts a (compressed)
+# tarball of the env to $TMPDIR once, then runs python from there; it falls back
+# to the NFS python on any failure, so it always works (just slow). The tarball
+# is built/refreshed on the LOGIN node (where it's cheaper) next to the env dir.
+OMNI_STAGE_LOCAL = os.environ.get("HOSTA100_OMNI_STAGE_LOCAL", "1") != "0"
 
 # --------------------------------------------------------------------------- #
 # Tools → Gen video từ kịch bản. A SECOND tool that reuses the SAME GPU server

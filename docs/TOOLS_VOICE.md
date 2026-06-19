@@ -58,9 +58,46 @@ dropdown chọn server giọng nói. (Tạo venv tay bằng terminal sẽ KHÔNG
 > (ghim cứng: bản mới cần torch≥2.7 → crash khi import omnivoice với torch 2.6).
 >
 > torch cu124 đi kèm các wheel `nvidia-*-cu12` (libcudart/libcublas…); batch
-> script tự thêm chúng vào `LD_LIBRARY_PATH` (`_cuda_lib_dirs`) nên **không cần
-> `module load cuda`** (driver `libcuda.so.1` đã có sẵn trên GPU node). Card mới
-> hơn (Blackwell 50xx) mới cần cu128 + torch 2.8 — với L40S thì cu124 là an toàn.
+> script tự dò chúng (`nvidia/*/lib`) rồi thêm vào `LD_LIBRARY_PATH` ngay trên
+> node nên **không cần `module load cuda`** (driver `libcuda.so.1` đã có sẵn trên
+> GPU node). Card mới hơn (Blackwell 50xx) mới cần cu128 + torch 2.8 — với L40S
+> thì cu124 là an toàn.
+
+### Tăng tốc nạp model: stage venv về ổ local của node (QUAN TRỌNG)
+
+**Triệu chứng "server nạp model mãi không xong / cứ ở loading":** không phải treo,
+mà là `import torch/omnivoice` **từ venv nằm trên FS chung (NFS) quá chậm**. Đo
+thực tế trên cluster này: import từ NFS mất **~9 phút** (torch ~2 phút + omnivoice
+~9 phút do "bão `stat()`" hàng nghìn file nhỏ), trong khi chạy ĐÚNG venv đó từ ổ
+**local của node (`/tmp`)** chỉ mất **~4 giây** — nhanh hơn ~100 lần. Node A40 NFS
+còn chậm hơn nên dễ tưởng là treo.
+
+`run.sh` (do `voice_service` sinh ra) vì vậy **giải nén một tarball của venv ra ổ
+local của node rồi chạy python từ đó** (`config.OMNI_STAGE_LOCAL`, mặc định bật):
+
+- Đọc **1 file nén tuần tự** → né được "bão stat" của NFS. Tarball nằm **cạnh thư
+  mục env**: `host-a100-data/envs/<env>.tar.gz` (ưu tiên `.tar.zst` > `.tar.gz`/
+  `.tgz` > `.tar`). Phải nén để giảm số byte đọc qua NFS (NFS ở đây ~12 MB/s) —
+  bản chưa nén 5.7GB đọc mất ~8 phút, gần như không lợi.
+- Bản đã stage được **tái sử dụng** (khoá theo size+mtime của tarball) nên
+  restart/auto-resubmit trên cùng node là **tức thì**; các bản cũ (khác chữ ký)
+  bị dọn trước để chỉ giữ 1 bản/env/node, không đầy `/tmp`.
+- **Tự fallback về python trên NFS** (chạy được, chỉ chậm) nếu thiếu tarball,
+  thiếu `zstd`, hay giải nén lỗi → không bao giờ vỡ.
+
+**Tạo tarball (làm 1 lần, trên LOGIN node):** gói + nén thư mục env. `tar` thuần
+chịu "bão stat" 1 lần ở nơi nhanh (login), `gzip`/`pigz` đọc tuần tự để nén:
+
+```bash
+cd ~/LeeHoang_/ollama/app/host-a100/host-a100-data/envs
+tar -cf env-omnivoice.tar env-omnivoice        # (chậm 1 lần — đọc nguội cả env)
+command -v pigz >/dev/null && pigz -p4 env-omnivoice.tar || gzip env-omnivoice.tar
+ls -lh env-omnivoice.tar.gz                     # ~2–3GB
+```
+
+Sau khi pip cài thêm gói vào env, app tự nhận tarball **cũ hơn env** và **build lại
+ở nền** (gzip/pigz); lần khởi động đó dùng tạm bản cũ (hoặc NFS nếu chưa có), lần
+sau dùng bản mới. Muốn tắt hẳn: `HOSTA100_OMNI_STAGE_LOCAL=0`.
 
 ### 2. Cache weights OmniVoice (chạy script warmup trên login node)
 
@@ -215,6 +252,7 @@ Tất cả có default hợp lý — chỉ đặt khi cần đổi. Sửa thẳn
 | `HOSTA100_HF_HOME` | `OMNI_HF_HOME` | `DATA_DIR/hf-cache` | HF cache chung (warmup tải vào đây) |
 | `HOSTA100_OMNI_MAX_BATCH` | `OMNI_MAX_BATCH` | `8` | **Giá trị MẶC ĐỊNH** của ô batch trên form (mỗi job tự chỉnh được, không cần recreate). ↑ = ăn VRAM nhiều hơn, OOM thì ↓ |
 | `HOSTA100_OMNI_BATCH` | `OMNI_BATCH_ENABLED` | `1` | `0` = tắt hẳn batch GPU ở server (cần recreate) |
+| `HOSTA100_OMNI_STAGE_LOCAL` | `OMNI_STAGE_LOCAL` | `1` | `0` = tắt stage venv về ổ local (chạy thẳng NFS, chậm). Cần tarball `envs/<env>.tar.gz` |
 | `HOSTA100_FFMPEG` / `HOSTA100_FFPROBE` | — | dò PATH / `ffmpeg/` | Đường dẫn ffmpeg/ffprobe trên login node |
 | `HOSTA100_SLURM_CPUS` / `_MEM` | `SLURM_CPUS`/`_MEM` | `8` / `32G` (riêng voice) | CPU/RAM xin cho server giọng nói |
 
@@ -234,6 +272,8 @@ nhiễu — audio TTS vốn sạch; nhiễu mép đoạn đã tự khử. Pipeli
 
 | Triệu chứng | Nguyên nhân | Cách xử lý |
 |---|---|---|
+| **Server nạp model mãi không xong / cứ ở loading** (nhất là A40) | `import torch/omnivoice` từ venv trên NFS quá chậm (~9 phút, "bão stat") | Tạo tarball venv (mục "Tăng tốc nạp model") để stage về ổ local → import ~4s. Kiểm `server.log`: `dùng venv local` = đã stage; `staging thất bại`/`zstd thiếu` = đang chạy NFS chậm |
+| Đã tạo tarball nhưng vẫn chậm | Server cũ chạy bằng `run.sh` cũ; hoặc tarball chưa nén (5.7GB đọc 8 phút) | **Dừng + Khởi động lại** server (run.sh sinh lại lúc submit); nén tarball (`pigz`/`gzip`) |
 | Job treo `PD (QOSMaxGRESPerUser)` | Quota GPU/user (vd 2) đã hết — server khác đang giữ | Dừng bớt 1 server GPU (API farm/voice). Bạn chạy tối đa N GPU job cùng lúc |
 | Treo dù còn GPU trống | Ghim loại GPU (`--constraint`) mà loại đó bận; hoặc `--time` vượt giới hạn node | Chọn "Bất kỳ GPU rảnh"; hạ "Thời lượng tối đa" |
 | `Cannot find … cached snapshot … offline` (giọng **mặc định**) | Weights chính chưa cache | Chạy `scripts/warmup_omnivoice.py` (Bước 2) |

@@ -177,35 +177,186 @@ def _append_log(server_dir, text):
         pass
 
 
-def _cuda_lib_dirs(py):
-    """nvidia-*-cu12 wheel lib dirs inside the env so the compute node can dlopen
-    libcudart/libcublas/… without a `module load cuda` (the driver libcuda.so.1
-    is already on GPU nodes). Torch usually bundles these as nvidia-* wheels."""
-    code = ("import sysconfig, glob, os;"
-            "p = sysconfig.get_paths()['purelib'];"
-            "print(chr(10).join(glob.glob(os.path.join(p, 'nvidia', '*', 'lib'))))")
+# --------------------------------------------------------------------------- #
+# Stage the env to node-local disk (huge import speedup; see config.OMNI_STAGE_LOCAL)
+# --------------------------------------------------------------------------- #
+# Tarball candidates next to the env dir, most-compressed first. zstd needs the
+# `zstd` binary on the compute node (may be absent); gzip is built into `tar`
+# everywhere, so the auto-builder produces .tar.gz for portability.
+_TARBALL_SUFFIXES = (".tar.zst", ".tar.gz", ".tgz", ".tar")
+_builds_lock = threading.Lock()
+_builds_active = set()
+
+
+def _env_path_from_py(py):
+    """`<env>/bin/python` → `<env>`."""
+    return os.path.dirname(os.path.dirname(py))
+
+
+def _tarball_sig(tarball):
+    """A short signature (size + mtime) identifying THIS tarball build, so the
+    node-local staged copy is reused while the tarball is unchanged and re-extracted
+    when it's rebuilt. Filename-safe."""
     try:
-        out = subprocess.run([py, "-c", code], stdout=subprocess.PIPE,
-                             text=True, timeout=30).stdout
-    except Exception:  # noqa: BLE001
-        return []
-    return [d.strip() for d in out.splitlines() if d.strip()]
+        st = os.stat(tarball)
+        return f"{st.st_size}-{int(st.st_mtime)}"
+    except OSError:
+        return "0-0"
+
+
+def _find_env_tarball(env_path):
+    """Return the newest usable tarball sitting next to the env dir, or ""."""
+    for suf in _TARBALL_SUFFIXES:
+        cand = env_path + suf
+        if os.path.isfile(cand) and not os.path.exists(cand + ".tmp"):
+            return cand
+    return ""
+
+
+def _tarball_is_stale(env_path, tarball):
+    """True if the env looks newer than the tarball (e.g. a pip install added
+    packages). Cheap: only stats the env root + its site-packages dir, never
+    walks the whole tree (that walk is the very 'stat storm' we're avoiding)."""
+    try:
+        tb_m = os.path.getmtime(tarball)
+    except OSError:
+        return True
+    newest = 0.0
+    paths = [env_path]
+    import glob as _glob
+    paths += _glob.glob(os.path.join(env_path, "lib", "python*", "site-packages"))
+    for p in paths:
+        try:
+            newest = max(newest, os.path.getmtime(p))
+        except OSError:
+            pass
+    return newest > tb_m
+
+
+def _build_env_tarball(env_path):
+    """Build `<env>.tar.gz` on the LOGIN node (pigz if available, else gzip),
+    atomically via a .tmp rename. Runs in a background thread so it never blocks a
+    server launch; until it exists the launch falls back to the slow NFS python."""
+    if not (os.path.isdir(env_path) and shutil.which("tar")):
+        return
+    parent = os.path.dirname(env_path)
+    base = os.path.basename(env_path)
+    out = env_path + ".tar.gz"
+    tmp = out + ".tmp"
+    with _builds_lock:
+        if env_path in _builds_active:
+            return
+        _builds_active.add(env_path)
+
+    def _run():
+        try:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            if shutil.which("pigz"):
+                cmd = ["tar", "-C", parent, "--use-compress-program=pigz",
+                       "-cf", tmp, base]
+            else:
+                cmd = ["tar", "-C", parent, "-czf", tmp, base]
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+            if res.returncode == 0 and os.path.isfile(tmp):
+                os.replace(tmp, out)
+            else:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            with _builds_lock:
+                _builds_active.discard(env_path)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _ensure_env_tarball(py):
+    """Return a tarball path to stage on the node, or "" to run straight from NFS.
+    Kicks off a background (re)build when none exists or it's stale; that build
+    won't be ready for THIS launch (we return "" → NFS fallback) but the next
+    launch picks it up."""
+    if not config.OMNI_STAGE_LOCAL:
+        return ""
+    env_path = _env_path_from_py(py)
+    tb = _find_env_tarball(env_path)
+    if tb and not _tarball_is_stale(env_path, tb):
+        return tb
+    _build_env_tarball(env_path)   # (re)build in background; "" this time
+    return tb if tb else ""
 
 
 def _write_batch_script(server_dir, py, cmd):
     """run.sh executed by sbatch on the GPU node: point HF at the shared offline
-    cache, make the env's CUDA libs findable, pick a free port, advertise
-    <node>:<port> in endpoint.json, then exec the OmniVoice server."""
+    cache, STAGE the env to node-local disk (so importing torch/omnivoice takes
+    ~4s instead of ~9 min off NFS — see config.OMNI_STAGE_LOCAL), make the env's
+    CUDA libs findable, pick a free port, advertise <node>:<port> in
+    endpoint.json, then exec the OmniVoice server."""
     script = os.path.join(server_dir, "run.sh")
     endpoint = os.path.join(server_dir, _ENDPOINT_FILE)
-    quoted = " ".join(shlex.quote(c) for c in cmd)
+    # cmd[0] is the NFS python; the rest are the server args. We run the server
+    # with the STAGED (local) python when staging succeeds, else this NFS one.
+    nfs_py = cmd[0]
+    args_quoted = " ".join(shlex.quote(c) for c in cmd[1:])
     hf_home = shlex.quote(config.OMNI_HF_HOME)
-    ld_line = ""
-    cuda_dirs = _cuda_lib_dirs(py)
-    if cuda_dirs:
-        joined = shlex.quote(":".join(cuda_dirs))
-        ld_line = (f"export LD_LIBRARY_PATH={joined}"
-                   f'"${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"\n')
+    tarball = _ensure_env_tarball(py)
+    env_base = os.path.basename(_env_path_from_py(py))
+
+    stage_block = ""
+    if tarball:
+        tb_q = shlex.quote(tarball)
+        base_q = shlex.quote(env_base)
+        sig_q = shlex.quote(_tarball_sig(tarball))
+        # Decompress the env tarball into the node's LOCAL scratch and run python
+        # from there. Sequential read of one (compressed) file avoids the NFS
+        # "stat storm" that makes a cold import crawl (~9 min → ~4 s). The staged
+        # copy is keyed on a tarball signature and REUSED across launches on the
+        # same node (so a restart/auto-resubmit is instant) — and we do NOT clean
+        # it on exit (exec replaces this shell, so an EXIT trap wouldn't fire
+        # anyway); instead we prune older signatures up front so disk stays bounded
+        # to one copy per env per node. Any failure leaves PY on NFS (just slow).
+        stage_block = f"""STAGE_BASE="${{TMPDIR:-/tmp}}/hosta100-env"
+STAGE="$STAGE_BASE/{base_q}-{sig_q}"
+PYLOCAL="$STAGE/{base_q}/bin/python"
+mkdir -p "$STAGE_BASE"
+if [ -f "$STAGE/.staged_ok" ] && [ -x "$PYLOCAL" ]; then
+  PY="$PYLOCAL"
+  echo "[host-a100] dùng venv local đã stage sẵn: $PY"
+else
+  # Prune older staged copies of THIS env (different signature) to bound disk.
+  for d in "$STAGE_BASE/{base_q}-"*; do
+    [ -e "$d" ] && [ "$d" != "$STAGE" ] && rm -rf "$d" || true
+  done
+  rm -rf "$STAGE"; mkdir -p "$STAGE"
+  echo "[host-a100] staging env -> $STAGE (giải nén, 1 lần/node)…"
+  STAGE_OK=0
+  case {tb_q} in
+    *.tar.zst)
+      if command -v zstd >/dev/null 2>&1; then
+        {{ zstd -dc {tb_q} 2>/dev/null | tar -xf - -C "$STAGE"; }} && STAGE_OK=1 || true
+      else
+        echo "[host-a100] zstd thiếu trên node — bỏ qua staging, dùng NFS."
+      fi ;;
+    *.tar.gz|*.tgz) tar -xzf {tb_q} -C "$STAGE" && STAGE_OK=1 || true ;;
+    *.tar)          tar -xf  {tb_q} -C "$STAGE" && STAGE_OK=1 || true ;;
+  esac
+  if [ "$STAGE_OK" = 1 ] && [ -x "$PYLOCAL" ]; then
+    touch "$STAGE/.staged_ok"
+    PY="$PYLOCAL"
+    echo "[host-a100] dùng venv local: $PY"
+  else
+    rm -rf "$STAGE" || true
+    echo "[host-a100] staging thất bại — chạy thẳng từ NFS (chậm hơn)."
+  fi
+fi
+"""
+
     body = f"""#!/bin/bash
 set -e
 export HF_HOME={hf_home}
@@ -223,13 +374,18 @@ export IMAGE_MODEL={shlex.quote(str(config.IMAGE_MODEL_ID))}
 # diffusion sampling + tokenize), instead of defaulting to 1 thread.
 export OMP_NUM_THREADS=${{SLURM_CPUS_PER_TASK:-8}}
 export MKL_NUM_THREADS=${{SLURM_CPUS_PER_TASK:-8}}
-{ld_line}PORT=$({shlex.quote(py)} -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));p=s.getsockname()[1];s.close();print(p)')
+PY={shlex.quote(nfs_py)}
+{stage_block}# CUDA wheel libs (libcudart/libcublas…) so we can dlopen without `module load
+# cuda`. Computed from the CHOSEN python so staged runs use the local copies.
+LD=$("$PY" -c 'import sysconfig,glob,os;p=sysconfig.get_paths()["purelib"];print(":".join(glob.glob(os.path.join(p,"nvidia","*","lib"))))' 2>/dev/null || true)
+[ -n "$LD" ] && export LD_LIBRARY_PATH="$LD${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}" || true
+PORT=$("$PY" -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));p=s.getsockname()[1];s.close();print(p)')
 HOST=${{SLURMD_NODENAME:-$(hostname -s)}}
 cat > {shlex.quote(endpoint)} <<EOF
 {{"host":"$HOST","port":$PORT}}
 EOF
 echo "[host-a100] OmniVoice server on $HOST:$PORT"
-exec {quoted} --port "$PORT"
+exec "$PY" {args_quoted} --port "$PORT"
 """
     with open(script, "w", encoding="utf-8") as fh:
         fh.write(body)
