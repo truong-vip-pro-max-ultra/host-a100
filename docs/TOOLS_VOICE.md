@@ -177,6 +177,29 @@ gọi với `-threads 0 -filter_complex_threads 0` để tận dụng **toàn b�
    mỗi đoạn **đã tự khử** (không có nút khử nhiễu — audio TTS vốn sạch). Theo dõi
    ở bảng **Tác vụ**, xong thì **▶ nghe thử** / tải **MP3** / tải **SRT**.
 
+### Kho theo người dùng (username)
+
+Bảng **Tác vụ giọng đọc** có ô **"Tên người dùng"** chia tác vụ theo *namespace*
+(giống tab Gen video — xem `docs/TOOLS_VIDEO.md`):
+
+- **Để trống** → xem & tạo vào **kho công khai** (`owner=''`).
+- **Nhập tên** → chỉ thấy và tạo vào kho riêng của tên đó; **chỉ ai nhập đúng tên
+  mới thấy**. Đây là namespace để tổ chức, **không phải xác thực** (cả app đã nằm
+  sau login chủ sở hữu).
+
+Cột `voice_jobs.owner` (mặc định `''`); `voice_pipeline.list_jobs(owner)` lọc
+`owner=?` (hoặc `COALESCE(owner,'')=''` cho public), `start_job(owner=…)` đóng dấu
+khi tạo. Tên trim + cap 64 ký tự (`normalize_owner`), lưu localStorage, và prefill
+được từ `?u=<tên>` (link từ trang ẩn `/users`). Bảng tác vụ tự reconcile theo
+`jobs.json?username=` nên đổi tên là đổi danh sách ngay; "Xoá tất cả" chỉ xoá trong
+kho đang xem.
+
+**Trang ẩn `/users`:** liệt kê mọi username đang có ở **cả 2 tab** (giọng + video)
+kèm số lượng mỗi loại, có ô lọc tên và nút mở nhanh sang đúng kho. **Không** xuất
+hiện trong menu — chỉ ai biết URL mới vào (vẫn sau login chủ sở hữu). Route
+`users_page` trong `app.py`, gộp `voice_pipeline.list_owners()` +
+`video_pipeline.list_owners()`; template `templates/users.html`.
+
 ### Kiểu giọng (thiết kế giọng — voice design)
 
 OmniVoice có chế độ **voice design**: thay vì clone từ file mẫu, model tự "thiết

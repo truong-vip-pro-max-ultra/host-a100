@@ -937,6 +937,7 @@ def voice_job_submit():
             denoise=f.get("denoise") is not None,
             batch=f.get("batch", ""),
             instruct=instruct,
+            owner=f.get("username", ""),
         )
         if wants_json:
             return jsonify({"ok": True, "id": job_id,
@@ -952,7 +953,7 @@ def voice_job_submit():
 @app.route("/tools/voice/jobs.json")
 def voice_jobs_json():
     out = []
-    for j in voice_pipeline.list_jobs():
+    for j in voice_pipeline.list_jobs(request.args.get("username")):
         out.append({
             "id": j["id"], "name": j["name"], "status": j["status"],
             "progress": j["progress"], "stage": j.get("stage"),
@@ -1016,7 +1017,7 @@ def voice_jobs_bulk_delete():
     wants_json = (request.headers.get("X-Requested-With") == "fetch"
                   or "application/json" in request.headers.get("Accept", ""))
     if request.form.get("all") == "1":
-        ids = [j["id"] for j in voice_pipeline.list_jobs()]
+        ids = [j["id"] for j in voice_pipeline.list_jobs(request.form.get("username"))]
     else:
         ids = []
         for raw in request.form.getlist("ids"):
@@ -1250,6 +1251,23 @@ def video_jobs_bulk_delete():
     flash(f"Đã xoá {deleted} tác vụ." if deleted else "Không có tác vụ nào được xoá.",
           "success" if deleted else "warning")
     return redirect(url_for("tool_gen_video"))
+
+
+@app.route("/users")
+def users_page():
+    """Hidden index of every username namespace across BOTH tools (voice + video).
+    Deliberately NOT linked anywhere in the nav/UI — reachable only by knowing the
+    URL. The whole app is already behind the owner login, so this is just an
+    unlisted overview of who has private libraries and how many items each holds."""
+    merged = {}
+    for owner, n in voice_pipeline.list_owners():
+        merged.setdefault(owner, {"voice": 0, "video": 0})["voice"] = n
+    for owner, n in video_pipeline.list_owners():
+        merged.setdefault(owner, {"voice": 0, "video": 0})["video"] = n
+    users = [{"name": k, "voice": v["voice"], "video": v["video"],
+              "total": v["voice"] + v["video"]}
+             for k, v in sorted(merged.items(), key=lambda kv: kv[0].lower())]
+    return render_template("users.html", users=users)
 
 
 # --------------------------------------------------------------------------- #

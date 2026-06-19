@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Người dùng{% endblock %}
+{% block page_title %}Kho theo người dùng{% endblock %}
+{% block page_sub %}Trang ẩn — danh sách mọi username đang dùng ở tab Clone giọng nói & Gen video{% endblock %}
+{% block content %}
+
+<div class="alert alert-secondary py-2 small d-flex align-items-center gap-2">
+  <i class="bi bi-eye-slash"></i>
+  <span>Trang này <b>không có trong menu</b> — chỉ ai biết link <code>/users</code> mới
+    vào được. Mỗi tên là một “kho riêng”: chỉ khi nhập đúng tên ở tab tương ứng mới
+    thấy &amp; tạo được nội dung trong kho đó. (Kho công khai không hiện ở đây.)</span>
+</div>
+
+<div class="card"><div class="card-body">
+  <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+    <h5 class="card-title mb-0"><i class="bi bi-people"></i> Người dùng
+      <span class="badge bg-secondary ms-1">{{ users|length }}</span></h5>
+    <input class="form-control form-control-sm" id="filter" style="max-width:240px"
+           placeholder="Lọc theo tên…" autocomplete="off">
+  </div>
+
+  {% if users %}
+  <div class="table-responsive">
+  <table class="table table-sm align-middle mb-0" style="min-width:560px">
+    <thead><tr>
+      <th>Tên người dùng</th>
+      <th class="text-center" style="width:1%"><i class="bi bi-mic"></i> Giọng</th>
+      <th class="text-center" style="width:1%"><i class="bi bi-film"></i> Video</th>
+      <th class="text-center" style="width:1%">Tổng</th>
+      <th class="text-end" style="width:1%">Mở kho</th>
+    </tr></thead>
+    <tbody id="userBody">
+    {% for u in users %}
+      <tr data-name="{{ u.name|lower }}">
+        <td class="fw-semibold">{{ u.name }}</td>
+        <td class="text-center">{% if u.voice %}<span class="badge bg-primary-subtle text-primary-emphasis">{{ u.voice }}</span>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+        <td class="text-center">{% if u.video %}<span class="badge bg-info-subtle text-info-emphasis">{{ u.video }}</span>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+        <td class="text-center"><span class="badge bg-secondary">{{ u.total }}</span></td>
+        <td class="text-end text-nowrap">
+          <a class="btn btn-sm btn-outline-primary {% if not u.voice %}disabled{% endif %}"
+             href="{{ url_for('tool_clone_voice') }}?u={{ u.name|urlencode }}"
+             title="Mở kho giọng của {{ u.name }}"><i class="bi bi-mic"></i></a>
+          <a class="btn btn-sm btn-outline-info {% if not u.video %}disabled{% endif %}"
+             href="{{ url_for('tool_gen_video') }}?u={{ u.name|urlencode }}"
+             title="Mở kho video của {{ u.name }}"><i class="bi bi-film"></i></a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <div id="noMatch" class="text-muted small d-none p-2">Không có tên nào khớp.</div>
+  {% else %}
+  <div class="text-muted">Chưa có username riêng nào — mọi nội dung đang ở kho công khai.</div>
+  {% endif %}
+</div></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const filter = document.getElementById('filter');
+if (filter) {
+  filter.addEventListener('input', function () {
+    const q = this.value.trim().toLowerCase();
+    let shown = 0;
+    document.querySelectorAll('#userBody tr').forEach(function (tr) {
+      const hit = !q || tr.dataset.name.includes(q);
+      tr.classList.toggle('d-none', !hit);
+      if (hit) shown++;
+    });
+    const nm = document.getElementById('noMatch');
+    if (nm) nm.classList.toggle('d-none', shown > 0);
+  });
+}
+</script>
+{% endblock %}

@@ -53,6 +53,14 @@ def list_jobs(owner=None):
     return [dict(r) for r in rows]
 
 
+def list_owners():
+    """[(username, job_count)] for every non-public namespace, A→Z (case-insensitive)."""
+    rows = db.execute(
+        "SELECT owner, COUNT(*) AS n FROM video_jobs WHERE COALESCE(owner,'')<>'' "
+        "GROUP BY owner ORDER BY owner COLLATE NOCASE", fetch="all") or []
+    return [(r["owner"], r["n"]) for r in rows]
+
+
 def get_job(job_id):
     row = db.execute("SELECT * FROM video_jobs WHERE id=?", (job_id,), fetch="one")
     return dict(row) if row else None

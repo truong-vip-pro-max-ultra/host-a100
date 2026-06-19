@@ -151,6 +151,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS voice_jobs (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 name        TEXT,
+                owner       TEXT NOT NULL DEFAULT '',  -- username namespace; '' = public
                 status      TEXT NOT NULL DEFAULT 'queued',
                 progress    INTEGER NOT NULL DEFAULT 0,
                 stage       TEXT,
@@ -200,10 +201,11 @@ def _migrate(conn):
         if col not in have:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {decl}")
 
-    # video_jobs gained an owner (username) namespace after first release.
-    vid_have = {row["name"] for row in conn.execute("PRAGMA table_info(video_jobs)")}
-    if "owner" not in vid_have:
-        conn.execute("ALTER TABLE video_jobs ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
+    # video_jobs + voice_jobs gained an owner (username) namespace after first release.
+    for tbl in ("video_jobs", "voice_jobs"):
+        have_cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({tbl})")}
+        if "owner" not in have_cols:
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
 
 
 def execute(sql, params=(), *, commit=False, fetch=None):

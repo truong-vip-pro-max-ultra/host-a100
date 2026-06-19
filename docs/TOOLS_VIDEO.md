@@ -159,6 +159,11 @@ lặp → đổ vào ô kịch bản. Không cài thì nút bị mờ, tự nh�
    `owner=?` (hoặc `COALESCE(owner,'')=''` cho public), `start_job(owner=…)` đóng dấu
    khi tạo. Tên được trim + cap 64 ký tự (`normalize_owner`); lưu localStorage để
    giữ qua reload. "Xoá tất cả" chỉ xoá trong kho đang xem (không vói sang kho khác).
+   Prefill được từ `?u=<tên>` (link từ trang ẩn `/users`).
+6. **Trang ẩn `/users`:** liệt kê mọi username ở **cả 2 tab** (giọng + video) kèm số
+   lượng + nút mở nhanh sang đúng kho (`?u=<tên>`). Không có trong menu — chỉ ai biết
+   URL mới vào (vẫn sau login chủ sở hữu). Route `users_page`, template `users.html`,
+   gộp `voice_pipeline.list_owners()` + `video_pipeline.list_owners()`.
 
 ---
 

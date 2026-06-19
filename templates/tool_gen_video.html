@@ -646,9 +646,13 @@ taskUserEl.addEventListener('input', onUserChange);
 document.getElementById('clearUserBtn').addEventListener('click', function () {
   taskUserEl.value = ''; onUserChange(); taskUserEl.focus();
 });
+// Prefill from ?u=<name> (the hidden /users page links here), else last localStorage.
 try {
+  const fromUrl = new URLSearchParams(location.search).get('u');
   const saved = localStorage.getItem('hosta100:videoUser');
-  if (saved) taskUserEl.value = saved;
+  if (fromUrl != null) { taskUserEl.value = fromUrl;
+    try { localStorage.setItem('hosta100:videoUser', taskUser()); } catch (e) {} }
+  else if (saved) taskUserEl.value = saved;
 } catch (e) {}
 updateUserHint();
 pollJobs();

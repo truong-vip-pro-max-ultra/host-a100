@@ -380,10 +380,33 @@ def delete_profile(pid):
 # --------------------------------------------------------------------------- #
 # Jobs: script → MP3 + SRT
 # --------------------------------------------------------------------------- #
-def list_jobs():
-    rows = db.execute("SELECT * FROM voice_jobs ORDER BY created_at DESC LIMIT 100",
-                      fetch="all") or []
+def normalize_owner(username):
+    """The username namespace a job lives in. Blank/whitespace → '' (public).
+    Trimmed + capped so two spellings of the same name don't split a library."""
+    return (username or "").strip()[:64]
+
+
+def list_jobs(owner=None):
+    """Voice jobs in one namespace. owner blank/None → only PUBLIC jobs (owner='');
+    a non-blank owner → only that user's jobs (exact match — wrong name sees none)."""
+    owner = normalize_owner(owner)
+    if owner:
+        rows = db.execute(
+            "SELECT * FROM voice_jobs WHERE owner=? ORDER BY created_at DESC LIMIT 100",
+            (owner,), fetch="all") or []
+    else:
+        rows = db.execute(
+            "SELECT * FROM voice_jobs WHERE COALESCE(owner,'')='' "
+            "ORDER BY created_at DESC LIMIT 100", fetch="all") or []
     return [dict(r) for r in rows]
+
+
+def list_owners():
+    """[(username, job_count)] for every non-public namespace, A→Z (case-insensitive)."""
+    rows = db.execute(
+        "SELECT owner, COUNT(*) AS n FROM voice_jobs WHERE COALESCE(owner,'')<>'' "
+        "GROUP BY owner ORDER BY owner COLLATE NOCASE", fetch="all") or []
+    return [(r["owner"], r["n"]) for r in rows]
 
 
 def get_job(job_id):
@@ -409,7 +432,7 @@ def _set_job(job_id, **fields):
 
 
 def start_job(name, text, profile_name="", language="vi", num_step=16, seed=-1,
-              speed=1.0, denoise=False, batch=None, instruct=""):
+              speed=1.0, denoise=False, batch=None, instruct="", owner=""):
     """Create a voice_jobs row and kick off the background render thread.
     Validates that a GPU server is ready and the script is non-empty."""
     text = (text or "").strip()
@@ -440,10 +463,11 @@ def start_job(name, text, profile_name="", language="vi", num_step=16, seed=-1,
               "num_step": num_step, "seed": seed, "speed": speed,
               "denoise": bool(denoise), "batch": batch, "instruct": instruct}
     name = (name or "narration").strip()[:128]
+    owner = normalize_owner(owner)
     job_id = db.execute(
-        "INSERT INTO voice_jobs (name, status, progress, stage, params, created_at) "
-        "VALUES (?, 'queued', 0, ?, ?, ?)",
-        (name, "Đang chuẩn bị…", json.dumps(params, ensure_ascii=False), db.now()),
+        "INSERT INTO voice_jobs (name, owner, status, progress, stage, params, created_at) "
+        "VALUES (?, ?, 'queued', 0, ?, ?, ?)",
+        (name, owner, "Đang chuẩn bị…", json.dumps(params, ensure_ascii=False), db.now()),
         commit=True)
     job_dir = file_utils.safe_join(config.VOICE_OUTPUTS_DIR, str(job_id))
     os.makedirs(job_dir, exist_ok=True)
