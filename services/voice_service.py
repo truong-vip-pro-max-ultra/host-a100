@@ -359,6 +359,11 @@ fi
 
     body = f"""#!/bin/bash
 set -e
+# Compute nodes often have a latin-1 console; force Python UTF-8 mode so any
+# non-ASCII print() in the server (e.g. a '…' or a Vietnamese model note) can't
+# crash the model-load thread mid-startup and leave /health stuck at ready=false.
+export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
 export HF_HOME={hf_home}
 export HUGGINGFACE_HUB_CACHE={hf_home}/hub
 export HF_HUB_OFFLINE=1

@@ -193,7 +193,7 @@ class OmniEngine:
             from omnivoice import OmniVoice
             device, dtype, dtype_str = self._pick_device()
             self._device, self._dtype_str = device, dtype_str
-            print(f"[omnivoice] loading '{self.model_id}' on {device} ({dtype_str})…",
+            print(f"[omnivoice] loading '{self.model_id}' on {device} ({dtype_str})...",
                   flush=True)
             try:
                 model = OmniVoice.from_pretrained(self.model_id, device_map=device,
@@ -559,7 +559,7 @@ class ImageEngine:
             else:
                 self._device, dtype, self._dtype_str = "cpu", torch.float32, "float32"
             print(f"[image] loading '{self.model_id}' on {self._device} "
-                  f"({self._dtype_str})…", flush=True)
+                  f"({self._dtype_str})...", flush=True)
             try:
                 pipe = AutoPipelineForText2Image.from_pretrained(
                     self.model_id, torch_dtype=dtype, safety_checker=None,
@@ -908,6 +908,15 @@ def _free_port():
 
 def main():
     global ENGINE, IMAGE_ENGINE
+    # Compute nodes may have a latin-1 console; make stdout/stderr tolerate any
+    # non-ASCII print so the model-load thread can't die on a stray '…' (which
+    # would leave /health reporting ready=false forever). run.sh also sets
+    # PYTHONUTF8=1 as a belt-and-suspenders; this covers other launch paths.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=os.environ.get("OMNI_MODEL", DEFAULT_MODEL))
     ap.add_argument("--image-model",
