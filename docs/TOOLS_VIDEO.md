@@ -152,6 +152,13 @@ lặp → đổ vào ô kịch bản. Không cài thì nút bị mờ, tự nh�
    chưa tạo xong hiện ô "đang tạo…"). Dùng được cả khi job đang chạy lẫn đã xong.
    Cơ chế: pipeline ghi `scenes.json` (text+prompt+cờ ảnh) trong job dir, cập nhật
    sau bước prompt và sau mỗi nhóm ảnh; route `…/scenes.json` + `…/img/<idx>` phục vụ.
+5. **Kho theo người dùng (username):** ô "Tên người dùng" ngay trên bảng tác vụ chia
+   video theo *namespace*. Để **trống** → xem & dựng vào **kho công khai**; **nhập
+   tên** → chỉ thấy và dựng vào kho riêng của tên đó (chỉ ai nhập đúng tên mới thấy).
+   Cột `owner` trong `video_jobs` lưu tên (rỗng = public); `list_jobs(owner)` lọc
+   `owner=?` (hoặc `COALESCE(owner,'')=''` cho public), `start_job(owner=…)` đóng dấu
+   khi tạo. Tên được trim + cap 64 ký tự (`normalize_owner`); lưu localStorage để
+   giữ qua reload. "Xoá tất cả" chỉ xoá trong kho đang xem (không vói sang kho khác).
 
 ---
 

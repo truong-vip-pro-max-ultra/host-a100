@@ -32,9 +32,24 @@ from utils import file_utils
 # --------------------------------------------------------------------------- #
 # Queries
 # --------------------------------------------------------------------------- #
-def list_jobs():
-    rows = db.execute("SELECT * FROM video_jobs ORDER BY created_at DESC LIMIT 100",
-                      fetch="all") or []
+def normalize_owner(username):
+    """The username namespace a video lives in. Blank/whitespace → '' (public).
+    Trimmed + capped so two spellings of the same name don't split a library."""
+    return (username or "").strip()[:64]
+
+
+def list_jobs(owner=None):
+    """Videos in one namespace. owner blank/None → only PUBLIC videos (owner='');
+    a non-blank owner → only that user's videos (exact match — wrong name sees none)."""
+    owner = normalize_owner(owner)
+    if owner:
+        rows = db.execute(
+            "SELECT * FROM video_jobs WHERE owner=? ORDER BY created_at DESC LIMIT 100",
+            (owner,), fetch="all") or []
+    else:
+        rows = db.execute(
+            "SELECT * FROM video_jobs WHERE COALESCE(owner,'')='' "
+            "ORDER BY created_at DESC LIMIT 100", fetch="all") or []
     return [dict(r) for r in rows]
 
 
@@ -173,7 +188,7 @@ def start_job(name, script, profile_name="", language="vi", voice_seed=0,
               num_step=16, style="cinematic", use_llm=True, width=1920,
               height=1080, fps=30, ken_burns=True, image_steps=6,
               image_batch=None, voice_batch=None, music_path="", voice_speed=1.0,
-              image_cfg=1.0):
+              image_cfg=1.0, owner=""):
     """Create a video_jobs row + kick off the render thread. Validates that a GPU
     server is ready, ffmpeg exists, and the script is non-empty."""
     script = (script or "").strip()
@@ -218,10 +233,11 @@ def start_job(name, script, profile_name="", language="vi", voice_seed=0,
         "voice_speed": voice_speed, "image_cfg": image_cfg,
     }
     name = (name or "video").strip()[:128]
+    owner = normalize_owner(owner)
     job_id = db.execute(
-        "INSERT INTO video_jobs (name, status, progress, stage, params, created_at) "
-        "VALUES (?, 'queued', 0, ?, ?, ?)",
-        (name, "Đang chuẩn bị…", json.dumps(params, ensure_ascii=False), db.now()),
+        "INSERT INTO video_jobs (name, owner, status, progress, stage, params, created_at) "
+        "VALUES (?, ?, 'queued', 0, ?, ?, ?)",
+        (name, owner, "Đang chuẩn bị…", json.dumps(params, ensure_ascii=False), db.now()),
         commit=True)
     job_dir = file_utils.safe_join(config.VIDEO_OUTPUTS_DIR, str(job_id))
     os.makedirs(job_dir, exist_ok=True)
@@ -671,10 +687,11 @@ def delete_job(job_id):
     return True
 
 
-def bulk_delete(ids=None, all_jobs=False):
-    """Delete many jobs. Returns the count removed."""
+def bulk_delete(ids=None, all_jobs=False, owner=None):
+    """Delete many jobs. Returns the count removed. ``all_jobs`` is scoped to the
+    given namespace (public when owner is blank) so it can't reach across users."""
     if all_jobs:
-        ids = [j["id"] for j in list_jobs()]
+        ids = [j["id"] for j in list_jobs(owner)]
     count = 0
     for jid in ids or []:
         try:

@@ -272,6 +272,19 @@
             <i class="bi bi-trash3"></i> Xoá tất cả</button>
         </div>
       </div>
+
+      <!-- Username namespace: blank = kho công khai (public); nhập đúng tên = kho
+           riêng của người đó (cả xem danh sách lẫn dựng video mới đều theo tên này). -->
+      <div class="input-group input-group-sm mb-2">
+        <span class="input-group-text"><i class="bi bi-person-badge"></i></span>
+        <input class="form-control" id="taskUser" name="username" autocomplete="off"
+               maxlength="64" placeholder="Tên người dùng (để trống = kho công khai)">
+        <button type="button" class="btn btn-outline-secondary" id="clearUserBtn"
+                title="Về kho công khai"><i class="bi bi-x-lg"></i></button>
+      </div>
+      <div class="form-text mb-2" id="taskUserHint">Đang xem <b>kho công khai</b>.
+        Nhập tên người dùng để xem &amp; dựng video vào kho riêng của bạn — chỉ ai nhập
+        đúng tên mới thấy được.</div>
       <div class="table-responsive">
       <table class="table table-sm align-middle mb-0" style="min-width:600px">
         <thead><tr>
@@ -460,33 +473,64 @@ if (window.FormStore) {
   });
 }
 
-function makeJobRow(id, name) {
-  const noJob = document.getElementById('noJob');
-  if (noJob) noJob.remove();
-  const tr = document.createElement('tr');
-  tr.id = 'vjob-' + id;
-  tr.innerHTML =
-    '<td><input type="checkbox" class="form-check-input job-cb" value="' + id + '" onclick="updateSel()"></td>' +
+// ---- username namespace (xem/dựng theo người dùng) ----------------------
+const taskUserEl = document.getElementById('taskUser');
+function taskUser() { return (taskUserEl.value || '').trim(); }
+function jobsUrl() {
+  const u = '{{ url_for("video_jobs_json") }}';
+  const un = taskUser();
+  return un ? (u + '?username=' + encodeURIComponent(un)) : u;
+}
+function updateUserHint() {
+  const un = taskUser();
+  document.getElementById('taskUserHint').innerHTML = un
+    ? ('Đang xem kho riêng của <b>' + esc(un) + '</b>. Video dựng mới sẽ lưu vào kho này.')
+    : ('Đang xem <b>kho công khai</b>. Nhập tên người dùng để xem &amp; dựng video vào '
+       + 'kho riêng của bạn — chỉ ai nhập đúng tên mới thấy được.');
+}
+
+// One <tr>'s inner HTML built from a jobs.json record (used by the reconciler).
+function jobRowInner(j) {
+  const id = j.id;
+  const m = JST[j.status] || ['pill-unknown', j.status];
+  const dis = ok => ok ? '' : ' disabled';
+  return '<td><input type="checkbox" class="form-check-input job-cb" value="' + id + '" onclick="updateSel()"></td>' +
     '<td>' + id + '</td>' +
-    '<td class="small">' + (name || '') + '</td>' +
+    '<td class="small">' + esc(j.name) + '</td>' +
     '<td><div class="progress" style="height:6px">' +
-      '<div class="progress-bar" data-bar role="progressbar" style="width:0%"></div>' +
-      '</div><span class="text-muted small" data-stage>chờ…</span></td>' +
-    '<td><span class="pill pill-queued" data-st>chờ</span></td>' +
+      '<div class="progress-bar" data-bar role="progressbar" style="width:' + (j.progress || 0) + '%"></div>' +
+      '</div><span class="text-muted small" data-stage>' +
+      esc(j.error ? ('Lỗi: ' + j.error) : (j.stage || '')) + '</span></td>' +
+    '<td><span class="pill ' + m[0] + '" data-st>' + esc(m[1]) + '</span></td>' +
     '<td class="text-end text-nowrap">' +
-      '<a class="btn btn-sm btn-outline-success disabled" data-play href="#" ' +
+      '<a class="btn btn-sm btn-outline-success' + dis(j.has_mp4) + '" data-play href="#" ' +
         'onclick="playJob(' + id + ');return false;" title="Xem thử"><i class="bi bi-play-circle"></i></a> ' +
       '<a class="btn btn-sm btn-outline-info" href="#" ' +
         'onclick="showStoryboard(' + id + ');return false;" title="Ảnh các cảnh"><i class="bi bi-images"></i></a> ' +
       '<a class="btn btn-sm btn-outline-secondary" href="#" ' +
         'onclick="showJobLog(' + id + ');return false;" title="Log"><i class="bi bi-terminal"></i></a> ' +
-      '<a class="btn btn-sm btn-outline-primary disabled" data-mp4 href="' + mp4Url(id) + '" title="Tải MP4"><i class="bi bi-filetype-mp4"></i></a> ' +
-      '<a class="btn btn-sm btn-outline-secondary disabled" data-srt href="' + srtUrl(id) + '" title="Tải SRT"><i class="bi bi-badge-cc"></i></a> ' +
+      '<a class="btn btn-sm btn-outline-primary' + dis(j.has_mp4) + '" data-mp4 href="' + mp4Url(id) + '" title="Tải MP4"><i class="bi bi-filetype-mp4"></i></a> ' +
+      '<a class="btn btn-sm btn-outline-secondary' + dis(j.has_srt) + '" data-srt href="' + srtUrl(id) + '" title="Tải SRT"><i class="bi bi-badge-cc"></i></a> ' +
       '<form class="d-inline" method="post" action="/tools/video/jobs/' + id + '/delete" ' +
         'data-confirm="Xoá tác vụ #' + id + '?"><button class="btn btn-sm btn-outline-danger" title="Xoá">×</button></form>' +
     '</td>';
-  document.getElementById('jobBody').prepend(tr);
-  updateSel();
+}
+
+// Update an existing row's live fields (progress / stage / status / buttons).
+function updateJobRow(tr, j) {
+  const bar = tr.querySelector('[data-bar]');
+  if (bar) bar.style.width = (j.progress || 0) + '%';
+  const stage = tr.querySelector('[data-stage]');
+  if (stage) stage.textContent = j.error ? ('Lỗi: ' + j.error) : (j.stage || '');
+  const pill = tr.querySelector('[data-st]');
+  if (pill) { const m = JST[j.status] || ['pill-unknown', j.status];
+    pill.className = 'pill ' + m[0]; pill.textContent = m[1]; }
+  const play = tr.querySelector('[data-play]');
+  if (play) play.classList.toggle('disabled', !j.has_mp4);
+  const mp4 = tr.querySelector('[data-mp4]');
+  if (mp4) mp4.classList.toggle('disabled', !j.has_mp4);
+  const srt = tr.querySelector('[data-srt]');
+  if (srt) srt.classList.toggle('disabled', !j.has_srt);
 }
 
 // ---- multi-select + bulk delete -----------------------------------------
@@ -508,13 +552,16 @@ function toggleAll(box) {
 function bulkDelete(all) {
   const ids = selectedIds();
   if (!all && ids.length === 0) return;
-  const msg = all ? 'Xoá TẤT CẢ tác vụ video?' : ('Xoá ' + ids.length + ' tác vụ đã chọn?');
+  const un = taskUser();
+  const scope = un ? ('trong kho “' + un + '”') : 'công khai';
+  const msg = all ? ('Xoá TẤT CẢ tác vụ video ' + scope + '?')
+                  : ('Xoá ' + ids.length + ' tác vụ đã chọn?');
   const ask = window.confirmModal ? confirmModal(msg) : Promise.resolve(window.confirm(msg));
   ask.then(ok => { if (ok) doBulkDelete(all, ids); });
 }
 function doBulkDelete(all, ids) {
   const body = new FormData();
-  if (all) body.append('all', '1');
+  if (all) { body.append('all', '1'); body.append('username', taskUser()); }
   else ids.forEach(id => body.append('ids', id));
   const selBtn = document.getElementById('delSelBtn');
   const allBtn = document.getElementById('delAllBtn');
@@ -545,28 +592,65 @@ function doBulkDelete(all, ids) {
 }
 window.toggleAll = toggleAll; window.updateSel = updateSel; window.bulkDelete = bulkDelete;
 
-function pollJobs() {
-  fetch('{{ url_for("video_jobs_json") }}')
-    .then(r => r.json())
-    .then(d => d.jobs.forEach(j => {
-      const row = document.getElementById('vjob-' + j.id);
-      if (!row) return;
-      const bar = row.querySelector('[data-bar]');
-      if (bar) bar.style.width = (j.progress || 0) + '%';
-      const stage = row.querySelector('[data-stage]');
-      if (stage) stage.textContent = j.error ? ('Lỗi: ' + j.error) : (j.stage || '');
-      const pill = row.querySelector('[data-st]');
-      if (pill) { const m = JST[j.status] || ['pill-unknown', j.status];
-        pill.className = 'pill ' + m[0]; pill.textContent = m[1]; }
-      const play = row.querySelector('[data-play]');
-      if (play) play.classList.toggle('disabled', !j.has_mp4);
-      const mp4 = row.querySelector('[data-mp4]');
-      if (mp4) mp4.classList.toggle('disabled', !j.has_mp4);
-      const srt = row.querySelector('[data-srt]');
-      if (srt) srt.classList.toggle('disabled', !j.has_srt);
-    }))
-    .finally(() => setTimeout(pollJobs, 2500));
+// Reconcile the table to the jobs in the CURRENT namespace: drop rows that left,
+// add ones that appeared, update the rest — and keep them in created_at-DESC order.
+function renderJobs(jobs) {
+  const body = document.getElementById('jobBody');
+  const want = new Set(jobs.map(j => String(j.id)));
+  body.querySelectorAll('tr[id^="vjob-"]').forEach(tr => {
+    if (!want.has(tr.id.slice(5))) tr.remove();
+  });
+  const noJob = document.getElementById('noJob');
+  if (!jobs.length) {
+    if (!noJob) body.innerHTML =
+      '<tr id="noJob"><td colspan="6" class="text-muted">Chưa có tác vụ nào.</td></tr>';
+    updateSel();
+    return;
+  }
+  if (noJob) noJob.remove();
+  jobs.forEach(j => {
+    let tr = document.getElementById('vjob-' + j.id);
+    if (!tr) {
+      tr = document.createElement('tr');
+      tr.id = 'vjob-' + j.id;
+      tr.innerHTML = jobRowInner(j);
+    } else {
+      updateJobRow(tr, j);
+    }
+    body.appendChild(tr);   // re-append in order → DOM matches the DESC sort
+  });
+  updateSel();
 }
+
+function reloadJobs() {
+  return fetch(jobsUrl())
+    .then(r => r.json())
+    .then(d => renderJobs(d.jobs || []))
+    .catch(() => {});
+}
+
+function pollJobs() {
+  reloadJobs().finally(() => setTimeout(pollJobs, 2500));
+}
+
+// Switching username re-scopes the whole list immediately. Debounced so typing
+// doesn't fire a request per keystroke; persisted locally for convenience.
+let userTimer = null;
+function onUserChange() {
+  updateUserHint();
+  try { localStorage.setItem('hosta100:videoUser', taskUser()); } catch (e) {}
+  if (userTimer) clearTimeout(userTimer);
+  userTimer = setTimeout(reloadJobs, 350);
+}
+taskUserEl.addEventListener('input', onUserChange);
+document.getElementById('clearUserBtn').addEventListener('click', function () {
+  taskUserEl.value = ''; onUserChange(); taskUserEl.focus();
+});
+try {
+  const saved = localStorage.getItem('hosta100:videoUser');
+  if (saved) taskUserEl.value = saved;
+} catch (e) {}
+updateUserHint();
 pollJobs();
 
 function btnBusy(btn, label) {
@@ -616,16 +700,21 @@ if (jobForm) {
     const btn = document.getElementById('jobSubmitBtn');
     btnBusy(btn, 'Đang gửi…');
     if (window.Loader) Loader.start();
+    // The username field lives in the task-list card (outside this form), so add it
+    // explicitly — that's the namespace the new video is filed under.
+    const body = new FormData(jobForm);
+    body.set('username', taskUser());
     fetch(jobForm.action, {
-      method: 'POST', headers: { 'X-Requested-With': 'fetch' },
-      body: new FormData(jobForm),
+      method: 'POST', headers: { 'X-Requested-With': 'fetch' }, body,
     })
       .then(r => r.json())
       .then(d => {
         if (d.ok) {
-          makeJobRow(d.id, d.name);
           jobForm.querySelector('[name="script"]').value = '';
-          toast('Đã bắt đầu dựng video.', 'success');
+          reloadJobs();
+          const un = taskUser();
+          toast(un ? ('Đã bắt đầu dựng video vào kho “' + un + '”.')
+                   : 'Đã bắt đầu dựng video (kho công khai).', 'success');
         } else { toast(d.error || 'Không tạo được.', 'danger'); }
       })
       .catch(() => toast('Lỗi kết nối.', 'danger'))

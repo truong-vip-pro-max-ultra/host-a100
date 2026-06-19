@@ -1096,6 +1096,7 @@ def video_job_submit():
             image_batch=f.get("image_batch", ""),
             voice_batch=f.get("voice_batch", ""),
             voice_speed=f.get("voice_speed", "1.0"),
+            owner=f.get("username", ""),
         )
         if wants_json:
             return jsonify({"ok": True, "id": job_id,
@@ -1111,7 +1112,7 @@ def video_job_submit():
 @app.route("/tools/video/jobs.json")
 def video_jobs_json():
     out = []
-    for j in video_pipeline.list_jobs():
+    for j in video_pipeline.list_jobs(request.args.get("username")):
         out.append({
             "id": j["id"], "name": j["name"], "status": j["status"],
             "progress": j["progress"], "stage": j.get("stage"),
@@ -1240,7 +1241,8 @@ def video_jobs_bulk_delete():
     wants_json = (request.headers.get("X-Requested-With") == "fetch"
                   or "application/json" in request.headers.get("Accept", ""))
     if request.form.get("all") == "1":
-        deleted = video_pipeline.bulk_delete(all_jobs=True)
+        deleted = video_pipeline.bulk_delete(all_jobs=True,
+                                             owner=request.form.get("username"))
     else:
         deleted = video_pipeline.bulk_delete(ids=request.form.getlist("ids"))
     if wants_json:
