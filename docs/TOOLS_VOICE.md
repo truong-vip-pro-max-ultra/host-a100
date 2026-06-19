@@ -203,8 +203,12 @@ mặc định khoá theo `(seed, instruct)`.
 ## Hiệu năng
 
 - **GPU (OmniVoice / L40S):** server bật `fp16` + `TF32` (`allow_tf32`,
-  `set_float32_matmul_precision("high")`) + `cudnn.benchmark`, và xin `8 CPU +
-  32G` + `OMP/MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK` để không nghẽn phần CPU.
+  `set_float32_matmul_precision("high")`) + `cudnn.benchmark`. Mặc định chỉ xin
+  **`2 CPU + 16G`** (`_VOICE_DEFAULT_CPUS`/`_MEM`) — sinh giọng/ảnh là GPU-bound
+  nên ít CPU gần như không chậm, mà các node GPU ở cluster này thường **cạn CPU**
+  (GPU trống nhưng cạnh chỉ 0–2 CPU rảnh), nên xin 8 CPU làm job treo `Priority`
+  hàng giờ dù còn GPU. `OMP/MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK`. Cần nhiều CPU
+  hơn: đặt `HOSTA100_SLURM_CPUS`/`_MEM`.
 - **Batch GPU thật (ăn VRAM tối đa) — chỉnh ngay trên form, KHÔNG cần recreate:**
   ô **"Số đoạn xử lý cùng lúc (batch GPU)"** ở form Tạo giọng đọc quyết định số
   đoạn nạp vào GPU trong MỘT lần generate. Tăng (12–24) = ăn nhiều VRAM L40S +
@@ -254,7 +258,7 @@ Tất cả có default hợp lý — chỉ đặt khi cần đổi. Sửa thẳn
 | `HOSTA100_OMNI_BATCH` | `OMNI_BATCH_ENABLED` | `1` | `0` = tắt hẳn batch GPU ở server (cần recreate) |
 | `HOSTA100_OMNI_STAGE_LOCAL` | `OMNI_STAGE_LOCAL` | `1` | `0` = tắt stage venv về ổ local (chạy thẳng NFS, chậm). Cần tarball `envs/<env>.tar.gz` |
 | `HOSTA100_FFMPEG` / `HOSTA100_FFPROBE` | — | dò PATH / `ffmpeg/` | Đường dẫn ffmpeg/ffprobe trên login node |
-| `HOSTA100_SLURM_CPUS` / `_MEM` | `SLURM_CPUS`/`_MEM` | `8` / `32G` (riêng voice) | CPU/RAM xin cho server giọng nói |
+| `HOSTA100_SLURM_CPUS` / `_MEM` | `SLURM_CPUS`/`_MEM` | `2` / `16G` (riêng voice) | CPU/RAM xin cho server giọng nói. Để thấp để chen được vào node GPU đang cạn CPU; tăng nếu cần CPU nhiều hơn (vd FLUX ~32–48G) |
 
 Tham số **mỗi lần tạo** (trên UI, không phải env): giọng (mặc định/clone),
 `num_step` 8–32, `seed`, tốc độ 0.5–2.0×, số đoạn batch GPU. (Không có nút khử
@@ -274,6 +278,8 @@ nhiễu — audio TTS vốn sạch; nhiễu mép đoạn đã tự khử. Pipeli
 |---|---|---|
 | **Server nạp model mãi không xong / cứ ở loading** (nhất là A40) | `import torch/omnivoice` từ venv trên NFS quá chậm (~9 phút, "bão stat") | Tạo tarball venv (mục "Tăng tốc nạp model") để stage về ổ local → import ~4s. Kiểm `server.log`: `dùng venv local` = đã stage; `staging thất bại`/`zstd thiếu` = đang chạy NFS chậm |
 | Đã tạo tarball nhưng vẫn chậm | Server cũ chạy bằng `run.sh` cũ; hoặc tarball chưa nén (5.7GB đọc 8 phút) | **Dừng + Khởi động lại** server (run.sh sinh lại lúc submit); nén tarball (`pigz`/`gzip`) |
+| Server bind xong, `/health` mãi `ready:false`, log có `UnicodeEncodeError: 'latin-1'` | Console node latin-1 → một `print()` có ký tự non-ASCII làm chết luồng nạp model TRƯỚC khi nạp xong | Đã vá: run.sh đặt `PYTHONUTF8=1` + server reconfigure stdout utf-8 (commit). **Recreate server**; giữ print trong `omnivoice_server.py` ASCII |
+| Treo `Priority` dù dashboard báo còn GPU trống | Node GPU trống nhưng **cạn CPU** (chỉ 0–2 CPU rảnh) → job 8-CPU không nhét vừa | Hạ CPU/RAM (`HOSTA100_SLURM_CPUS=2`/`_MEM=16G`, đã là mặc định mới); kiểm `sinfo -p main-gpu -N -o "%n %t %G %C"` |
 | Job treo `PD (QOSMaxGRESPerUser)` | Quota GPU/user (vd 2) đã hết — server khác đang giữ | Dừng bớt 1 server GPU (API farm/voice). Bạn chạy tối đa N GPU job cùng lúc |
 | Treo dù còn GPU trống | Ghim loại GPU (`--constraint`) mà loại đó bận; hoặc `--time` vượt giới hạn node | Chọn "Bất kỳ GPU rảnh"; hạ "Thời lượng tối đa" |
 | `Cannot find … cached snapshot … offline` (giọng **mặc định**) | Weights chính chưa cache | Chạy `scripts/warmup_omnivoice.py` (Bước 2) |

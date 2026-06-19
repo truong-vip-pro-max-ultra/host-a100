@@ -146,9 +146,23 @@ nói**, reads a script into one seamless MP3 using **OmniVoice** on a GPU node
 adjust speed (pitch-preserving), auto-trim the per-chunk onset/edge noise,
 in-page audio preview, and a matching `.SRT`. It maxes the
 L40S with fp16 + TF32 and **true GPU batching** (`HOSTA100_OMNI_MAX_BATCH`,
-defensive fallback to per-utterance). Full setup (env via the requirements file,
-weights warmup for the offline HF cache, ffmpeg), all env/config knobs, a
-troubleshooting table and tests are in
+defensive fallback to per-utterance).
+
+**Fast model load (important):** the venv lives on the shared NFS, where importing
+torch/omnivoice cold is brutally slow (~9 min — an NFS metadata "stat storm"),
+which made the server look like it "hung at loading". So `run.sh` **stages the env
+to the node's local disk** (extracts a compressed tarball `host-a100-data/envs/<env>.tar.gz`
+to `$TMPDIR`, ~4 s import, reused across launches) and falls back to the NFS python
+if it can't (`HOSTA100_OMNI_STAGE_LOCAL`, default on). Build the tarball once on the
+login node (`tar -cf <env>.tar <env>` then `pigz`/`gzip` it). The server defaults to
+a small **2 CPU / 16G** SLURM request so it can slot onto GPU nodes that have a free
+GPU but only 0–2 idle CPUs (asking 8 CPU made it queue for hours with `Priority`
+even with GPUs free). Compute nodes may have a latin-1 console, so `run.sh` forces
+`PYTHONUTF8=1` and keep `omnivoice_server.py` prints ASCII (a stray `…` in a print
+once crashed the load thread and stuck `/health` at `ready:false`).
+
+Full setup (env via the requirements file, weights warmup for the offline HF cache,
+ffmpeg), all env/config knobs, a troubleshooting table and tests are in
 **[docs/TOOLS_VOICE.md](docs/TOOLS_VOICE.md)**.
 
 ## Tools — Gen video từ kịch bản
