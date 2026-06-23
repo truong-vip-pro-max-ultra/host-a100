@@ -309,6 +309,7 @@ nhiễu — audio TTS vốn sạch; nhiễu mép đoạn đã tự khử. Pipeli
 | Lỗi offline chỉ khi dùng **giọng clone** | Clone bỏ trống lời thoại → cần Whisper ASR chưa cache | Chạy warmup (cache cả ASR), **hoặc** điền ô "lời thoại mẫu" |
 | `OmniVoice produced empty audio` | Văn bản vô nghĩa (vd "Yyyy Yyyy…") → không có âm tiết | Dùng văn bản có nghĩa |
 | Cảnh báo vàng "không tìm thấy ffmpeg" | ffmpeg chưa có trên login node | Bước 3 (tải bản tĩnh vào `ffmpeg/`) |
+| **Mất chữ đầu đoạn / mất từ ngắn ("À", "Và", "Khi"…) / nghe vấp** | `strip_lead_blip` cắt nhầm từ mở đầu khi gỡ "tạch" onset của OmniVoice | Đã vá (commit `68a9631`): tách 2 ngưỡng — `-38dB` để TÌM blip, `-50dB` làm điểm DỪNG cắt (= sàn im lặng của ffmpeg), nên không bao giờ cắt vào âm trên -50dB kể cả từ nhẹ; chỉ cắt khi có khoảng lặng thật sau blip. **Recreate server** sau khi `git pull` |
 | `server.log`: `batch of N failed … falling back` | Bản omnivoice này không nhận list text | Vẫn chạy đúng (từng đoạn). Gửi log để chỉnh cách gọi batch, hoặc đặt `HOSTA100_OMNI_BATCH=0` |
 | Server `error` sau khi chết <60s nhiều lần | OOM hoặc thiếu env/weights | Xem `server.log`; hạ `OMNI_MAX_BATCH`/đổi GPU; kiểm tra env + warmup |
 
