@@ -152,16 +152,37 @@ def t5_strip_blip_keeps_short_word():
 
 def t6_strip_blip_no_blip_untouched():
     print("t6: strip_lead_blip leaves a clip with no leading blip untouched")
-    # Speech starts almost immediately, no short+gap blip pattern.
+    # Speech starts almost immediately (no real silence gap after) → not a blip.
     wav = np.concatenate([_silence(0.02), _tone(1.5)])
     out = ov.strip_lead_blip(wav)
     check("t6: untouched", len(out) == len(wav))
 
 
+def t7_strip_blip_keeps_quiet_word():
+    print("t7: strip_lead_blip keeps a QUIET opening word (the 'À' case)")
+    # blip (loud) → true silence → a soft interjection at ~-43 dB (between the
+    # -50 LOW and -38 HIGH thresholds) → silence → rest. The quiet word must
+    # survive: the old single-threshold version cut straight through it.
+    blip = _tone(0.11, amp=0.3)
+    quiet = _tone(0.15, amp=0.01)            # ≈ -43 dB: audible but below -38
+    rest = _tone(0.8, amp=0.3)
+    wav = np.concatenate([blip, _silence(0.08), quiet, _silence(0.05), rest])
+    out = ov.strip_lead_blip(wav)
+    secs = len(out) / float(ov.SR)
+    check("t7: blip removed", len(out) < len(wav), f"{secs:.2f}s")
+    # blip(0.11)+gap(0.08) ≈ 0.19s removed; quiet(0.15)+0.05+rest(0.8) ≈ 1.0s kept.
+    check("t7: quiet word kept (≥0.95s remains)", secs >= 0.95, f"{secs:.2f}s")
+    # And the quiet word really is near the FRONT of the surviving audio (its low
+    # energy sits in the first ~0.2s), proving we didn't cut through it.
+    head = out[:int(0.05 * ov.SR)]
+    check("t7: surviving audio starts with the quiet word (low energy head)",
+          float(np.sqrt((head ** 2).mean())) < 0.05)
+
+
 if __name__ == "__main__":
     for fn in (t1_batched_path, t2_fallback_on_raise, t3_reject_wrong_count,
                t4_batch_disabled, t5_strip_blip_keeps_short_word,
-               t6_strip_blip_no_blip_untouched):
+               t6_strip_blip_no_blip_untouched, t7_strip_blip_keeps_quiet_word):
         fn()
     print()
     if FAILS:

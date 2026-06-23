@@ -86,19 +86,24 @@ def wav_duration(path):
 
 
 def strip_lead_blip(wav, sr=SR):
-    """Remove OmniVoice's fixed-position onset blip (~0.11s in, <0.18s long).
+    """Remove OmniVoice's fixed-position onset blip WITHOUT ever eating speech.
 
-    The blip is a SINGLE short burst at the very top of the clip, separated from
-    the real speech by a brief pause. We strip ONLY that first burst — and only
-    when it is short, begins right at the start, and is followed by a clear
-    silence gap — then cut to just before the next region. We never drop a later
-    region, so a short opening word (very common in monosyllabic Vietnamese:
-    "Và", "Khi", "Rồi", "Nhưng"…) is always kept.
+    The blip is a single short transient at the very top of every clip, separated
+    from the real speech by a brief pause. We find it as the first burst above a
+    HIGH threshold (-38 dB) that begins within 0.2 s and is short (<0.18 s). We
+    then trim ONLY the blip plus the genuinely-silent gap after it: the cut stops
+    the instant the signal rises back above a LOW threshold (-50 dB — the same
+    floor the login-node concat treats as audio), so even a soft opening word or
+    interjection (a quiet "À", "Ờ", "Ừ"…) that sits between -50 and -38 dB is
+    always kept. We also require a real silence gap after the burst, so a clip
+    that opens straight into speech (no blip, or the blip fused with the first
+    word) is returned untouched rather than clipped.
 
-    The previous version looped and treated EVERY short voiced burst in the first
-    0.65s as a blip, which swallowed short leading words → lost first word / a
-    "stuttery" join. Defensive: returns the audio untouched on any oddity so we
-    never risk eating speech.
+    Two earlier versions failed here: the original looped and dropped EVERY short
+    voiced burst in the first 0.65 s (swallowed short leading words); the next
+    used a single -38 dB threshold that classified a quiet leading word as
+    silence and cut through it. Defensive: returns the audio unchanged on any
+    oddity so we never risk eating speech.
     """
     try:
         import numpy as np
@@ -108,34 +113,33 @@ def strip_lead_blip(wav, sr=SR):
         hop = max(1, int(0.01 * sr))
         rms = np.array([np.sqrt((a[j:j + hop] ** 2).mean() + 1e-12)
                         for j in range(0, len(a) - hop, hop)])
-        db = 20.0 * np.log10(rms + 1e-9)
-        voiced = db > -38.0
-        regions = []
-        k = 0
-        while k < len(voiced):
-            if voiced[k]:
-                st = k
-                while k < len(voiced) and voiced[k]:
-                    k += 1
-                regions.append((st, k))
-            else:
-                k += 1
-        # Need a clear blip + speech split; a single region is just speech (which
-        # may itself be a short opening word) — leave it untouched.
-        if len(regions) < 2:
+        if rms.size < 3:
             return wav
+        db = 20.0 * np.log10(rms + 1e-9)
+        HI, LO = -38.0, -50.0               # detect-the-blip vs. keep-the-audio
         blip_start_max = int(0.20 / 0.01)   # blip must begin within 0.20s
         blip_max = int(0.18 / 0.01)         # …and be shorter than 0.18s
-        gap_min = int(0.06 / 0.01)          # …with ≥60ms of silence after it
-        lead = int(0.04 / 0.01)             # keep 40ms before the first word
-        st0, en0 = regions[0]
-        st1 = regions[1][0]
-        is_blip = (st0 <= blip_start_max
-                   and (en0 - st0) < blip_max
-                   and (st1 - en0) >= gap_min)
-        if not is_blip:
-            return wav
-        cut_frame = max(en0, st1 - lead)
+        gap_min = int(0.05 / 0.01)          # …with ≥50ms of TRUE silence after it
+        lead = int(0.03 / 0.01)             # keep 30ms before audio resumes
+        above = np.nonzero(db > HI)[0]
+        if above.size == 0:
+            return wav                       # nothing loud enough to be the blip
+        st0 = int(above[0])
+        if st0 > blip_start_max:
+            return wav                       # first loud thing isn't at the top
+        en0 = st0
+        while en0 < len(db) and db[en0] > HI:
+            en0 += 1
+        if (en0 - st0) >= blip_max:
+            return wav                       # too long to be a blip → it's speech
+        # Walk past the genuinely-silent gap; STOP the moment audio (> LO) resumes
+        # so we never cut into a quiet word.
+        j = en0
+        while j < len(db) and db[j] <= LO:
+            j += 1
+        if (j - en0) < gap_min or j >= len(db):
+            return wav                       # no real pause → speech, leave it
+        cut_frame = max(en0, j - lead)
         cut = int(cut_frame * hop)
         if cut <= 0 or cut > int(1.0 * sr):
             return wav
