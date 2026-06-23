@@ -124,8 +124,44 @@ def t4_batch_disabled():
     check("t4: no list calls", not any(isinstance(c, list) for c in m.calls))
 
 
+def _silence(secs):
+    return np.zeros(int(ov.SR * secs), dtype=np.float32)
+
+
+def _tone(secs, amp=0.3):
+    n = int(ov.SR * secs)
+    t = np.arange(n) / float(ov.SR)
+    return (amp * np.sin(2 * np.pi * 180.0 * t)).astype(np.float32)
+
+
+def t5_strip_blip_keeps_short_word():
+    print("t5: strip_lead_blip drops the blip but KEEPS a short opening word")
+    # blip (0.11s) → pause → short word "Và" (0.12s) → pause → rest of speech.
+    blip = _tone(0.11)
+    short_word = _tone(0.12)
+    rest = _tone(1.0)
+    wav = np.concatenate([blip, _silence(0.10), short_word,
+                          _silence(0.10), rest])
+    out = ov.strip_lead_blip(wav)
+    # The blip (~0.11s + 0.10s pause ≈ 0.21s) is removed; everything from the
+    # short word on (≈ 0.12 + 0.10 + 1.0 ≈ 1.22s) survives.
+    secs = len(out) / float(ov.SR)
+    check("t5: blip removed (clip got shorter)", len(out) < len(wav), f"{secs:.2f}s")
+    check("t5: short word kept (≥1.2s remains)", secs >= 1.2, f"{secs:.2f}s")
+
+
+def t6_strip_blip_no_blip_untouched():
+    print("t6: strip_lead_blip leaves a clip with no leading blip untouched")
+    # Speech starts almost immediately, no short+gap blip pattern.
+    wav = np.concatenate([_silence(0.02), _tone(1.5)])
+    out = ov.strip_lead_blip(wav)
+    check("t6: untouched", len(out) == len(wav))
+
+
 if __name__ == "__main__":
-    for fn in (t1_batched_path, t2_fallback_on_raise, t3_reject_wrong_count, t4_batch_disabled):
+    for fn in (t1_batched_path, t2_fallback_on_raise, t3_reject_wrong_count,
+               t4_batch_disabled, t5_strip_blip_keeps_short_word,
+               t6_strip_blip_no_blip_untouched):
         fn()
     print()
     if FAILS:

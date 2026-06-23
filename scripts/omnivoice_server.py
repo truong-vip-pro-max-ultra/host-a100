@@ -86,11 +86,19 @@ def wav_duration(path):
 
 
 def strip_lead_blip(wav, sr=SR):
-    """Remove OmniVoice's fixed-position onset blip (~0.11s, <0.18s long).
+    """Remove OmniVoice's fixed-position onset blip (~0.11s in, <0.18s long).
 
-    Drops short voiced bursts in the first ~0.65s, keeps from the first real
-    speech region. Defensive: returns the audio untouched on any oddity so we
-    never risk eating speech. (Ported verbatim from clone-voice.)
+    The blip is a SINGLE short burst at the very top of the clip, separated from
+    the real speech by a brief pause. We strip ONLY that first burst — and only
+    when it is short, begins right at the start, and is followed by a clear
+    silence gap — then cut to just before the next region. We never drop a later
+    region, so a short opening word (very common in monosyllabic Vietnamese:
+    "Và", "Khi", "Rồi", "Nhưng"…) is always kept.
+
+    The previous version looped and treated EVERY short voiced burst in the first
+    0.65s as a blip, which swallowed short leading words → lost first word / a
+    "stuttery" join. Defensive: returns the audio untouched on any oddity so we
+    never risk eating speech.
     """
     try:
         import numpy as np
@@ -112,21 +120,24 @@ def strip_lead_blip(wav, sr=SR):
                 regions.append((st, k))
             else:
                 k += 1
-        if not regions:
+        # Need a clear blip + speech split; a single region is just speech (which
+        # may itself be a short opening word) — leave it untouched.
+        if len(regions) < 2:
             return wav
-        blip_zone = int(0.65 / 0.01)
-        blip_max = int(0.18 / 0.01)
-        lead = int(0.06 / 0.01)
-        last_blip_end = 0
-        cut_frame = 0
-        for st, en in regions:
-            if st < blip_zone and (en - st) < blip_max:
-                last_blip_end = en
-                continue
-            cut_frame = max(last_blip_end, st - lead)
-            break
+        blip_start_max = int(0.20 / 0.01)   # blip must begin within 0.20s
+        blip_max = int(0.18 / 0.01)         # …and be shorter than 0.18s
+        gap_min = int(0.06 / 0.01)          # …with ≥60ms of silence after it
+        lead = int(0.04 / 0.01)             # keep 40ms before the first word
+        st0, en0 = regions[0]
+        st1 = regions[1][0]
+        is_blip = (st0 <= blip_start_max
+                   and (en0 - st0) < blip_max
+                   and (st1 - en0) >= gap_min)
+        if not is_blip:
+            return wav
+        cut_frame = max(en0, st1 - lead)
         cut = int(cut_frame * hop)
-        if cut <= 0 or cut > int(2.0 * sr):
+        if cut <= 0 or cut > int(1.0 * sr):
             return wav
         return a[cut:]
     except Exception:
